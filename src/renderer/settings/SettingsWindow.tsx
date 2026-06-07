@@ -41,8 +41,8 @@ const SECTIONS: { titleKey: StringKey; id: string; component: ComponentType }[] 
   { titleKey: 'settings.section.sidebar', id: 'sidebar', component: SidebarSettings },
   { titleKey: 'settings.section.fileExplorer', id: 'file-explorer', component: FileExplorerSettings },
   { titleKey: 'settings.section.notifications', id: 'notifications', component: NotificationSettings },
-  { titleKey: 'settings.section.providers' as StringKey, id: 'providers', component: ProvidersSettings },
-  { titleKey: 'settings.section.skills' as StringKey, id: 'skills', component: SkillsSettings },
+  { titleKey: 'settings.section.providers', id: 'providers', component: ProvidersSettings },
+  { titleKey: 'settings.section.skills', id: 'skills', component: SkillsSettings },
   { titleKey: 'settings.section.updates', id: 'updates', component: UpdatesSettings },
   { titleKey: 'settings.section.shortcuts', id: 'shortcuts', component: ShortcutSettings },
 ]

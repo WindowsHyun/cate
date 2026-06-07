@@ -13,6 +13,8 @@ const strings = {
   'settings.section.fileExplorer': { en: 'File Explorer', ko: '파일 탐색기' },
   'settings.section.shortcuts': { en: 'Shortcuts', ko: '단축키' },
   'settings.section.notifications': { en: 'Notifications', ko: '알림' },
+  'settings.section.providers': { en: 'Providers', ko: '공급자' },
+  'settings.section.skills': { en: 'Skills', ko: '스킬' },
   'settings.section.updates': { en: 'Updates', ko: '업데이트' },
 
   // General settings
