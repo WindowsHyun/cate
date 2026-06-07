@@ -8,10 +8,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { StoreApi } from 'zustand'
 import type { DockTabStack as DockTabStackType, PanelState, PanelType } from '../../shared/types'
 import { createTransferSnapshot } from '../lib/panelTransfer'
+import { removeDetachedPanelRecords } from '../lib/canvas/removeDetachedPanelRecords'
 import { terminalRegistry } from '../lib/terminal/terminalRegistry'
 import { useAppStore } from '../stores/appStore'
 import type { DockStore } from '../stores/dockStore'
 import { getPanelDef } from '../panels/registry'
+import { setActivePanel } from '../lib/activePanel'
 
 export interface DockTabActionsParams {
   stack: DockTabStackType
@@ -79,16 +81,32 @@ export function useDockTabActions(params: DockTabActionsParams) {
     async (panelId: string) => {
       const panel = getPanelLocal(panelId)
       if (!panel) return
+      const wsId = workspaceId ?? useAppStore.getState().selectedWorkspaceId
+      const sourceWs = useAppStore.getState().workspaces.find((w) => w.id === wsId)
       const snapshot = createTransferSnapshot(
         panel,
         { type: 'dock', zone, stackId: stack.id },
         { origin: { x: 100, y: 100 }, size: { width: 800, height: 600 } },
+        {
+          // A canvas tab carries its children; without this the new window
+          // renders them as generic "Panel" stubs (mirrors the drag path).
+          resolveChildPanel: (childId: string) => sourceWs?.panels[childId],
+          workspaceRootPath: sourceWs?.rootPath || undefined,
+        },
       )
+      // Detach FIRST — only tear down the source once the new window actually
+      // exists. dragDetach returns null when main refuses (e.g. macOS
+      // fullscreen); doing the undock/release before that check would orphan the
+      // panel (removed from the dock tree, xterm disposed) with nowhere to live.
+      const winId = await window.electronAPI.dragDetach(snapshot, wsId)
+      if (winId == null) return
       dockStoreApi.getState().undockPanel(panelId)
       if (panel.type === 'terminal') terminalRegistry.release(panelId)
       onPanelRemoved?.(panelId)
-      const wsId = workspaceId ?? useAppStore.getState().selectedWorkspaceId
-      await window.electronAPI.dragDetach(snapshot, wsId)
+      // Drop its record (and a canvas's children) from this workspace so every
+      // system — overview, command palette, session, counts — agrees it's no
+      // longer here. The receive side re-adds it on drop-back.
+      removeDetachedPanelRecords(wsId, panelId, panel.type)
     },
     [getPanelLocal, zone, stack.id, dockStoreApi, onPanelRemoved, workspaceId],
   )
@@ -223,8 +241,14 @@ export function useDockTabActions(params: DockTabActionsParams) {
   const handleTabClick = useCallback(
     (index: number) => {
       setActiveTab(stack.id, index)
+      // Make the clicked tab the canonical active panel. The stack's pointer-
+      // down capture already marked the OLD active tab; switching tabs must
+      // re-point it so placement/routing follow the tab the user just selected.
+      // mini-docks (localOnly) never touch the window-global active panel.
+      const panelId = stack.panelIds[index]
+      if (panelId && !localOnly) setActivePanel(panelId)
     },
-    [stack.id, setActiveTab],
+    [stack.id, stack.panelIds, setActiveTab, localOnly],
   )
 
   return {

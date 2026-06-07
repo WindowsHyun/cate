@@ -29,6 +29,7 @@ import { CateLogo } from '../../renderer/ui/CateLogo'
 import log from '../../renderer/lib/logger'
 import type { PanelProps } from '../../renderer/panels/types'
 import { useAppStore } from '../../renderer/stores/appStore'
+import { useUIStore } from '../../renderer/stores/uiStore'
 import { useStatusStore } from '../../renderer/stores/statusStore'
 import { useAgentStore } from './agentStore'
 import { buildFileMentions, type LineRef } from './agentDrop'
@@ -131,6 +132,10 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
   const followUpQueue = slice?.followUpQueue ?? []
   const extensionStatuses = slice?.extensionStatuses ?? []
   const extensionWidgets = slice?.extensionWidgets ?? []
+  // Composer draft lives in the active chat's slice so switching chats keeps
+  // each chat's own in-progress message + image attachments.
+  const draft = slice?.draft ?? ''
+  const draftImages = slice?.draftImages ?? []
 
   const uiRequests = slice?.uiRequests ?? []
   const currentUiRequest = uiRequests[0]
@@ -140,7 +145,6 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
     Array<{ provider: string; model: string; label?: string }>
   >([])
   const [view, setView] = useState<'chat' | 'settings'>('chat')
-  const [settingsScopedTo, setSettingsScopedTo] = useState<string | undefined>(undefined)
   const [modelPickerOpen, setModelPickerOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
@@ -148,8 +152,6 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
    *  truth — no localStorage shadow list. */
   const [chats, setChats] = useState<AgentSessionListEntry[]>([])
   const [chatSearch, setChatSearch] = useState('')
-  const [draft, setDraft] = useState('')
-  const [draftImages, setDraftImages] = useState<AgentImageAttachment[]>([])
   const [commands, setCommands] = useState<AgentSlashCommand[]>([])
   /** Map of local user-message id → pi entryId, populated from getForkMessages
    *  so the hover "fork from here" button can find an entryId for messages we
@@ -184,6 +186,27 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
     })
   }, [])
 
+  // Draft setters that target the active chat's slice. Accept the same value /
+  // updater-function forms as a React state setter so call sites read unchanged.
+  const setDraft = useCallback((value: string | ((prev: string) => string)) => {
+    const key = activeAgentKey
+    if (!key) return
+    const prev = useAgentStore.getState().panels[key]?.draft ?? ''
+    const next = typeof value === 'function' ? value(prev) : value
+    useAgentStore.getState().setDraft(key, next)
+  }, [activeAgentKey])
+
+  const setDraftImages = useCallback(
+    (value: AgentImageAttachment[] | ((prev: AgentImageAttachment[]) => AgentImageAttachment[])) => {
+      const key = activeAgentKey
+      if (!key) return
+      const prev = useAgentStore.getState().panels[key]?.draftImages ?? []
+      const next = typeof value === 'function' ? value(prev) : value
+      useAgentStore.getState().setDraftImages(key, next)
+    },
+    [activeAgentKey],
+  )
+
   // ---------------------------------------------------------------------------
   // Auth/provider refresh
   // ---------------------------------------------------------------------------
@@ -200,16 +223,30 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
   useEffect(() => { refreshAuth() }, [refreshAuth])
   useEffect(() => { if (view === 'chat') refreshAuth() }, [view, refreshAuth])
 
-  const refreshModels = useCallback(async (key?: string) => {
-    const k = key ?? activeAgentKey
-    if (!k) return
+  const refreshModels = useCallback(async () => {
     try {
-      const piModels = await window.electronAPI.agentGetAvailableModels(k)
-      if (piModels.length > 0) {
-        setAvailableModels(piModels.map((m) => ({ provider: m.provider, model: m.id, label: m.id })))
-      }
-    } catch { /* session may not support this RPC */ }
-  }, [activeAgentKey])
+      const models = await window.electronAPI.agentListModels()
+      setAvailableModels(models.map((m) => ({ provider: m.provider, model: m.id, label: m.label })))
+    } catch (err) {
+      log.warn('[AgentPanel] listModels failed', err)
+    }
+  }, [])
+
+  useEffect(() => { void refreshModels() }, [refreshModels])
+
+  // Credentials can change anywhere (main Settings → Providers, another window,
+  // a token refresh). The main process broadcasts AUTH_CHANGED once the shared
+  // auth.json is mirrored into live sessions; re-fetch provider status + the
+  // model list so the picker and auto-pick reflect newly-connected providers
+  // without waiting for the next turn.
+  useEffect(() => {
+    if (!window.electronAPI?.onAuthChanged) return
+    const unsub = window.electronAPI.onAuthChanged(() => {
+      void refreshAuth()
+      void refreshModels()
+    })
+    return unsub
+  }, [refreshAuth, refreshModels])
 
   // ---------------------------------------------------------------------------
   // Chat list — sourced directly from pi's on-disk sessions for this cwd.
@@ -281,9 +318,10 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
       }
       markReady(key, true)
       // Pi's commands (skills + prompts + extensions) are only available once
-      // the RPC session is up. Fetch after a successful create.
+      // the RPC session is up. Fetch after a successful create. The model list
+      // is session-independent (read from auth.json), so it's fetched on mount
+      // via the effect below rather than here.
       void refreshCommands(key)
-      void refreshModels(key)
     } catch (err) {
       // Transient errors during rapid chat-switching are expected. Genuine
       // startup failures surface via the `if (!res.ok)` branch above.
@@ -370,8 +408,11 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
 
   const handleSend = useCallback(async () => {
     if (!activeAgentKey) return
-    const text = draft.trim()
-    const images = draftImages.slice()
+    // Read the draft straight from the active slice so we never send a stale
+    // closure value mid-stream.
+    const cur = useAgentStore.getState().panels[activeAgentKey]
+    const text = (cur?.draft ?? '').trim()
+    const images = (cur?.draftImages ?? []).slice()
     if (!text && images.length === 0) return
     const isSteering = running
     useAgentStore.getState().appendUser(activeAgentKey, isSteering ? `(steer) ${text}` : text)
@@ -387,7 +428,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
       const msg = err instanceof Error ? err.message : String(err)
       useAgentStore.getState().appendSystem(activeAgentKey, `Send failed: ${msg}`, 'error')
     }
-  }, [draft, draftImages, running, activeAgentKey])
+  }, [running, activeAgentKey, setDraft, setDraftImages])
 
   const handleInterrupt = useCallback(async () => {
     if (!activeAgentKey) return
@@ -528,9 +569,16 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
     [openChats],
   )
 
-  const openSettings = useCallback((providerId?: string) => {
-    setSettingsScopedTo(providerId)
+  // The agent panel's own settings (agents / prompts / skills / extensions).
+  const openSettings = useCallback(() => {
     setView('settings')
+  }, [])
+
+  // Provider sign-in now lives in the main Cate Settings (Providers section),
+  // not in the agent panel. Opening it there keeps a single source of truth for
+  // credentials, which are global and shared across all workspaces.
+  const openProviderSettings = useCallback(() => {
+    useUIStore.getState().openSettings('providers')
   }, [])
 
 
@@ -690,7 +738,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
       const msg = err instanceof Error ? err.message : String(err)
       useAgentStore.getState().appendSystem(key, `Fork failed: ${msg}`, 'error')
     }
-  }, [activeAgentKey, forkMap, refreshStatsAndState])
+  }, [activeAgentKey, forkMap, refreshStatsAndState, setDraft])
 
   // ---------------------------------------------------------------------------
   // Plan mode (cate-plan-mode extension)
@@ -753,11 +801,11 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
 
   const handleAddImage = useCallback((img: AgentImageAttachment) => {
     setDraftImages((prev) => [...prev, img])
-  }, [])
+  }, [setDraftImages])
 
   const handleRemoveImage = useCallback((idx: number) => {
     setDraftImages((prev) => prev.filter((_, i) => i !== idx))
-  }, [])
+  }, [setDraftImages])
 
   const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
     const items = e.clipboardData.items
@@ -816,7 +864,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
       const img = await readFileAsImage(file)
       if (img) handleAddImage(img)
     }
-  }, [handleAddImage])
+  }, [handleAddImage, setDraft])
 
   // ---------------------------------------------------------------------------
   // Render
@@ -843,7 +891,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
             const open = openChats.find((c) => c.sessionFile === sessionFile)
             if (open) handleCloseChat(open.agentKey)
           }}
-          onOpenSettings={() => openSettings(undefined)}
+          onOpenSettings={() => openSettings()}
           onCollapse={() => setSidebarOpen(false)}
           settingsActive={view === 'settings'}
         />
@@ -856,7 +904,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
           {!sidebarOpen && (
             <button
               onClick={() => setSidebarOpen(true)}
-              className="p-1.5 rounded-md text-muted hover:text-primary hover:bg-white/5"
+              className="p-1.5 rounded-md text-muted hover:text-primary hover:bg-hover"
               title="Open sidebar"
             >
               <SidebarIcon size={14} />
@@ -868,7 +916,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
               <button
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={() => { setModelPickerOpen((v) => { if (!v) void refreshModels(); return !v }) }}
-                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-primary hover:bg-white/5"
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-primary hover:bg-hover"
               >
                 <CateLogo size={12} className="text-agent-light" />
                 <span className="truncate max-w-[220px]">
@@ -882,7 +930,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
                   selected={selectedModel}
                   onPick={handlePickModel}
                   onClose={() => setModelPickerOpen(false)}
-                  onManage={() => { setModelPickerOpen(false); openSettings(undefined) }}
+                  onManage={() => { setModelPickerOpen(false); openProviderSettings() }}
                 />
               )}
             </div>
@@ -900,8 +948,6 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
             commands={commands}
             workspaceId={workspaceId}
             cwd={cwd}
-            scopedProviderId={settingsScopedTo}
-            availableModels={availableModels}
             onBack={() => setView('chat')}
             onRefresh={() => { if (activeAgentKey) void refreshCommands(activeAgentKey) }}
           />
@@ -913,7 +959,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
                   Connect <strong>{selectedModel.provider}</strong> to start.
                 </span>
                 <button
-                  onClick={() => openSettings(selectedModel.provider)}
+                  onClick={() => openProviderSettings()}
                   className="px-2 py-1 rounded-md bg-agent hover:bg-agent-light text-white text-[11px] font-medium shrink-0"
                 >
                   Connect

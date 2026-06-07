@@ -303,16 +303,18 @@ export function useCanvasInteraction(
         }
       }
 
-      // --- Physical mouse wheel over empty canvas / unfocused panel: zoom ---
-      // Exception: while the Hand tool (or Space-hold) is active, a mouse wheel
-      // scrolls/pans the canvas instead of zooming — falls through to the pan
-      // path below.
-      if (mouse && effectiveCanvasTool(useUIStore.getState()) !== 'hand') {
-        applyWheelZoom(e, true)
+      // --- Scroll over empty canvas / unfocused panel: tool decides ---
+      // In the Select (click) tool, a plain scroll zooms — for both a physical
+      // mouse wheel and a trackpad two-finger scroll (Miro-style). In the Hand
+      // (drag) tool, or while Space is held, it falls through to the pan path
+      // below instead. The `mouse` flag only picks the zoom feel: discrete
+      // notch vs. continuous delta-proportional.
+      if (effectiveCanvasTool(useUIStore.getState()) !== 'hand') {
+        applyWheelZoom(e, mouse)
         return
       }
 
-      // --- Otherwise: trackpad two-finger scroll pans the canvas ---
+      // --- Hand tool: scroll pans the canvas ---
       // Apply canvas-interacting class so iframes/webviews/monaco/xterm don't
       // eat hit-testing while panning. Remove it ~150ms after the wheel goes quiet.
       e.stopPropagation()
@@ -372,6 +374,21 @@ export function useCanvasInteraction(
         document.body.classList.add('canvas-interacting')
         e.preventDefault()
       } else if (e.button === 0) {
+        // During deferred ghost placement: a left-click that misses every ghost
+        // cancels placement (same as Esc), as long as free mode isn't armed —
+        // armed mode owns its own full-canvas surface and commits on click.
+        // Handled here on mousedown because empty canvas background never reaches
+        // the 1x1 world div that hosts the click-to-cancel fallback.
+        const placement = canvasStoreApi.getState().pendingPlacement
+        if (placement && !placement.freeArmed) {
+          const t = e.target as HTMLElement
+          if (!t.closest('[data-ghost-candidate]') && !t.closest('[data-placement-surface]')) {
+            canvasStoreApi.getState().cancelPlacement()
+            e.preventDefault()
+            return
+          }
+        }
+
         // Hand tool (or Space-hold): left-drag pans the canvas, even when the
         // press lands on a node (nodes let the event bubble here under Hand).
         // No context menu, no inertia, no marquee — just a straight pan.
@@ -391,11 +408,10 @@ export function useCanvasInteraction(
           return
         }
 
-        // Left-click on canvas background (not on a node/region) => marquee selection or clear
+        // Left-click on canvas background (not on a node) => marquee selection or clear
         const target = e.target as HTMLElement
         const isOnNode = target.closest('[data-node-id]') !== null
-        const isOnRegion = target.closest('[data-region-id]') !== null
-        if (!isOnNode && !isOnRegion) {
+        if (!isOnNode) {
           const rect = canvasRef.current?.getBoundingClientRect()
           if (!rect) return
           const { zoomLevel, viewportOffset } = canvasStoreApi.getState()
@@ -461,22 +477,16 @@ export function useCanvasInteraction(
             const mw = Math.abs(endCanvasX - startCanvasX)
             const mh = Math.abs(endCanvasY - startCanvasY)
 
-            const { nodes, regions } = canvasStoreApi.getState()
+            const { nodes } = canvasStoreApi.getState()
 
             const hitNodeIds = Object.values(nodes)
               .filter((n) => rectsIntersect(mx, my, mw, mh, n.origin.x, n.origin.y, n.size.width, n.size.height))
               .map((n) => n.id)
 
-            const hitRegionIds = Object.values(regions)
-              .filter((rg) => rectsIntersect(mx, my, mw, mh, rg.origin.x, rg.origin.y, rg.size.width, rg.size.height))
-              .map((rg) => rg.id)
-
-            // Must select both atomically — selectRegions overwrites selectedNodeIds
             if (!shiftHeld) {
               canvasStoreApi.getState().clearSelection()
             }
             canvasStoreApi.getState().selectNodes(hitNodeIds, true)
-            canvasStoreApi.getState().selectRegions(hitRegionIds, true)
           }
 
           window.addEventListener('mousemove', handleMarqueeMove)
@@ -531,7 +541,7 @@ export function useCanvasInteraction(
         // — but only if the click landed on empty canvas (not on a node).
         if (!rightClickDidDrag.current && rightClickStart.current) {
           const target = e.target as HTMLElement
-          const isOnInteractive = target.closest('[data-node-id]') !== null || target.closest('[data-region-id]') !== null || target.closest('[data-annotation-id]') !== null
+          const isOnInteractive = target.closest('[data-node-id]') !== null || target.closest('[data-annotation-id]') !== null
           if (!isOnInteractive) {
             const rect = canvasRef.current?.getBoundingClientRect()
             if (rect) {

@@ -13,6 +13,7 @@
 import type { DockLayoutNode } from '../../../shared/types'
 import { useAppStore } from '../../stores/appStore'
 import { getOrCreateCanvasStoreForPanel } from '../../stores/canvasStore'
+import { getNodeDockLayout } from '../workspace/canvasAccess'
 
 /** Walk a per-node dock layout tree and collect every panelId inside it. */
 function collectPanelIds(layout: DockLayoutNode | null | undefined): string[] {
@@ -43,7 +44,9 @@ export async function confirmCloseCanvas(
   const sourceNodes = Object.values(sourceStore.getState().nodes)
   const contained: Array<{ panelId: string; origin: { x: number; y: number } }> = []
   for (const node of sourceNodes) {
-    const layoutPanels = collectPanelIds(node.dockLayout ?? null)
+    // Read the live mini-dock layout when the node is mounted (the resolver
+    // falls back to the persisted node.dockLayout projection otherwise).
+    const layoutPanels = collectPanelIds(getNodeDockLayout(canvasPanelId, node.id))
     const panelIds = layoutPanels.length > 0 ? layoutPanels : [node.panelId]
     for (const pid of panelIds) {
       if (ws.panels[pid]) contained.push({ panelId: pid, origin: node.origin })
@@ -58,7 +61,17 @@ export async function confirmCloseCanvas(
   })
 
   if (choice === 'cancel') return false
-  if (choice === 'close') return true // last or empty canvas — plain close
+
+  if (choice === 'close') {
+    // Last or empty canvas. Close any panels it contains too — they live ON
+    // this canvas, so letting them outlive it leaves orphans that render as
+    // ghost rows in the sidebar and aren't shown on any canvas. (Empty canvas
+    // → `contained` is empty → no-op.)
+    for (const { panelId } of contained) {
+      try { appState.closePanel(workspaceId, panelId) } catch { /* continue */ }
+    }
+    return true
+  }
 
   if (choice === 'delete') {
     // Close every panel living on this canvas. The canvas panel itself will be

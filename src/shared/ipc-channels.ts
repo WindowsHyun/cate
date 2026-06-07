@@ -98,6 +98,12 @@ export const SETTINGS_OPEN_IN_EDITOR = 'settings:openInEditor'
 // file directly). Carries the full settings object so renderers merge live.
 export const SETTINGS_RELOADED = 'settings:reloaded' // main -> renderer (broadcast)
 
+// UI state — transient cosmetic UI placement (minimap position/size) persisted
+// to <userData>/ui-state.json. Kept out of settings.json so the user-facing
+// settings file stays focused on preferences.
+export const UI_STATE_GET_ALL = 'uiState:getAll' // renderer -> main
+export const UI_STATE_SET = 'uiState:set'        // renderer -> main
+
 // Session
 export const SESSION_FLUSH_SAVE = 'session:flushSave' // main -> renderer
 export const SESSION_FLUSH_SAVE_DONE = 'session:flushSaveDone' // renderer -> main
@@ -123,12 +129,6 @@ export const BOOT_SNAPSHOT_WRITE = 'boot:snapshotWrite' // renderer -> main
 /** Main -> renderer: user dropped a folder on the dock icon (or opened one
  *  via OS "Open With..."). Renderer opens it as a new workspace. */
 export const APP_OPEN_PATH = 'app:openPath'
-
-// Auto-updater (main -> renderer for status; renderer -> main for actions)
-export const UPDATE_STATUS = 'update:status'
-export const UPDATE_INSTALL = 'update:install'
-export const UPDATE_DOWNLOAD = 'update:download'
-export const UPDATE_OPEN_RELEASE = 'update:openRelease'
 
 // Analytics — post-update feedback prompt
 // Main -> renderer: show the modal. Payload: { fromVersion, toVersion }
@@ -162,6 +162,12 @@ export const MENU_TRIGGER_ACTION = 'menu:triggerAction'
 /** Load a named saved layout — main sends the layout name and the focused
  *  renderer restores it (replacing the workspace). */
 export const MENU_LOAD_LAYOUT = 'menu:loadLayout'
+/** Create-panel dispatch routed to a *main* window. Sent when a panel-creation
+ *  shortcut/menu item fires from a detached dock/panel window (which has no
+ *  canvas): main forwards it to the workspace's main window so the new panel
+ *  lands on the canvas. Payload carries the action and the originating
+ *  workspace id. */
+export const MENU_CREATE_PANEL = 'menu:createPanel'
 
 /** Browser navigation shortcut (main -> renderer). Sent when a webview guest
  *  swallows a browser key (Cmd+R/[/]/L) via before-input-event, or from the
@@ -183,7 +189,6 @@ export const DIALOG_SAVE_FILE = 'dialog:saveFile'
 export const DIALOG_CONFIRM_UNSAVED = 'dialog:confirmUnsaved'
 export const DIALOG_CONFIRM_CLOSE_TERMINAL = 'dialog:confirmCloseTerminal'
 export const DIALOG_CONFIRM_CLOSE_CANVAS = 'dialog:confirmCloseCanvas'
-export const DIALOG_CONFIRM_DELETE_REGION = 'dialog:confirmDeleteRegion'
 export const DIALOG_CONFIRM_IMPORT = 'dialog:confirmImport'
 export const DIALOG_CONFIRM_RELOAD_WORKSPACE = 'dialog:confirmReloadWorkspace'
 export const DIALOG_TERMINAL_LINK_OPEN = 'dialog:terminalLinkOpen'
@@ -224,6 +229,13 @@ export const NOTIFY_ACTION = 'notify:action' // main -> renderer (OS notificatio
 
 // Window management
 export const WINDOW_SET_TITLE = 'window:setTitle'
+// Custom window controls (frameless Windows/Linux chrome). Each is per-window —
+// the handler resolves the calling window from the IPC event sender.
+export const WINDOW_MINIMIZE = 'window:minimize'              // renderer -> main
+export const WINDOW_TOGGLE_MAXIMIZE = 'window:toggleMaximize' // renderer -> main
+export const WINDOW_CLOSE = 'window:close'                    // renderer -> main
+export const WINDOW_IS_MAXIMIZED = 'window:isMaximized'       // renderer -> main (sync pull)
+export const WINDOW_MAXIMIZE_STATE = 'window:maximizeState'   // main -> renderer (push)
 
 // Panel transfer (cross-window)
 export const PANEL_TRANSFER = 'panel:transfer'
@@ -249,6 +261,10 @@ export const WINDOW_FULLSCREEN_STATE = 'window:fullscreenState' // main -> rende
 export const DOCK_WINDOW_INIT = 'dock:windowInit'           // main -> renderer
 export const DOCK_WINDOW_SYNC_STATE = 'dock:windowSyncState' // renderer -> main
 export const DOCK_WINDOWS_LIST = 'dock:windowsList'          // renderer -> main
+export const DOCK_WINDOW_RESTORE = 'dock:windowRestore'      // renderer -> main
+// Final awaited sync from a dock window before quit reads listDockWindows().
+export const DOCK_WINDOW_FLUSH_SYNC = 'dock:windowFlushSync' // main -> renderer
+export const DOCK_WINDOW_FLUSH_SYNC_DONE = 'dock:windowFlushSyncDone' // renderer -> main
 
 // Cross-window drag coordination
 export const CROSS_WINDOW_DRAG_START = 'crossDrag:start'       // renderer -> main
@@ -303,7 +319,7 @@ export const AGENT_BASH = 'agent:bash'                         // renderer -> ma
 export const AGENT_ABORT_BASH = 'agent:abortBash'
 export const AGENT_SET_STEERING_MODE = 'agent:setSteeringMode'
 export const AGENT_SET_FOLLOW_UP_MODE = 'agent:setFollowUpMode'
-export const AGENT_GET_AVAILABLE_MODELS = 'agent:getAvailableModels'
+export const AGENT_LIST_MODELS = 'agent:listModels'
 export const AGENT_UI_RESPONSE = 'agent:uiResponse'            // renderer -> main (reply to extension_ui_request)
 
 // Disk-backed pi sessions (~/.pi/agent/sessions/<encoded-cwd>/*.jsonl)
@@ -321,12 +337,29 @@ export const AGENT_MARKETPLACE_UNINSTALL = 'agent:marketplaceUninstall'   // ren
 export const AGENT_CUSTOM_MODELS_GET = 'agent:customModelsGet'   // renderer -> main
 export const AGENT_CUSTOM_MODELS_SAVE = 'agent:customModelsSave' // renderer -> main
 
+// Skills (cross-agent skill manager)
+export const SKILLS_GET_INDEX = 'skills:getIndex'             // renderer -> main (merged catalog)
+export const SKILLS_REFRESH = 'skills:refresh'               // renderer -> main (bust caches)
+export const SKILLS_GET_PREVIEW = 'skills:getPreview'         // renderer -> main (fetch SKILL.md body)
+export const SKILLS_INSTALL = 'skills:install'               // renderer -> main
+export const SKILLS_UNINSTALL = 'skills:uninstall'           // renderer -> main
+export const SKILLS_LIST_INSTALLED = 'skills:listInstalled'   // renderer -> main (workspace manifest)
+export const SKILLS_LIST_SAVED = 'skills:listSaved'           // renderer -> main (userData library)
+export const SKILLS_SAVE = 'skills:save'                     // renderer -> main (fetch + cache to library)
+export const SKILLS_UNSAVE = 'skills:unsave'                 // renderer -> main (drop from library)
+export const SKILLS_LIST_SOURCES = 'skills:listSources'       // renderer -> main
+export const SKILLS_ADD_SOURCE = 'skills:addSource'           // renderer -> main
+export const SKILLS_REMOVE_SOURCE = 'skills:removeSource'     // renderer -> main
+export const SKILLS_GET_TOKEN = 'skills:getToken'             // renderer -> main
+export const SKILLS_SET_TOKEN = 'skills:setToken'             // renderer -> main
+
 // Pi auth / providers
 export const AUTH_LIST_PROVIDERS = 'auth:listProviders'
 export const AUTH_STATUS = 'auth:status'
 export const AUTH_OAUTH_START = 'auth:oauthStart'
 export const AUTH_OAUTH_PROMPT_REPLY = 'auth:oauthPromptReply' // renderer -> main
 export const AUTH_OAUTH_EVENT = 'auth:oauthEvent'              // main -> renderer
+export const AUTH_CHANGED = 'auth:changed'                    // main -> renderer (broadcast)
 export const AUTH_SAVE_API_KEY = 'auth:saveApiKey'
 export const AUTH_DELETE = 'auth:delete'
 

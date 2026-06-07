@@ -1,13 +1,16 @@
 // =============================================================================
-// Settings store and session persistence — backed by electron-store
-// electron-store v10 is ESM-only, so we use dynamic import()
+// Settings store and session persistence.
+//
+// AppSettings live in settings.json (see ./settingsFile). The workspace/session
+// state — recent projects, sidebar session, remote workspaces, saved layouts —
+// lives in dedicated hand-editable JSON files (see ./workspaceStateStore).
 // =============================================================================
 
 import { ipcMain, app, BrowserWindow, nativeTheme } from 'electron'
 import log from './logger'
-import fs from 'fs/promises'
 import fsSync from 'fs'
 import path from 'path'
+import { writeJsonAtomic } from './writeJsonAtomic'
 import {
   SETTINGS_GET,
   SETTINGS_SET,
@@ -29,7 +32,6 @@ import {
   LAYOUT_LOAD,
   LAYOUT_DELETE,
 } from '../shared/ipc-channels'
-import { DEFAULT_SETTINGS } from '../shared/types'
 import type { AppSettings, SidebarSession, RemoteProjectEntry } from '../shared/types'
 import { broadcastToAll } from './windowRegistry'
 import {
@@ -42,33 +44,51 @@ import {
   ensureSettingsFile,
   startWatching as startSettingsWatch,
 } from './settingsFile'
+import {
+  getRecentProjects,
+  addRecentProject,
+  removeRecentProject,
+  getSidebarSession,
+  setSidebarSession,
+  getRemoteProjects,
+  setRemoteProjects,
+  saveLayout,
+  listLayoutNames,
+  loadLayout,
+  deleteLayout,
+  startWatchingWorkspaceState,
+} from './workspaceStateStore'
 import { grantFileAccess } from './ipc/pathValidation'
 import { recordPersistentGrant } from './grantedPathStore'
+import { computeThemeBootFields } from './themeBootCache'
 
 /** Push saved-layout names to the native Layouts menu. Imported lazily so the
  *  static module graph (and anything that pulls in ./store, e.g. terminal IPC)
  *  doesn't drag in ./menu → ./auto-updater at load time. */
 async function pushLayoutNamesToMenu(names: string[]): Promise<void> {
-  const { setLayoutNames } = await import('./menu')
-  setLayoutNames(names)
+  try {
+    const { setLayoutNames } = await import('./menu')
+    setLayoutNames(names)
+  } catch (err) {
+    log.warn('Layout menu update failed: %O', err)
+  }
 }
-
-// Settings that open windows react to live (via onSettingsChanged). The
-// SETTINGS_CHANGED broadcast is scoped to these so routine edits — font size,
-// zoom speed, etc. — don't wake every window/explorer on each change.
-const LIVE_REACTIVE_SETTINGS = new Set<keyof AppSettings>(['fileExclusions'])
 
 /**
  * Apply the main-process side effects of a single settings change. Shared by
  * the renderer-driven SETTINGS_SET path and the external-file-edit watcher so a
  * value changed by hand-editing settings.json behaves exactly like one changed
- * through the UI (live file-exclusion refresh, Sentry toggle, live broadcast).
+ * through the UI (live file-exclusion refresh, Sentry toggle, etc.).
+ *
+ * The settingsStore projection is handled separately by `broadcastSettingsReloaded`
+ * (the single SETTINGS_RELOADED funnel); this function only runs the per-key
+ * native/daemon side effects.
  */
 async function applySettingSideEffect(key: keyof AppSettings, value: unknown): Promise<void> {
-  // Notify all windows so live-reactive settings (e.g. file exclusions) can
-  // update without a relaunch. Scoped to keys that actually have live listeners
-  // so routine setting changes don't churn every window.
-  if (LIVE_REACTIVE_SETTINGS.has(key)) {
+  // fileExclusions has one live consumer (the FileExplorer tree) that listens on
+  // the SETTINGS_CHANGED invalidation channel and reloads. Broadcast it directly
+  // (the only key that uses this channel today).
+  if (key === 'fileExclusions') {
     broadcastToAll(SETTINGS_CHANGED, key, value)
   }
   // Rebuild active fs watchers so their ignore globs match the new exclusions
@@ -108,6 +128,18 @@ async function applySettingSideEffect(key: keyof AppSettings, value: unknown): P
       log.warn('Companion idle-suspend forward failed: %O', err)
     }
   }
+  // The wallpaper image is copied into managed app data (see DIALOG_OPEN_IMAGE).
+  // Whenever the path changes — a replacement, a clear (''), a reset, or a
+  // hand-edit pointing elsewhere — drop any managed copy that is no longer the
+  // current one so the directory doesn't accumulate orphaned images.
+  if (key === 'canvasBackgroundImagePath') {
+    try {
+      const { pruneCanvasBackgrounds } = await import('./canvasBackgroundStore')
+      pruneCanvasBackgrounds(typeof value === 'string' ? value : '')
+    } catch (err) {
+      log.warn('Canvas background prune failed: %O', err)
+    }
+  }
   // Live-toggle Sentry when the crash-reporting setting flips, so the change
   // takes effect without a relaunch.
   if (key === 'crashReportingEnabled') {
@@ -132,64 +164,6 @@ async function applySettingSideEffect(key: keyof AppSettings, value: unknown): P
   }
 }
 
-// Lazy-loaded store instance (ESM dynamic import)
-let storeInstance: any = null
-
-/** If `config.json` is present but not valid JSON, copy it aside before
- *  electron-store (with `clearInvalidConfig`) silently overwrites it with
- *  defaults — so a user's corrupt settings are preserved for support/recovery
- *  rather than lost. Best-effort; never throws. */
-function backupConfigIfCorrupt(): void {
-  try {
-    const cfgPath = path.join(app.getPath('userData'), 'config.json')
-    if (!fsSync.existsSync(cfgPath)) return
-    const raw = fsSync.readFileSync(cfgPath, 'utf-8')
-    try {
-      JSON.parse(raw)
-    } catch {
-      const backupPath = `${cfgPath}.corrupt-${Date.now()}`
-      fsSync.copyFileSync(cfgPath, backupPath)
-      log.error('config.json is corrupt; backed up to %s and resetting to defaults', backupPath)
-    }
-  } catch (err) {
-    log.warn('Corrupt-config check failed: %O', err)
-  }
-}
-
-async function getStore(): Promise<any> {
-  if (storeInstance) return storeInstance
-  const { default: Store } = await import('electron-store')
-  // electron-store still backs the non-settings keys (recentProjects,
-  // sidebarSession, remoteProjects, layouts). AppSettings now live in their own
-  // settings.json (see ./settingsFile), so they are no longer read/written here.
-  // Preserve a corrupt config before clearInvalidConfig wipes it.
-  backupConfigIfCorrupt()
-  // clearInvalidConfig: a corrupt config.json resets to defaults instead of
-  // throwing on construction — which would otherwise reject every store IPC
-  // call (recent projects, layouts, sessions) for the whole session.
-  // projectName is set explicitly so the store never depends on Electron
-  // app-name detection (electron-store still keys the file off the userData
-  // cwd, so this doesn't change the config path — it only removes a failure
-  // mode in non-standard runtimes/tests).
-  const opts = { defaults: DEFAULT_SETTINGS, clearInvalidConfig: true, projectName: 'cate' }
-  try {
-    storeInstance = new Store<AppSettings>(opts)
-  } catch (err) {
-    // clearInvalidConfig only covers JSON SyntaxErrors. For anything else
-    // (e.g. an unreadable/locked file), move the bad file aside and retry so
-    // the store keeps working rather than failing for the entire session.
-    log.error('electron-store construction failed; quarantining config and retrying: %O', err)
-    try {
-      const cfgPath = path.join(app.getPath('userData'), 'config.json')
-      if (fsSync.existsSync(cfgPath)) fsSync.renameSync(cfgPath, `${cfgPath}.broken-${Date.now()}`)
-    } catch (mvErr) {
-      log.warn('Failed to quarantine config.json: %O', mvErr)
-    }
-    storeInstance = new Store<AppSettings>(opts)
-  }
-  return storeInstance
-}
-
 // ---------------------------------------------------------------------------
 // Synchronous settings access — settings live in settings.json, loaded
 // synchronously at startup (see ./settingsFile) so the main process can read
@@ -197,8 +171,7 @@ async function getStore(): Promise<any> {
 // historical `./store` import surface for existing callers.
 // ---------------------------------------------------------------------------
 
-/** Load settings.json synchronously (migrating from the legacy config.json on
- *  first run). Safe to call once at startup. */
+/** Load settings.json synchronously. Safe to call once at startup. */
 export function loadSettingsSyncFromDisk(): void {
   loadSettingsSync()
 }
@@ -212,12 +185,17 @@ export function getSettingSync<K extends keyof AppSettings>(key: K): AppSettings
  *  flows like first-run telemetry consent. getSettingSync() reflects the change
  *  immediately since settingsFile holds the authoritative in-memory copy. */
 export async function setSettingsFromMain(patch: Partial<AppSettings>): Promise<void> {
+  let changed = false
   for (const [k, v] of Object.entries(patch)) {
     const key = k as keyof AppSettings
     if (setSettingInFile(key, v as never)) {
       await applySettingSideEffect(key, v)
+      changed = true
     }
   }
+  // Project main-driven changes (e.g. first-run telemetry consent) to every
+  // window's settingsStore through the same funnel.
+  if (changed) broadcastSettingsReloaded()
 }
 
 // ---------------------------------------------------------------------------
@@ -272,11 +250,8 @@ async function flushBootSnapshot(): Promise<void> {
   const next = { ...(readBootSnapshot() ?? {}), ...bootSnapshotPending }
   bootSnapshotPending = null
   try {
-    const p = getBootSnapshotPath()
-    await fs.mkdir(path.dirname(p), { recursive: true })
-    const tmp = p + '.tmp'
-    await fs.writeFile(tmp, JSON.stringify(next), 'utf-8')
-    await fs.rename(tmp, p)
+    // boot.json is read sync at the very first frame, so keep it compact.
+    await writeJsonAtomic(getBootSnapshotPath(), next, { pretty: false })
   } catch (err) {
     log.warn('Boot snapshot write failed: %O', err)
   }
@@ -287,6 +262,39 @@ export function writeBootSnapshot(partial: Partial<BootSnapshot>): void {
   bootSnapshotPending = { ...(bootSnapshotPending ?? {}), ...partial }
   if (bootSnapshotTimer) return
   bootSnapshotTimer = setTimeout(() => { void flushBootSnapshot() }, BOOT_SNAPSHOT_DEBOUNCE_MS)
+}
+
+/**
+ * Rebuild boot.json's theme cache (theme / backgroundColor / appearance) from
+ * the authoritative settings, and apply the appearance to the live app. boot.json
+ * is a pure cache of the active theme — rebuilding it in main whenever settings
+ * change (UI write OR external file edit) keeps it fresh even when the renderer
+ * never gets a chance to push (e.g. a hand-edit of activeThemeId), so the next
+ * cold launch never flashes a stale color. Geometry / lastWorkspaceId in boot.json
+ * are owned elsewhere and preserved by the merge in flushBootSnapshot.
+ */
+function rebuildBootThemeCache(): void {
+  const fields = computeThemeBootFields(getAllSettings())
+  writeBootSnapshot(fields)
+  // Drive the app-wide native appearance immediately so live windows track the
+  // theme's dark/light without waiting for the next launch (NSApplication.appearance
+  // is global, so one assignment covers every window).
+  try {
+    nativeTheme.themeSource = fields.appearance
+  } catch (err) {
+    log.warn('Native appearance update failed: %O', err)
+  }
+}
+
+/**
+ * The single funnel for propagating a settings change to every window. Broadcasts
+ * the full settings as SETTINGS_RELOADED so each window's settingsStore is a pure
+ * projection of the main file (no per-window drift), and rebuilds the boot theme
+ * cache. Called by SETTINGS_SET, SETTINGS_RESET, and the external-edit watcher.
+ */
+function broadcastSettingsReloaded(): void {
+  broadcastToAll(SETTINGS_RELOADED, getAllSettings())
+  rebuildBootThemeCache()
 }
 
 
@@ -302,6 +310,9 @@ export function registerHandlers(): void {
     async (_event, key: keyof AppSettings, value: unknown) => {
       if (!setSettingInFile(key, value as never)) return
       await applySettingSideEffect(key, value)
+      // Single funnel: project the new settings to every window's settingsStore
+      // (so multi-window copies never drift) and refresh the boot theme cache.
+      broadcastSettingsReloaded()
     },
   )
 
@@ -316,6 +327,7 @@ export function registerHandlers(): void {
     } else {
       resetAllSettings()
     }
+    broadcastSettingsReloaded()
   })
 
   // Grant the calling window read+write access to settings.json and return its
@@ -345,13 +357,14 @@ export function registerHandlers(): void {
   })
 
   // React to external edits of settings.json (user editing the file directly):
-  // broadcast the full settings so renderers merge live, and run the same
-  // per-key side effects as a UI change.
-  startSettingsWatch((next, changedKeys) => {
-    broadcastToAll(SETTINGS_RELOADED, next)
+  // run the same per-key side effects as a UI change, then go through the single
+  // funnel so renderers project the new settings and the boot cache refreshes —
+  // exactly like a UI-driven change.
+  startSettingsWatch((_next, changedKeys) => {
     for (const key of changedKeys) {
-      void applySettingSideEffect(key, next[key])
+      void applySettingSideEffect(key, getSettingFromFile(key))
     }
+    broadcastSettingsReloaded()
   })
 
   // Boot snapshot — renderer pushes geometry/theme/etc. updates here. The
@@ -384,86 +397,73 @@ export function registerHandlers(): void {
     }
   })
 
+  // Workspace/session state files (recent projects, sidebar, remote workspaces,
+  // layouts) — watch the files for external edits, re-pushing the native Layouts
+  // menu when layouts.json is hand-edited.
+  startWatchingWorkspaceState((names) => { void pushLayoutNamesToMenu(names) })
+
+  // Drop any orphaned managed wallpaper copies (e.g. from a crash mid-replace),
+  // keeping only the one the current setting points at.
+  void import('./canvasBackgroundStore')
+    .then(({ pruneCanvasBackgrounds }) => pruneCanvasBackgrounds(getSettingFromFile('canvasBackgroundImagePath')))
+    .catch((err) => log.warn('Canvas background startup prune failed: %O', err))
+
   // Recent Projects
   ipcMain.handle(RECENT_PROJECTS_GET, async () => {
-    const store = await getStore()
-    return store.get('recentProjects', []) as string[]
+    return getRecentProjects()
   })
 
   ipcMain.handle(RECENT_PROJECTS_ADD, async (_event, projectPath: string) => {
-    const store = await getStore()
-    const existing: string[] = store.get('recentProjects', []) as string[]
-    const filtered = existing.filter((p) => p !== projectPath)
-    const updated = [projectPath, ...filtered].slice(0, 10)
-    store.set('recentProjects', updated)
+    addRecentProject(projectPath)
   })
 
   // Drop a project from the recent list (issue #220): closing a workspace should
   // forget the project so it doesn't reappear on next launch and re-enter the
   // deferred-restore path. Without this the only way to forget a project was to
-  // hand-edit config.json.
+  // hand-edit the recent-projects file.
   ipcMain.handle(RECENT_PROJECTS_REMOVE, async (_event, projectPath: string) => {
-    const store = await getStore()
-    const existing: string[] = store.get('recentProjects', []) as string[]
-    store.set('recentProjects', existing.filter((p) => p !== projectPath))
+    removeRecentProject(projectPath)
   })
 
   // Sidebar session (workspace order + active workspace, keyed by root path)
   ipcMain.handle(SIDEBAR_SESSION_GET, async () => {
-    const store = await getStore()
-    return store.get('sidebarSession', null) as SidebarSession | null
+    return getSidebarSession()
   })
 
   ipcMain.handle(SIDEBAR_SESSION_SET, async (_event, session: SidebarSession) => {
-    const store = await getStore()
-    store.set('sidebarSession', session)
+    setSidebarSession(session)
   })
 
   // Remote projects (cate-companion:// workspaces): full restore snapshot +
   // reconnect info, since their tree lives on a companion and can't use the
   // local .cate/ project-state files.
   ipcMain.handle(REMOTE_PROJECTS_GET, async () => {
-    const store = await getStore()
-    return store.get('remoteProjects', []) as RemoteProjectEntry[]
+    return getRemoteProjects()
   })
 
   ipcMain.handle(REMOTE_PROJECTS_SET, async (_event, entries: RemoteProjectEntry[]) => {
-    const store = await getStore()
-    store.set('remoteProjects', Array.isArray(entries) ? entries : [])
+    setRemoteProjects(entries)
   })
 
   // Layouts
   ipcMain.handle(LAYOUT_SAVE, async (_event, name: string, layout: unknown) => {
-    const store = await getStore()
-    const layouts = (store.get('layouts') as Record<string, unknown>) || {}
-    layouts[name] = layout
-    store.set('layouts', layouts)
-    void pushLayoutNamesToMenu(Object.keys(layouts))
+    const names = saveLayout(name, layout)
+    void pushLayoutNamesToMenu(names)
   })
 
   ipcMain.handle(LAYOUT_LIST, async () => {
-    const store = await getStore()
-    const layouts = (store.get('layouts') as Record<string, unknown>) || {}
-    return Object.keys(layouts)
+    return listLayoutNames()
   })
 
   ipcMain.handle(LAYOUT_LOAD, async (_event, name: string) => {
-    const store = await getStore()
-    const layouts = (store.get('layouts') as Record<string, unknown>) || {}
-    return layouts[name] || null
+    return loadLayout(name)
   })
 
   ipcMain.handle(LAYOUT_DELETE, async (_event, name: string) => {
-    const store = await getStore()
-    const layouts = (store.get('layouts') as Record<string, unknown>) || {}
-    delete layouts[name]
-    store.set('layouts', layouts)
-    void pushLayoutNamesToMenu(Object.keys(layouts))
+    const names = deleteLayout(name)
+    void pushLayoutNamesToMenu(names)
   })
 
   // Seed the native Layouts menu with whatever is already saved.
-  void getStore().then((store) => {
-    const layouts = (store.get('layouts') as Record<string, unknown>) || {}
-    return pushLayoutNamesToMenu(Object.keys(layouts))
-  }).catch(() => { /* menu just stays empty until first save */ })
+  void pushLayoutNamesToMenu(listLayoutNames())
 }

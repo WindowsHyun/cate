@@ -14,12 +14,13 @@ import CanvasToolbar from '../canvas/CanvasToolbar'
 import WelcomePage from '../ui/WelcomePage'
 import { EmptyCanvasOverlay } from './EmptyCanvasOverlay'
 import type { PanelType, Point, DockLayoutNode, PanelLocation, WindowDockState } from '../../shared/types'
-import { useAppStore, useSelectedWorkspace, registerCanvasOps, unregisterCanvasOps, setActiveCanvasPanelId, type PanelPlacement } from '../stores/appStore'
+import { useAppStore, useSelectedWorkspace, registerCanvasOps, unregisterCanvasOps, type PanelPlacement } from '../stores/appStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useStore } from 'zustand'
 import type { StoreApi } from 'zustand'
 import { ensureWorkspaceFolder } from '../hooks/useShortcuts'
 import { createCanvasOps } from '../lib/canvas/canvasBridge'
+import { setActivePanel } from '../lib/activePanel'
 import { createDockStore, type DockStore } from '../stores/dockStore'
 import {
   registerNodeDockStore,
@@ -109,7 +110,17 @@ const CanvasNodeWrapper = React.memo(({ nodeId, canvasPanelId, renderPanelConten
   }, [storeKey]) // intentionally omit node.dockLayout — seed only on first creation
 
   // ------------------------------------------------------------------
-  // Persist center layout back to canvasStore; auto-remove on null
+  // Mirror the live per-node DockStore (the runtime editing authority) into
+  // canvasStore.node.dockLayout, and auto-remove the node when its mini-dock
+  // empties out.
+  //
+  // node.dockLayout is the canonical PERSISTED projection of the layout: it is
+  // what history snapshots capture (undo/redo), what off-screen/unmounted nodes
+  // read back through getNodeDockLayout, and what is written to disk. Keeping it
+  // in lock-step with the live store here means it can never drift — readers go
+  // through one resolver (getNodeDockLayout: live while mounted, this projection
+  // otherwise) and the two always agree. (R3's persistence work made this
+  // projection actually round-trip to disk; this keeps it current in memory.)
   // ------------------------------------------------------------------
   useEffect(() => {
     const unsubscribe = dockStoreApi.subscribe((state, prev) => {
@@ -204,14 +215,19 @@ export default function CanvasPanel({ panelId, workspaceId, nodeId, renderPanelC
   useEffect(() => {
     const ops = createCanvasOps(store)
     registerCanvasOps(panelId, ops)
-    setActiveCanvasPanelId(panelId)
+    setActivePanel(panelId)
     return () => {
       unregisterCanvasOps(panelId)
     }
   }, [panelId, store])
 
   const handlePointerDown = useCallback(() => {
-    setActiveCanvasPanelId(panelId)
+    // A canvas IS the active panel (it's a center-zone dock tab). Runs on the
+    // bubble phase, AFTER the containing dock stack's capture handler set the
+    // stack's active tab — for the canvas's own stack that's this same canvas
+    // panel, so they agree; clicking a sibling docked pane keeps that pane.
+    // Canvas-type active → placement derives to the default canvas placement.
+    setActivePanel(panelId)
   }, [panelId])
 
   const zoomLevel = useStore(store, (s) => s.zoomLevel)
@@ -270,38 +286,10 @@ export default function CanvasPanel({ panelId, workspaceId, nodeId, renderPanelC
     store.getState().animateZoomTo(zoomLevel - 0.1)
   }, [zoomLevel, store])
 
-  const onZoomToFit = useCallback(() => {
-    store.getState().zoomToFit()
-  }, [store])
-
-  // Compute the current canvas-space center of the viewport so newly created
-  // items appear where the user is currently looking.
-  const getViewCenter = useCallback((): Point => {
-    const s = store.getState()
-    const zoom = s.zoomLevel
-    const offset = s.viewportOffset
-    // Try to read the canvas container size from the DOM
-    const el = document.querySelector('[data-canvas-container]') as HTMLElement | null
-    const w = el?.clientWidth ?? 800
-    const h = el?.clientHeight ?? 600
-    return {
-      x: (w / 2) / zoom - offset.x / zoom,
-      y: (h / 2) / zoom - offset.y / zoom,
-    }
-  }, [store])
-
   const onNewCanvas = useCallback(async () => {
     const wsId = await ensureWorkspaceFolder(workspaceId)
     if (wsId) useAppStore.getState().createCanvas(wsId)
   }, [workspaceId])
-
-  const onNewRegion = useCallback(() => {
-    store.getState().addRegion('Region', getViewCenter(), { width: 400, height: 300 })
-  }, [store, getViewCenter])
-
-  const onAutoLayout = useCallback(() => {
-    store.getState().autoLayout()
-  }, [store])
 
   return (
     <CanvasStoreProvider store={store}>
@@ -339,15 +327,14 @@ export default function CanvasPanel({ panelId, workspaceId, nodeId, renderPanelC
         {(nodeIds.length > 0 || workspaceRootPath) && (
           <CanvasToolbar
             canvasPanelId={panelId}
+            workspaceId={workspaceId}
+            rootPath={workspaceRootPath}
             zoom={zoomLevel}
             onNewTerminal={onNewTerminal}
             onNewBrowser={onNewBrowser}
             onNewEditor={onNewEditor}
             onNewAgent={onNewAgent}
             onNewCanvas={onNewCanvas}
-            onNewRegion={onNewRegion}
-            onAutoLayout={onAutoLayout}
-            onZoomToFit={onZoomToFit}
             onZoomIn={onZoomIn}
             onZoomOut={onZoomOut}
           />

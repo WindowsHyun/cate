@@ -2,7 +2,8 @@
 // Type declaration for window.electronAPI exposed via contextBridge
 // =============================================================================
 
-import type { AgentCreateOptions, AgentEventEnvelope, AgentExtensionUIResponse, AgentImageAttachment, AgentModelRef, AgentRpcState, AgentSessionListEntry, AgentSessionStats, AgentSlashCommand, AgentThinkingLevel, AgentToolApprovalRequest, AppSettings, AgentState, AuthProviderDescriptor, AuthProviderStatus, CateWindowParams, CustomOpenAIProvider, DockWindowInitPayload, DetachedDockWindowSnapshot, DockStateSnapshot, FileSearchOptions, FileSearchResult, FileTreeNode, GitInfo, SearchOptions, SearchResultBatch, SearchDoneEvent, NotificationAction, OAuthFlowEvent, PanelState, PanelTransferSnapshot, PanelWindowSnapshot, PerfSnapshot, Point, SessionSnapshot, SidebarSession, TerminalActivity, WorkspaceInfo, WorkspaceMutationResult, RemoteConnectSpec, CompanionConnectResult, CompanionStatusEvent, CompanionConnection, CompanionPhase, RemoteProjectEntry, SshHostEntry } from './types'
+import type { AgentCreateOptions, AgentEventEnvelope, AgentExtensionUIResponse, AgentImageAttachment, AgentModelRef, AgentModelDescriptor, AgentRpcState, AgentSessionListEntry, AgentSessionStats, AgentSlashCommand, AgentThinkingLevel, AgentToolApprovalRequest, AppSettings, AgentState, AuthProviderDescriptor, AuthProviderStatus, CanvasLayoutSnapshot, CateWindowParams, CustomOpenAIProvider, DockWindowInitPayload, DetachedDockWindowSnapshot, DockStateSnapshot, FileSearchOptions, FileSearchResult, FileTreeNode, GitInfo, SearchOptions, SearchResultBatch, SearchDoneEvent, NotificationAction, OAuthFlowEvent, PanelState, PanelTransferSnapshot, PanelWindowSnapshot, PerfSnapshot, Point, SessionSnapshot, SidebarSession, TerminalActivity, WorkspaceInfo, WorkspaceMutationResult, RemoteConnectSpec, CompanionConnectResult, CompanionStatusEvent, CompanionConnection, CompanionPhase, RemoteProjectEntry, SshHostEntry, UIState } from './types'
+import type { SavedSkill, InstalledSkill, SkillEntry, SkillSource, SkillTargetId } from './skills'
 
 export interface NativeContextMenuItem {
   id?: string
@@ -23,6 +24,9 @@ export interface ElectronAPI {
 
   /** Pull the latest main-process resource snapshot (null until first sample). */
   perfGetSnapshot(): Promise<PerfSnapshot | null>
+
+  /** Set this window's UI zoom factor (Cate chrome only). Clamped to 0.5–2.0. */
+  setUiScale(scale: number): void
 
   // ---------------------------------------------------------------------------
   // Terminal
@@ -82,7 +86,7 @@ export interface ElectronAPI {
   /** Read a directory and return FileTreeNode entries. */
   fsReadDir(dirPath: string, workspaceId?: string): Promise<FileTreeNode[]>
 
-  /** Search for files by name and content (flat result list). */
+  /** Quick file finder — matches file names only (flat result list). */
   fsSearch(rootPath: string, query: string, options?: FileSearchOptions, workspaceId?: string): Promise<FileSearchResult[]>
 
   /** Start watching a directory for changes. */
@@ -350,6 +354,12 @@ export interface ElectronAPI {
   /** Reset all settings to defaults. */
   settingsReset(): Promise<void>
 
+  /** Get all transient UI state (minimap placement) from ui-state.json. */
+  uiStateGetAll(): Promise<UIState>
+
+  /** Set a single UI-state value. */
+  uiStateSet<K extends keyof UIState>(key: K, value: UIState[K]): Promise<void>
+
   /** Subscribe to setting-change broadcasts from main (key + new value). Returns unsubscribe. */
   onSettingsChanged(callback: (key: keyof AppSettings, value: unknown) => void): () => void
 
@@ -436,11 +446,6 @@ export interface ElectronAPI {
 
   /** Confirm reloading the canvas after workspace.json changed on disk. */
   confirmReloadWorkspace(payload: { name?: string }): Promise<'reload' | 'cancel'>
-
-  /** Native confirmation shown when deleting a region that has panels inside.
-   *  Returns 'with-contents' (delete region + contents), 'region-only' (keep
-   *  contents, just remove the region around them), or 'cancel'. */
-  confirmDeleteRegion(payload: { panelCount: number }): Promise<'with-contents' | 'region-only' | 'cancel'>
 
   /** Native confirmation shown when external files/folders are dropped onto the
    *  file explorer. Returns 'copy' (duplicate into the directory), 'move'
@@ -535,12 +540,30 @@ export interface ElectronAPI {
   // Window management
   // ---------------------------------------------------------------------------
 
+  /** Minimize the calling window. Used by the custom window controls on the
+   *  frameless Windows/Linux chrome. */
+  windowMinimize(): Promise<void>
+
+  /** Toggle maximize/restore on the calling window. */
+  windowToggleMaximize(): Promise<void>
+
+  /** Close the calling window. */
+  windowClose(): Promise<void>
+
+  /** Synchronous cached check: is the calling window maximized? Backs the
+   *  maximize/restore glyph swap in the custom window controls. */
+  isWindowMaximized(): boolean
+
+  /** Subscribe to the calling window's maximize-state changes. Fires with the
+   *  new boolean whenever the window is maximized or restored. */
+  onWindowMaximizeChange(callback: (isMaximized: boolean) => void): () => void
+
   // ---------------------------------------------------------------------------
   // Panel transfer (cross-window)
   // ---------------------------------------------------------------------------
 
   /** Initiate a cross-window panel transfer. Returns new window ID if a window was created. */
-  panelTransfer(snapshot: PanelTransferSnapshot, targetWindowId?: number): Promise<number | void>
+  panelTransfer(snapshot: PanelTransferSnapshot, targetWindowId?: number, workspaceId?: string): Promise<number | void>
 
   /** Acknowledge receipt of a panel transfer (flushes buffered terminal data). */
   panelTransferAck(ptyId?: string): Promise<void>
@@ -559,11 +582,14 @@ export interface ElectronAPI {
    *  panel-window list) reflects post-Save-As filePath/title/dirty state. */
   panelWindowSyncMeta(payload: { panel: PanelState; workspaceId?: string }): Promise<void>
 
-  /** Request this panel window to dock back into the main window. */
-  panelWindowDockBack(): Promise<void>
+  /** Request this panel window to dock back into the main window. Passing the
+   *  panel's full transfer snapshot lets the main window reconstruct the panel
+   *  (its record was removed there on detach) and arms the PTY transfer home. */
+  panelWindowDockBack(snapshot?: PanelTransferSnapshot): Promise<void>
 
-  /** Subscribe to dock-back requests from panel windows (main -> renderer). */
-  onPanelWindowDockBack(callback: (panelWindowId: number) => void): () => void
+  /** Subscribe to dock-back requests from panel windows (main -> renderer). The
+   *  snapshot carries the panel + canvas/terminal state to re-integrate. */
+  onPanelWindowDockBack(callback: (payload: { panelWindowId: number; snapshot?: PanelTransferSnapshot }) => void): () => void
 
   // ---------------------------------------------------------------------------
   // Cross-window drag-and-drop
@@ -582,8 +608,10 @@ export interface ElectronAPI {
    *  without an IPC round-trip per mousemove. */
   isMainWindowFullscreen(): boolean
 
-  /** Subscribe to drag end events (main -> renderer). */
-  onDragEnd(callback: () => void): () => void
+  /** Subscribe to drag end events (main -> renderer). The optional `dragId`
+   *  identifies which cross-window drag ended; a remote-drag listener ignores
+   *  an end whose id doesn't match its own active drag. */
+  onDragEnd(callback: (dragId?: string) => void): () => void
 
   /** Subscribe to native-fullscreen state changes. Fires with the new boolean
    *  whenever any Cate window enters or leaves macOS native fullscreen. */
@@ -606,10 +634,21 @@ export interface ElectronAPI {
   onDockWindowInit(callback: (payload: DockWindowInitPayload) => void): () => void
 
   /** Sync dock window state to main process for session persistence. */
-  dockWindowSyncState(state: DockStateSnapshot & { panels: Record<string, PanelState>; terminalPtyIds?: Record<string, string> }): Promise<void>
+  dockWindowSyncState(state: DockStateSnapshot & { panels: Record<string, PanelState>; terminalPtyIds?: Record<string, string>; canvasStates?: Record<string, CanvasLayoutSnapshot> }): Promise<void>
 
   /** List all dock windows with their state and bounds. */
   dockWindowsList(): Promise<DetachedDockWindowSnapshot[]>
+
+  /** Re-create a detached dock window from its persisted snapshot (full restore:
+   *  all top-level tabs, terminal replay, canvas children). Returns the new
+   *  window id, or null when restore was refused. */
+  dockWindowRestore(payload: DetachedDockWindowSnapshot & { initPayload: DockWindowInitPayload }): Promise<number | null>
+
+  /** Subscribe to a final pre-quit sync request from main (dock windows). */
+  onDockWindowFlushSync(callback: () => void): () => void
+
+  /** ACK that this dock window's final pre-quit sync has been sent. */
+  dockWindowFlushSyncDone(): void
 
   // ---------------------------------------------------------------------------
   // Cross-window drag coordination
@@ -618,8 +657,10 @@ export interface ElectronAPI {
   /** Start a cross-window drag — notifies main to broadcast to other windows. */
   crossWindowDragStart(snapshot: PanelTransferSnapshot, screenPos: Point): Promise<void>
 
-  /** Subscribe to cross-window drag cursor updates (main -> renderer). */
-  onCrossWindowDragUpdate(callback: (screenPos: Point, snapshot: PanelTransferSnapshot) => void): () => void
+  /** Subscribe to cross-window drag cursor updates (main -> renderer). The
+   *  `dragId` identifies the drag session so a window can match a later
+   *  targeted DRAG_END against the drag it's tracking. */
+  onCrossWindowDragUpdate(callback: (screenPos: Point, snapshot: PanelTransferSnapshot, dragId?: string) => void): () => void
 
   /** Report that this window accepted a cross-window drop. */
   crossWindowDragDrop(panelId: string): Promise<void>
@@ -702,6 +743,10 @@ export interface ElectronAPI {
   /** Subscribe to "load this saved layout" dispatches from the native Layouts menu. */
   onMenuLoadLayout(callback: (name: string) => void): () => void
 
+  /** Subscribe to panel-creation actions routed to this (main) window from a
+   *  detached dock/panel window, so the new panel lands on the canvas. */
+  onMenuCreatePanel(callback: (payload: import('./types').MenuCreatePanelPayload) => void): () => void
+
   /** Subscribe to browser navigation shortcuts forwarded from a focused webview
    *  guest (Cmd+R/[/]/L) or the Browser menu. */
   onBrowserShortcut(callback: (action: import('./types').BrowserShortcutAction) => void): () => void
@@ -716,21 +761,6 @@ export interface ElectronAPI {
   /** Push a (panelId, webContentsId, alive) tuple to main so it can build a
    *  webContents → portal-panel reverse map for popup parent resolution. */
   orchRegisterPortalWc(payload: { panelId: string; webContentsId: number; alive: boolean }): void
-
-  // -------------------------------------------------------------------------
-  // Auto-updater
-  // -------------------------------------------------------------------------
-
-  /** Subscribe to update-status broadcasts from the main process. */
-  onUpdateStatus(callback: (status: unknown) => void): () => void
-  /** Fetch the current update status (e.g. on window mount). */
-  updateGetStatus(): Promise<unknown>
-  /** Start downloading the available update (electron-updater path only). */
-  updateDownload(): void
-  /** Apply the downloaded update and restart the app. */
-  updateInstall(): void
-  /** Open the GitHub release page when auto-install is unavailable. */
-  updateOpenRelease(url?: string): void
 
   // -------------------------------------------------------------------------
   // Analytics — post-update feedback prompt
@@ -846,8 +876,9 @@ export interface ElectronAPI {
   /** Control how follow-up messages drain. */
   agentSetFollowUpMode(panelId: string, mode: 'all' | 'one-at-a-time'): Promise<void>
 
-  /** Available models from the Pi runtime session. */
-  agentGetAvailableModels(panelId: string): Promise<Array<{ provider: string; id: string; contextWindow: number; reasoning: boolean }>>
+  /** Selectable models, derived session-independently from connected providers
+   *  in auth.json + the custom OpenAI endpoint. No agent session required. */
+  agentListModels(): Promise<AgentModelDescriptor[]>
 
   /** Reply to a pending extension UI request (fire-and-forget). */
   agentUiResponse(panelId: string, response: AgentExtensionUIResponse): void
@@ -926,6 +957,40 @@ export interface ElectronAPI {
   /** Uninstall an extension via `pi remove npm:<name>`. */
   agentMarketplaceUninstall(cwd: string, name: string): Promise<{ ok: boolean; error?: string }>
 
+  // ---------------------------------------------------------------------------
+  // Cross-agent skills
+  // ---------------------------------------------------------------------------
+
+  /** The merged skill catalog: curated index ∪ live-crawled user repos. */
+  skillsGetIndex(): Promise<SkillEntry[]>
+  /** Bust the index caches and return the freshly-loaded catalog. */
+  skillsRefresh(): Promise<SkillEntry[]>
+  /** Fetch a skill's SKILL.md body for the detail preview. */
+  skillsGetPreview(entry: SkillEntry): Promise<string>
+  /** Install a skill into a workspace agent. Reuses an existing local install of
+   *  the same skill, then the saved-library cache, else fetches from GitHub. */
+  skillsInstall(entry: SkillEntry, targetId: SkillTargetId, cwd: string): Promise<{ ok: boolean; error?: string; warnings?: string[]; installed?: InstalledSkill }>
+  /** Uninstall a skill from a workspace agent. */
+  skillsUninstall(skillId: string, name: string, targetId: SkillTargetId, cwd: string): Promise<{ ok: boolean; error?: string }>
+  /** Installs recorded in this workspace's .cate/skills.json. */
+  skillsListInstalled(cwd: string): Promise<InstalledSkill[]>
+  /** Skills saved to the user's Cate library (cached in userData). */
+  skillsListSaved(): Promise<SavedSkill[]>
+  /** Save a skill to the library: fetch its files + cache them in userData. */
+  skillsSave(entry: SkillEntry): Promise<{ ok: boolean; error?: string }>
+  /** Remove a skill from the library (drops the cached bytes). */
+  skillsUnsave(skillId: string): Promise<{ ok: boolean; error?: string }>
+  /** User-added repos crawled in addition to the curated index. */
+  skillsListSources(): Promise<SkillSource[]>
+  /** Add a repo ("owner/name" or URL) to the live-crawled sources. */
+  skillsAddSource(repo: string, opts?: { ref?: string; path?: string }): Promise<{ ok: boolean; error?: string; source?: SkillSource }>
+  /** Remove a user-added source. */
+  skillsRemoveSource(id: string): Promise<{ ok: boolean }>
+  /** Whether a GitHub token is stored (for higher rate limits / private repos). */
+  skillsGetToken(): Promise<{ hasToken: boolean }>
+  /** Store or clear the GitHub token. */
+  skillsSetToken(token: string | null): Promise<{ ok: boolean }>
+
   /** Stream of agent events forwarded from the main process. */
   onAgentEvent(callback: (envelope: AgentEventEnvelope) => void): () => void
 
@@ -950,6 +1015,11 @@ export interface ElectronAPI {
 
   /** Subscribe to OAuth flow events for the in-app login UI. */
   onAuthOAuthEvent(callback: (providerId: string, event: OAuthFlowEvent) => void): () => void
+
+  /** Broadcast fired (to every window) after any credential change — OAuth
+   *  sign-in, API-key save, or disconnect — once the shared auth.json has been
+   *  mirrored into live sessions. Renderers re-fetch provider status + models. */
+  onAuthChanged(callback: () => void): () => void
 
   /** Save an API key for a built-in keyed provider (encrypted via safeStorage). */
   authSaveApiKey(providerId: string, apiKey: string): Promise<void>

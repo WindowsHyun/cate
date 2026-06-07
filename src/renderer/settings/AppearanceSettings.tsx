@@ -5,8 +5,14 @@ import { SettingRow, Select, NumberInput, SearchableBlock } from './SettingsComp
 import type { Theme } from '../../shared/types'
 import { validateTheme } from '../../shared/theme'
 import { BASE_DARK, BASE_LIGHT, BUILT_IN_THEMES } from '../../shared/themes'
+import { errorMessage } from '../lib/errorMessage'
 
 const SKILL_GUIDE_URL = 'https://github.com/0-AI-UG/cate/blob/main/skills/cate-theme/SKILL.md'
+
+const UI_SCALE_OPTIONS = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5].map((s) => ({
+  value: String(s),
+  label: `${Math.round(s * 100)}%`,
+}))
 
 /** Merge a theme's partial app map over its base — used for swatch previews. */
 function appColors(theme: Theme): Record<string, string> {
@@ -69,12 +75,12 @@ export function AppearanceSettings() {
           if (valid.length === 0) return
           store.setSetting('customThemes', [...customThemes, ...valid])
         } catch (err) {
-          setImportError(err instanceof Error ? err.message : 'Failed to parse JSON')
+          setImportError(errorMessage(err, 'Failed to parse JSON'))
         }
       }
       input.click()
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'Import failed')
+      setImportError(errorMessage(err, 'Import failed'))
     }
   }
 
@@ -170,6 +176,14 @@ export function AppearanceSettings() {
         <h4 className="text-[13px] font-semibold text-primary">Create your own theme</h4>
       </button>
       </SearchableBlock>
+
+      <SettingRow label="UI scale" description="Zooms Cate's interface; doesn't affect browser-panel pages">
+        <Select
+          value={String(store.uiScale)}
+          onChange={(v) => store.setSetting('uiScale', parseFloat(v))}
+          options={UI_SCALE_OPTIONS}
+        />
+      </SettingRow>
 
       <SettingRow label="Editor font size">
         <NumberInput value={store.editorFontSize} onChange={(v) => store.setSetting('editorFontSize', v)} min={8} max={32} step={1} />

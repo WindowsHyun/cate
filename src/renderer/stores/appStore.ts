@@ -8,6 +8,7 @@ import { create } from 'zustand'
 import { useStoreWithEqualityFn } from 'zustand/traditional'
 import { shallow } from 'zustand/shallow'
 import log from '../lib/logger'
+import { errorMessage } from '../lib/errorMessage'
 import type {
   WorkspaceState,
   WorkspaceInfo,
@@ -23,39 +24,43 @@ import type {
   CompanionConnection,
   CompanionPhase,
 } from '../../shared/types'
-import { PANEL_DEFAULT_SIZES, ZOOM_DEFAULT, ALL_ZONES } from '../../shared/types'
+import { PANEL_DEFAULT_SIZES, ALL_ZONES } from '../../shared/types'
 import { ACCENT_COLORS } from '../../shared/colors'
+import { BASE_DARK, BASE_LIGHT } from '../../shared/themes'
+import { getActiveTheme } from '../lib/themeManager'
+import { pathKey } from '../../shared/pathUtils'
 import type { StoreApi } from 'zustand'
-import { shouldPreserveExistingCanvas } from './canvasSyncGuard'
 import { terminalRegistry } from '../lib/terminal/terminalRegistry'
 import { useSettingsStore } from './settingsStore'
 import type { CanvasOperations } from '../lib/canvas/canvasBridge'
 import { releaseCanvasStoreForPanel } from './canvasStore'
+import { generateId } from './canvas/helpers'
 import {
   getOrCreateWorkspaceDockStore,
-  getWorkspaceDockStore,
   releaseWorkspaceDockStore,
 } from '../lib/workspace/dockRegistry'
 import {
   ensureCanvasOpsForPanel,
-  getActiveCanvasOps,
   getWorkspaceCanvasOps,
   getWorkspaceCanvasPanelId,
   getWorkspaceCanvasStore,
-  setActiveCanvasPanelId,
-  allCanvasOps,
+  getCanvasOpsById,
+  resolvePanelLocation,
   invalidateWorkspaceCanvasCache,
 } from '../lib/workspace/canvasAccess'
+import { setActivePanel, clearActivePanelIfMatches } from '../lib/activePanel'
+import { recordRecentFile } from '../lib/fs/recentFiles'
 import { LOCAL_COMPANION_ID } from '../../main/companion/locator'
 
 export type { CanvasOperations }
 export {
   ensureCanvasOpsForPanel,
   getActiveCanvasOps,
+  getActiveCanvasPanelId,
   getWorkspaceCanvasPanelId,
   getWorkspaceCanvasStore,
-  setActiveCanvasPanelId,
-}
+  placementForActivePanel,
+} from '../lib/workspace/canvasAccess'
 export {
   registerCanvasOps,
   getCanvasOpsById,
@@ -68,10 +73,6 @@ import { workspaceDisplayName } from '../lib/fs/displayPath'
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
-
-function generateId(): string {
-  return crypto.randomUUID()
-}
 
 /** Workspace accent colors — re-exported from the shared accent palette. */
 export const WORKSPACE_COLORS = ACCENT_COLORS
@@ -93,11 +94,6 @@ function createDefaultWorkspace(
     rootPathError: null,
     isRootPathPending: false,
     panels: {},
-    canvasNodes: {},
-    regions: {},
-    zoomLevel: ZOOM_DEFAULT,
-    viewportOffset: { x: 0, y: 0 },
-    focusedNodeId: null,
   }
 }
 
@@ -168,9 +164,15 @@ export type PanelPlacement =
   /** `canvasPanelId` pins the create to a SPECIFIC canvas (the one the toolbar /
    *  right-click menu / drop originated from). Without it, placement routes to
    *  the workspace's primary canvas — correct for session restore and auto
-   *  creates, but wrong for an interactive create on a secondary/nested canvas. */
-  | { target: 'canvas'; position?: Point; canvasPanelId?: string }
-  | { target: 'dock'; zone: DockZonePosition }
+   *  creates, but wrong for an interactive create on a secondary/nested canvas.
+   *  `size` pins the node's size (used by layout restore to reproduce the saved
+   *  geometry exactly); without it the panel type's default size is used. */
+  | { target: 'canvas'; position?: Point; canvasPanelId?: string; size?: Size }
+  /** `stackId` docks the panel as a new tab in a SPECIFIC stack (the one the
+   *  user is working in — e.g. the focused pane of a split). Without it the
+   *  panel lands in the zone's default stack. A stale stackId falls back to the
+   *  zone (dockPanel handles that). */
+  | { target: 'dock'; zone: DockZonePosition; stackId?: string }
   | { target: 'auto' } // default: canvas
   /** No global routing — caller (e.g. canvas-node mini-dock) will place the
    *  panel itself into a private DockStore. The panel is added to the
@@ -178,28 +180,94 @@ export type PanelPlacement =
   | { target: 'none' }
 
 // -----------------------------------------------------------------------------
-// Worktree colors — fixed palette assigned round-robin to new worktrees.
-// Picked to be visually distinct in both light and dark themes.
+// Worktree colors — a multi-color palette derived from the ACTIVE theme rather
+// than a fixed hardcoded set, so the swatches look native to whatever theme is
+// loaded. Source is the theme's terminal ANSI palette (a rich, vivid, multi-hue
+// set every theme defines, and — unlike the git/panel app colors — not tied to
+// other UI meaning).
+//
+// The theme accent (--focus-blue) is excluded DYNAMICALLY: we drop whichever
+// ANSI hue is closest to it, so a worktree color is never confused with focus/
+// selection chrome. The accent isn't always blue — in a red-accented theme it's
+// the red entry that drops, in a green-accented one the green entry, etc.
+//
+// Picked colors are resolved to concrete #rrggbb and stored on the worktree, so
+// they keep working in the canvas territory renderer (which parses hex) and a
+// worktree keeps its color across later theme switches.
 // -----------------------------------------------------------------------------
 
-export const WORKTREE_COLOR_PALETTE: string[] = [
-  '#3b82f6', // blue
-  '#10b981', // emerald
-  '#f59e0b', // amber
-  '#ec4899', // pink
-  '#8b5cf6', // violet
-  '#14b8a6', // teal
-  '#ef4444', // red
-  '#84cc16', // lime
-  '#06b6d4', // cyan
-  '#f97316', // orange
-]
+/** Vivid ANSI hue slots, ordered rainbow-ish (base + brighter shade per hue).
+ *  Blacks/whites/grays are omitted. Blue is kept here on purpose — only the hue
+ *  closest to the *actual* accent is dropped below, so in a non-blue-accent
+ *  theme blue stays available (and in the usual blue-accent themes it drops). */
+const WORKTREE_ANSI_KEYS = [
+  'red', 'brightRed',
+  'yellow', 'brightYellow',
+  'green', 'brightGreen',
+  'cyan', 'brightCyan',
+  'blue', 'brightBlue',
+  'magenta', 'brightMagenta',
+] as const
+
+/** Squared-RGB distance below which a hue is treated as "the accent" (dropped). */
+const ACCENT_EXCLUDE_DIST2 = 10000
+/** Squared-RGB distance below which two hues are treated as duplicates. */
+const DUP_EXCLUDE_DIST2 = 800
+
+/** Safety net if a theme somehow yields too few usable hues (no blue). */
+const FALLBACK_WORKTREE_COLORS = ['#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#ef4444']
+
+/** Parse #rgb / #rrggbb / #rrggbbaa or rgb()/rgba() into [r,g,b], else null. */
+function parseRgb(color: string): [number, number, number] | null {
+  const s = color.trim()
+  const hex = /^#?([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(s)
+  if (hex) {
+    let h = hex[1]
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]
+    const n = parseInt(h.slice(0, 6), 16)
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+  }
+  const rgb = /^rgba?\(\s*(\d+)\D+(\d+)\D+(\d+)/i.exec(s)
+  if (rgb) return [Number(rgb[1]) & 255, Number(rgb[2]) & 255, Number(rgb[3]) & 255]
+  return null
+}
+
+function toHex([r, g, b]: [number, number, number]): string {
+  return '#' + [r, g, b].map((c) => c.toString(16).padStart(2, '0')).join('')
+}
+
+function dist2(a: [number, number, number], b: [number, number, number]): number {
+  const dr = a[0] - b[0], dg = a[1] - b[1], db = a[2] - b[2]
+  return dr * dr + dg * dg + db * db
+}
+
+/** The current theme's worktree color palette: vivid ANSI hues, accent-hue and
+ *  near-duplicates removed, resolved to concrete #rrggbb. Reflects the active
+ *  theme each time it's called (cheap — call at pick / when rendering swatches). */
+export function getWorktreeColorPalette(): string[] {
+  const theme = getActiveTheme()
+  const base = theme.type === 'light' ? BASE_LIGHT : BASE_DARK
+  const accent = parseRgb(theme.app['focus-blue'] ?? base['focus-blue'])
+
+  const out: string[] = []
+  const chosen: [number, number, number][] = []
+  for (const key of WORKTREE_ANSI_KEYS) {
+    const rgb = parseRgb(theme.terminal[key])
+    if (!rgb) continue
+    if (accent && dist2(rgb, accent) < ACCENT_EXCLUDE_DIST2) continue
+    if (chosen.some((c) => dist2(c, rgb) < DUP_EXCLUDE_DIST2)) continue
+    chosen.push(rgb)
+    out.push(toHex(rgb))
+  }
+  return out.length >= 3 ? out : FALLBACK_WORKTREE_COLORS
+}
 
 export function pickWorktreeColor(existing: { color: string }[]): string {
+  const palette = getWorktreeColorPalette()
   const used = new Set(existing.map((w) => w.color))
-  for (const c of WORKTREE_COLOR_PALETTE) if (!used.has(c)) return c
+  for (const c of palette) if (!used.has(c)) return c
   // Wrap around if more worktrees than palette entries.
-  return WORKTREE_COLOR_PALETTE[existing.length % WORKTREE_COLOR_PALETTE.length]
+  return palette[existing.length % palette.length]
 }
 
 /** A fully-reset dock layout: all side zones hidden, an empty visible center.
@@ -269,13 +337,11 @@ interface AppStoreActions {
   setMarkdownViewMode: (workspaceId: string, panelId: string, mode: 'source' | 'split' | 'preview') => void
   setPanelUnsavedContent: (workspaceId: string, panelId: string, content: string | undefined) => void
   addPanel: (workspaceId: string, panel: PanelState) => void
+  removePanelRecord: (workspaceId: string, panelId: string) => void
 
   // Helpers
   getWorkspace: (id: string) => WorkspaceState | undefined
   selectedWorkspace: () => WorkspaceState | undefined
-
-  // Sync canvas state snapshot back into workspace (call before switching)
-  syncCanvasToWorkspace: (workspaceId: string) => void
 
   // Workspace operations
   setWorkspaceRootPath: (wsId: string, rootPath: string) => Promise<boolean>
@@ -303,17 +369,29 @@ interface AppStoreActions {
   renameWorkspace: (wsId: string, name: string) => void
   duplicateWorkspace: (wsId: string) => string
   closeAllPanels: (wsId: string) => void
+  /** Remove every panel currently living on one canvas (dispose terminals, drop
+   *  their records, empty the canvas store) without touching the rest of the
+   *  workspace. Used by layout restore to replace a single canvas's contents. */
+  clearCanvas: (wsId: string, canvasPanelId: string) => void
   reorderWorkspaces: (fromIndex: number, toIndex: number) => void
   addAdditionalRoot: (wsId: string, rootPath: string) => void
   removeAdditionalRoot: (wsId: string, rootPath: string) => void
 
   // Parallel Work (git worktrees) — see ParallelWorkTab.tsx
   ensurePrimaryWorktree: (wsId: string) => void
+  /** Seed the worktree registry from a persisted session, merging by path so a
+   *  saved color/label/id wins over anything a background sync already
+   *  discovered. Used on restore (see session.ts) to keep colors stable. */
+  hydrateWorktrees: (wsId: string, list: WorktreeMeta[]) => void
   upsertWorktree: (wsId: string, wt: WorktreeMeta) => void
   removeWorktree: (wsId: string, worktreeId: string) => void
   setWorktreeColor: (wsId: string, worktreeId: string, color: string) => void
   setWorktreeLabel: (wsId: string, worktreeId: string, label: string | undefined) => void
   setPanelWorktreeId: (wsId: string, panelId: string, worktreeId: string | undefined) => void
+  /** Re-spawn a terminal panel's PTY in a new working directory and re-tag its
+   *  worktree. Disposes the live terminal and bumps `ptyEpoch` so TerminalPanel
+   *  re-creates the shell rooted at `cwd`. Used by the worktree chip switcher. */
+  respawnPanelTerminal: (wsId: string, panelId: string, cwd: string, worktreeId: string | undefined) => void
 
   // Cross-window sync: merge metadata from main-process broadcast
   mergeWorkspaceInfos: (infos: WorkspaceInfo[]) => void
@@ -346,7 +424,13 @@ function placePanel(
     return
   }
   if (placement?.target === 'dock') {
-    dockStore.getState().dockPanel(panelId, placement.zone)
+    // stackId → drop as a tab in that exact stack (the focused split pane);
+    // otherwise zone-level. dockPanel falls back to the zone if the stack is gone.
+    dockStore.getState().dockPanel(
+      panelId,
+      placement.zone,
+      placement.stackId ? { type: 'tab', stackId: placement.stackId } : undefined,
+    )
     return
   }
   // Default: place on a canvas (target === 'canvas'/'auto'/undefined).
@@ -359,6 +443,7 @@ function placePanel(
   const ops = pinnedCanvasId ? ensureCanvasOpsForPanel(pinnedCanvasId) : getWorkspaceCanvasOps(workspaceId)
   if (!ops) return
   const canvasPosition = placement?.target === 'canvas' ? placement.position ?? position : position
+  const canvasSize = placement?.target === 'canvas' ? placement.size : undefined
   // Ambiguous create (no explicit position) on the active workspace: when the
   // recommendation picker is enabled, show ghost candidates and let the user
   // choose where the node lands (deferred until commit; onGhostCancel rolls the
@@ -372,7 +457,7 @@ function placePanel(
     const shown = ops.beginPlacement(panelId, panelType, onGhostCancel)
     if (shown) return
   }
-  ops.addNodeAndFocus(panelId, panelType, canvasPosition)
+  ops.addNodeAndFocus(panelId, panelType, canvasPosition, canvasSize)
 }
 
 type AppSet = StoreApi<AppStore>['setState']
@@ -503,10 +588,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
       return
     }
 
-    // Snapshot the outgoing workspace's live stores back into its persisted
-    // fields so it round-trips through save/restore. Each workspace owns its
-    // dock + canvas stores, so nothing is ever copied between workspaces.
-    get().syncCanvasToWorkspace(state.selectedWorkspaceId)
+    // No snapshot-back is needed on switch-away: each workspace owns its dock +
+    // canvas stores and those stores SURVIVE a switch (they're released only on
+    // close/remove). The live stores stay the source of truth and the save path
+    // serializes straight from them via the canvasAccess resolvers.
 
     // Discard outgoing workspace if it was never initialized (no folder
     // picked, not currently picking one). Keeps stray "Add Workspace" rows
@@ -521,7 +606,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
     // workspaces even if a restore is still in flight.
     set({ selectedWorkspaceId: id })
     const incomingCanvasPanelId = getWorkspaceCanvasPanelId(id)
-    if (incomingCanvasPanelId) setActiveCanvasPanelId(incomingCanvasPanelId)
+    if (incomingCanvasPanelId) {
+      // Point the canonical active panel at the incoming canvas so canvas
+      // shortcuts route here AND a stack the user last touched in the OTHER
+      // workspace can't attract new panels created in this one.
+      setActivePanel(incomingCanvasPanelId)
+    }
 
     // Reconnect a remote workspace's companion if it isn't live (e.g. after a
     // restart / restore). For a REMOTE workspace we must AWAIT this before the
@@ -733,6 +823,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   createEditor(workspaceId, filePath?, position?, placement?, opts?) {
     const panelId = generateId()
+    if (filePath) recordRecentFile(workspaceId, filePath)
     const fileName = filePath ? filePath.split('/').pop() ?? 'Untitled' : 'Untitled'
     const panel: PanelState = {
       id: panelId,
@@ -747,6 +838,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   createDocument(workspaceId, filePath?, documentType?, position?, placement?) {
     const panelId = generateId()
+    if (filePath) recordRecentFile(workspaceId, filePath)
     const fileName = filePath ? filePath.split('/').pop() ?? 'Document' : 'Document'
     const panel: PanelState = {
       id: panelId,
@@ -807,33 +899,25 @@ export const useAppStore = create<AppStore>((set, get) => ({
       releaseCanvasStoreForPanel(panelId)
     }
 
-    // Remove from dock/canvas first (less critical — log errors but continue)
+    // Remove from dock/canvas first (less critical — log errors but continue).
+    // resolvePanelLocation is the canonical probe (dock tree, then every canvas
+    // of the workspace) shared with panelReveal — so close removes the panel from
+    // exactly where reveal/focus would have found it, no parallel probe to drift.
     const dockStore = getOrCreateWorkspaceDockStore(workspaceId)
     try {
-      const dockLocation = dockStore.getState().panelLocations[panelId]
-      if (dockLocation?.type === 'dock') {
+      const location = resolvePanelLocation(workspaceId, panelId)
+      if (location?.kind === 'dock') {
         dockStore.getState().undockPanel(panelId)
-      } else {
-        // Try all registered canvas stores (panel could be on any canvas,
-        // including a nested one). Workspace-agnostic: removes wherever found.
-        for (const ops of allCanvasOps()) {
-          const nodeId = ops.storeApi.getState().nodeForPanel(panelId)
-          if (nodeId) {
-            ops.removeNodeForPanel(panelId)
-            break
-          }
-        }
+      } else if (location?.kind === 'canvas') {
+        getCanvasOpsById(location.canvasPanelId)?.removeNodeForPanel(panelId)
       }
     } catch (error) {
       log.error('Failed to remove panel from dock/canvas during close:', error)
     }
 
-    // Clean up location tracking
-    try {
-      dockStore.getState().removePanelLocation(panelId)
-    } catch (error) {
-      log.error('Failed to clean up panel location tracking:', error)
-    }
+    // Drop the canonical active-panel pointer if it was this panel, so a closed
+    // panel can't keep attracting newly-created panels or read as focused.
+    clearActivePanelIfMatches(panelId)
 
     // Remove from workspace panels (always do this to ensure cleanup)
     set((state) => ({
@@ -919,6 +1003,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }))
   },
 
+  // Remove ONLY the panels[panelId] record from a workspace (mirror of
+  // addPanel). Unlike removePanel, this does NOT touch dock/canvas stores or
+  // active-panel tracking — detached shells own their own dock store and undock
+  // there directly, so the full removePanel would target the wrong (workspace)
+  // dock registry and log spurious failures.
+  removePanelRecord(workspaceId, panelId) {
+    set((state) => ({
+      workspaces: state.workspaces.map((ws) => {
+        if (ws.id !== workspaceId) return ws
+        if (!(panelId in ws.panels)) return ws
+        const { [panelId]: _removed, ...remainingPanels } = ws.panels
+        return { ...ws, panels: remainingPanels }
+      }),
+    }))
+  },
+
   // --- Helpers ---
 
   getWorkspace(id) {
@@ -927,38 +1027,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   selectedWorkspace() {
     return get().workspaces.find((w) => w.id === get().selectedWorkspaceId)
-  },
-
-  syncCanvasToWorkspace(workspaceId) {
-    const canvasStore = getWorkspaceCanvasStore(workspaceId)
-    const canvasState = canvasStore?.getState()
-    if (!canvasState) return
-
-    // Also snapshot this workspace's OWN dock state so it's saved per workspace.
-    const liveDock = getWorkspaceDockStore(workspaceId)
-    const dockSnapshot = liveDock?.getState().getSnapshot()
-
-    set((state) => ({
-      workspaces: state.workspaces.map((ws) => {
-        if (ws.id !== workspaceId) return ws
-        if (shouldPreserveExistingCanvas(
-          Object.keys(canvasState.nodes).length,
-          Object.keys(ws.canvasNodes ?? {}).length,
-        )) {
-          // Keep nodes/regions/viewport intact; only refresh dock state.
-          return { ...ws, dockState: dockSnapshot ?? ws.dockState }
-        }
-        return {
-          ...ws,
-          canvasNodes: { ...canvasState.nodes },
-          regions: { ...canvasState.regions },
-          viewportOffset: { ...canvasState.viewportOffset },
-          zoomLevel: canvasState.zoomLevel,
-          focusedNodeId: canvasState.focusedNodeId,
-          dockState: dockSnapshot ?? ws.dockState,
-        }
-      }),
-    }))
   },
 
   setWorkspaceRootPath(wsId, rootPath) {
@@ -983,7 +1051,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }))
     return syncUpdateToMain(wsId, { rootPath, name: desiredName }).then((result) => {
       if (!result?.ok) {
-        const message = result?.error?.message ?? 'Failed to update workspace root'
+        const message = errorMessage(result?.error, 'Failed to update workspace root')
         set((state) => ({
           workspaces: state.workspaces.map((candidate) => (
             candidate.id === wsId
@@ -1007,9 +1075,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   setWorkspaceCompanionPhase(wsId, phase, error) {
+    const clean = error == null ? null : errorMessage(error)
     set((state) => ({
       workspaces: state.workspaces.map((c) =>
-        c.id === wsId ? { ...c, companion: { phase, ...(error != null ? { error } : {}) } } : c,
+        c.id === wsId ? { ...c, companion: { phase, ...(clean != null ? { error: clean } : {}) } } : c,
       ),
     }))
   },
@@ -1135,11 +1204,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
       color: ws.color,
       rootPath: ws.rootPath,
       panels: {},
-      canvasNodes: {},
-      regions: {},
-      zoomLevel: ZOOM_DEFAULT,
-      viewportOffset: { x: 0, y: 0 },
-      focusedNodeId: null,
     }
     set((state) => ({ workspaces: [...state.workspaces, copy] }))
     syncCreateToMain(copy)
@@ -1190,17 +1254,36 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set((state) => ({
       workspaces: state.workspaces.map((ws) => {
         if (ws.id !== wsId) return ws
-        const list = ws.worktrees ?? []
-        if (list.some((w) => w.isPrimary)) return ws
         if (!ws.rootPath) return ws
+        const list = ws.worktrees ?? []
+        // The primary worktree is whichever record is keyed by the workspace's
+        // own rootPath; isPrimary is derived from git at read time, so we only
+        // need a UI-metadata record (id/color) to exist for that path.
+        if (list.some((w) => w.path === ws.rootPath)) return ws
         const primary: WorktreeMeta = {
           id: `wt-primary-${ws.id}`,
           path: ws.rootPath,
-          branch: '',
           color: pickWorktreeColor(list),
-          isPrimary: true,
         }
         return { ...ws, worktrees: [primary, ...list] }
+      }),
+    }))
+  },
+
+  hydrateWorktrees(wsId, persisted) {
+    if (persisted.length === 0) return
+    set((state) => ({
+      workspaces: state.workspaces.map((ws) => {
+        if (ws.id !== wsId) return ws
+        // Merge by path so the persisted color/label/id wins over anything a
+        // background sync already created for the same checkout, while keeping
+        // any live worktree the saved session didn't know about. Key on the
+        // normalized path so a separator/case mismatch (forward-slash git paths
+        // vs native-separator stored paths on Windows) can't split one checkout
+        // into two entries and defeat the precedence.
+        const byPath = new Map((ws.worktrees ?? []).map((w) => [pathKey(w.path), w]))
+        for (const w of persisted) byPath.set(pathKey(w.path), w)
+        return { ...ws, worktrees: [...byPath.values()] }
       }),
     }))
   },
@@ -1265,6 +1348,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
     setPanelField(set, wsId, panelId, (panel) => ({ ...panel, worktreeId }))
   },
 
+  respawnPanelTerminal(wsId, panelId, cwd, worktreeId) {
+    // Kill the existing PTY/xterm; TerminalPanel's create effect re-runs when
+    // ptyEpoch changes and spawns a fresh shell at the new cwd.
+    terminalRegistry.dispose(panelId)
+    setPanelField(set, wsId, panelId, (panel) => ({
+      ...panel,
+      cwd,
+      worktreeId,
+      ptyEpoch: (panel.ptyEpoch ?? 0) + 1,
+    }))
+  },
+
   closeAllPanels(wsId) {
     const ws = get().workspaces.find((w) => w.id === wsId)
     if (!ws) return
@@ -1280,7 +1375,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
     set((state) => ({
       workspaces: state.workspaces.map((w) =>
-        w.id === wsId ? { ...w, panels: {}, canvasNodes: {} } : w,
+        w.id === wsId ? { ...w, panels: {} } : w,
       ),
     }))
 
@@ -1293,6 +1388,32 @@ export const useAppStore = create<AppStore>((set, get) => ({
     // fresh canvas panel for the center zone.
     getOrCreateWorkspaceDockStore(wsId).getState().restoreSnapshot(createCleanDockSnapshot())
     get().ensureCenterCanvas(wsId)
+  },
+
+  clearCanvas(wsId, canvasPanelId) {
+    const ops = ensureCanvasOpsForPanel(canvasPanelId)
+    const storeApi = ops.storeApi
+    const state = storeApi.getState()
+    const panelIds = Object.values(state.nodes).map((n) => n.panelId)
+    if (panelIds.length === 0) return
+
+    // Empty the canvas store in one synchronous step (no per-node exit
+    // animation, which would otherwise leave the old nodes mid-transition).
+    storeApi.getState().loadWorkspaceCanvas({}, state.viewportOffset, state.zoomLevel)
+
+    // Dispose terminals and drop the now-orphaned panel records.
+    const ws = get().workspaces.find((w) => w.id === wsId)
+    for (const pid of panelIds) {
+      if (ws?.panels[pid]?.type === 'terminal') terminalRegistry.dispose(pid)
+    }
+    set((s) => ({
+      workspaces: s.workspaces.map((w) => {
+        if (w.id !== wsId) return w
+        const panels = { ...w.panels }
+        for (const pid of panelIds) delete panels[pid]
+        return { ...w, panels }
+      }),
+    }))
   },
 
   // --- Cross-window sync ---
@@ -1336,11 +1457,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
             rootPathError: null,
             isRootPathPending: false,
             panels: {},
-            canvasNodes: {},
-            regions: {},
-            zoomLevel: ZOOM_DEFAULT,
-            viewportOffset: { x: 0, y: 0 },
-            focusedNodeId: null,
           })
         }
       }

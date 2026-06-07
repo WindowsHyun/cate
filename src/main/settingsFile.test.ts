@@ -50,23 +50,6 @@ describe('settingsFile', () => {
     expect(m.getSetting('defaultPanelWidth')).toBe(DEFAULT_SETTINGS.defaultPanelWidth)
   })
 
-  it('migrates valid settings out of the legacy config.json, ignoring junk', async () => {
-    // Legacy electron-store file with one real setting, one wrong-typed setting,
-    // and a non-settings key that must not leak into settings.json.
-    fs.writeFileSync(
-      path.join(dirRef.current, 'config.json'),
-      JSON.stringify({ editorFontSize: 18, zoomSpeed: 'fast', recentProjects: ['/x'] }),
-    )
-    const m = await freshModule()
-    m.loadSettingsSync()
-    expect(m.getSetting('editorFontSize')).toBe(18)
-    // Wrong-typed value rejected → default retained.
-    expect(m.getSetting('zoomSpeed')).toBe(DEFAULT_SETTINGS.zoomSpeed)
-    const onDisk = JSON.parse(fs.readFileSync(settingsPath(), 'utf-8'))
-    expect(onDisk.editorFontSize).toBe(18)
-    expect('recentProjects' in onDisk).toBe(false)
-  })
-
   it('loads an existing settings.json over defaults', async () => {
     fs.writeFileSync(settingsPath(), JSON.stringify({ terminalScrollback: 9000 }))
     const m = await freshModule()
@@ -111,6 +94,18 @@ describe('settingsFile', () => {
     const m = await freshModule()
     expect(m.isSettingsKey('editorFontSize')).toBe(true)
     expect(m.isSettingsKey('recentProjects')).toBe(false)
+  })
+
+  it('quarantines a corrupt settings.json and falls back to defaults', async () => {
+    fs.writeFileSync(settingsPath(), '{ not valid json,,, ')
+    const m = await freshModule()
+    m.loadSettingsSync()
+    // Corrupt file → defaults, not a crash.
+    expect(m.getSetting('editorFontSize')).toBe(DEFAULT_SETTINGS.editorFontSize)
+    // The corrupt file is preserved as a .corrupt-* backup for recovery.
+    const backups = fs.readdirSync(dirRef.current).filter((f) => f.startsWith('settings.json.corrupt-'))
+    expect(backups.length).toBeGreaterThanOrEqual(1)
+    expect(fs.readFileSync(path.join(dirRef.current, backups[0]), 'utf-8')).toContain('not valid json')
   })
 
   it('round-trips the beta-updates opt-in (defaults off)', async () => {

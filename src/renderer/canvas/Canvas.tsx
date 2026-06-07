@@ -5,17 +5,18 @@
 
 import React, { useRef, useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useCanvasStoreContext, useCanvasStoreApi, shallow } from '../stores/CanvasStoreContext'
+import { useCanvasStoreContext, useCanvasStoreApi } from '../stores/CanvasStoreContext'
 import { useAppStore, type PanelPlacement } from '../stores/appStore'
 import { useCanvasInteraction } from '../hooks/useCanvasInteraction'
 import { useAutoFocusLargestVisible } from '../hooks/useAutoFocusLargestVisible'
 import { useUIStore, effectiveCanvasTool } from '../stores/uiStore'
+import { useSettingsStore } from '../stores/settingsStore'
 import { canvasToView, viewToCanvas } from '../lib/canvas/coordinates'
 import CanvasGrid from './CanvasGrid'
 import CanvasBackgroundImage from './CanvasBackgroundImage'
 import SnapGuides from './SnapGuides'
-import CanvasRegionComponent from './CanvasRegionComponent'
 import GhostPlacementLayer from './GhostPlacementLayer'
+import { WorktreeTerritoryLayer } from './worktree'
 import type { Point, PanelType } from '../../shared/types'
 import { openFileAsPanel } from '../lib/fs/fileRouting'
 import { setPendingReveal } from '../lib/editor/editorReveal'
@@ -66,47 +67,17 @@ function injectCanvasInteractingStyle(): void {
     .canvas-tool-hand [data-resize-overlay] {
       pointer-events: none !important;
     }
-    /* Regions get the same treatment: grab cursor only, and the label + resize
-       brackets stop intercepting so a press on a region pans the canvas. The
-       region body itself keeps pointer-events so its bail-to-pan handler runs. */
-    .canvas-tool-hand [data-region-id],
-    .canvas-tool-hand [data-region-id] *,
-    .canvas-tool-hand [data-region-resize-handle] {
-      cursor: grab !important;
-    }
-    .canvas-tool-hand [data-region-id] *,
-    .canvas-tool-hand [data-region-resize-handle] {
-      pointer-events: none !important;
-    }
     /* During an active hand-pan, show the closed-hand (grabbing) cursor over
        nodes too, matching the canvas background. */
     .canvas-interacting.canvas-tool-hand [data-node-id],
     .canvas-interacting.canvas-tool-hand [data-node-id] *,
     .canvas-interacting.canvas-tool-hand [data-resize-frame-for],
-    .canvas-interacting.canvas-tool-hand [data-resize-frame-for] *,
-    .canvas-interacting.canvas-tool-hand [data-region-id],
-    .canvas-interacting.canvas-tool-hand [data-region-id] *,
-    .canvas-interacting.canvas-tool-hand [data-region-resize-handle] {
+    .canvas-interacting.canvas-tool-hand [data-resize-frame-for] * {
       cursor: grabbing !important;
     }
   `
   document.head.appendChild(style)
 }
-
-const RegionsLayer: React.FC = React.memo(() => {
-  const zoomLevel = useCanvasStoreContext((s) => s.zoomLevel)
-  const regionList = useCanvasStoreContext(
-    (s) => Object.values(s.regions),
-    shallow,
-  )
-  return (
-    <>
-      {regionList.map((region) => (
-        <CanvasRegionComponent key={region.id} region={region} zoomLevel={zoomLevel} />
-      ))}
-    </>
-  )
-})
 
 // A small instruction pill for the placement picker, centred over the visible
 // canvas (the strip between the absolute-overlay sidebars). Body-portalled so it
@@ -114,8 +85,8 @@ const RegionsLayer: React.FC = React.memo(() => {
 const Kbd: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <kbd style={{
     display: 'inline-block', minWidth: 18, padding: '1px 5px', margin: '0 1px',
-    borderRadius: 5, background: 'rgba(255,255,255,0.14)',
-    border: '1px solid rgba(255,255,255,0.12)', borderBottomWidth: 2,
+    borderRadius: 5, background: 'var(--surface-4)', color: 'var(--text-primary)',
+    border: '1px solid var(--border-strong)', borderBottomWidth: 2,
     fontSize: 11, fontWeight: 600, textAlign: 'center', lineHeight: '16px',
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
   }}>{children}</kbd>
@@ -127,11 +98,10 @@ const PlacementHint: React.FC<{ canvasRef: React.RefObject<HTMLDivElement> }> = 
   if (!pending) return null
   const r = canvasRef.current?.getBoundingClientRect()
   if (!r) return null
-  const sb = (side: 'left' | 'right') =>
-    (document.querySelector(`[data-app-sidebar="${side}"]`) as HTMLElement | null)?.getBoundingClientRect()
-  const left = sb('left'); const right = sb('right')
-  const visLeft = left && left.width > 0 ? left.right : r.left
-  const visRight = right && right.width > 0 ? right.left : r.right
+  // The sidebars now push the canvas rather than overlaying it, so the canvas
+  // rect itself is the visible region.
+  const visLeft = r.left
+  const visRight = r.right
   const count = pending.candidates.length
   const armed = pending.freeArmed
 
@@ -142,10 +112,10 @@ const PlacementHint: React.FC<{ canvasRef: React.RefObject<HTMLDivElement> }> = 
         position: 'fixed', left: (visLeft + visRight) / 2, top: r.top + 16, transform: 'translateX(-50%)',
         zIndex: 2147483000, display: 'flex', alignItems: 'center', gap: 14,
         padding: '9px 9px 9px 16px', borderRadius: 999,
-        background: 'rgba(20, 24, 32, 0.95)', border: '1px solid rgba(255,255,255,0.08)',
-        boxShadow: '0 10px 30px rgba(0,0,0,0.5)', color: 'rgba(255,255,255,0.92)',
+        // Match the bottom toolbar so the bar adapts to the active theme.
+        background: 'var(--surface-0)', border: '1px solid var(--border-subtle)',
+        boxShadow: '0 8px 24px -6px var(--shadow-node)', color: 'var(--text-primary)',
         fontSize: 13, fontWeight: 500, fontFamily: 'system-ui, -apple-system, sans-serif',
-        backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
         animation: 'ghostHintIn 200ms ease both', userSelect: 'none', whiteSpace: 'nowrap',
       }}>
         <span>
@@ -159,8 +129,8 @@ const PlacementHint: React.FC<{ canvasRef: React.RefObject<HTMLDivElement> }> = 
           onClick={() => api.getState().cancelPlacement()}
           style={{
             display: 'flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 999,
-            border: 'none', cursor: 'pointer', background: 'rgba(255,255,255,0.1)',
-            color: 'rgba(255,255,255,0.9)', fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
+            border: 'none', cursor: 'pointer', background: 'var(--surface-hover-strong)',
+            color: 'var(--text-secondary)', fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
           }}
         >
           Cancel <Kbd>Esc</Kbd>
@@ -182,6 +152,8 @@ interface CanvasProps {
 const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) => {
   const canvasRef = useRef<HTMLDivElement>(null)
   const worldRef = useRef<HTMLDivElement>(null)
+  // Debounce handle for de-promoting the world layer after pan/zoom settles.
+  const willChangeResetRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const canvasApi = useCanvasStoreApi()
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
 
@@ -198,6 +170,7 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
   // overrides to 'grabbing' during an active pan and hands control back on release).
   const handToolActive = useUIStore((s) => effectiveCanvasTool(s) === 'hand')
   const idleCursor = handToolActive ? 'grab' : 'default'
+  const showWorktreeTerritory = useSettingsStore((s) => s.showWorktreeTerritory)
 
   // While the Hand tool is active, neutralize interactive panel content so a
   // left-press anywhere pans the canvas (see the .canvas-tool-hand CSS rules).
@@ -228,6 +201,19 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
       if (!el) return
       el.style.transform = `scale(${zoom}) translate(${offset.x / zoom}px, ${offset.y / zoom}px)`
       el.style.setProperty('--zoom', String(zoom))
+
+      // Promote the world to its own GPU layer for the duration of the gesture so
+      // pan/zoom stays smooth, then de-promote once it settles. While promoted,
+      // Chromium bitmap-scales the layer's cached texture (blurs thin SVG icon
+      // strokes); removing will-change forces a crisp re-raster at the resting
+      // transform. Debounced so it only fires after the user stops interacting.
+      el.style.willChange = 'transform'
+      if (willChangeResetRef.current) clearTimeout(willChangeResetRef.current)
+      willChangeResetRef.current = setTimeout(() => {
+        const node = worldRef.current
+        if (node) node.style.willChange = 'auto'
+        willChangeResetRef.current = null
+      }, 150)
     }
 
     // Apply current state immediately on mount
@@ -240,7 +226,10 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
         applyTransform(state.zoomLevel, state.viewportOffset)
       }
     })
-    return unsubscribe
+    return () => {
+      unsubscribe()
+      if (willChangeResetRef.current) clearTimeout(willChangeResetRef.current)
+    }
   }, []) // mount-only
 
   // Auto-focus the node that occupies the most visible viewport area (opt-in).
@@ -299,10 +288,23 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
     }
   }, [])
 
-  // Track container size for grid visibility calculations
+  // Track container size for grid visibility, and keep canvas content anchored
+  // to whichever container edge stayed put when the OTHER edge moves — so a
+  // sidebar (or dock split) opening pushes content by its full width instead of
+  // letting it slide under the newly covered edge.
+  //
+  // One symmetric rule, no knowledge of sidebars: the world transform is
+  // anchored to the container's top-left, so a moving LEFT edge already drags
+  // content along; we only need to add the RIGHT edge's movement when the left
+  // edge held still (the right sidebar / a split divider). A window resize moves
+  // the right edge too but should NOT chase content, so we gate on the window
+  // width being unchanged. Pure translations don't change size and never fire.
   useEffect(() => {
     const el = canvasRef.current
     if (!el) return
+
+    let prevRect = el.getBoundingClientRect()
+    let prevWindowWidth = window.innerWidth
 
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
@@ -312,6 +314,16 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
         }
         setContainerSize(size)
         canvasApi.getState().setContainerSize(size)
+      }
+      const rect = el.getBoundingClientRect()
+      const windowResized = window.innerWidth !== prevWindowWidth
+      const dLeft = rect.left - prevRect.left
+      const dRight = rect.right - prevRect.right
+      prevRect = rect
+      prevWindowWidth = window.innerWidth
+      if (!windowResized && Math.abs(dLeft) < 0.5 && Math.abs(dRight) > 0.5) {
+        const { viewportOffset } = canvasApi.getState()
+        canvasApi.setState({ viewportOffset: { x: viewportOffset.x + dRight, y: viewportOffset.y } })
       }
     })
 
@@ -339,8 +351,10 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
         return
       }
       // Only unfocus if clicking directly on the world div, not on a child node
-      if (!target.closest('[data-node-id]') && !target.closest('[data-region-id]')) {
+      if (!target.closest('[data-node-id]')) {
         canvasApi.getState().unfocus()
+        // A click on empty canvas also dismisses the worktree focus lens.
+        useUIStore.getState().clearWorktreeLens()
       }
     },
     [],
@@ -485,7 +499,7 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
         items.push(
           { id: 'new-editor', label: 'New Editor' },
           { id: 'new-browser', label: 'New Browser' },
-          { id: 'new-agent', label: 'New Pi Agent' },
+          { id: 'new-agent', label: 'New Cate agent' },
           { id: 'new-canvas', label: 'New Canvas' },
           { type: 'separator' as const },
         )
@@ -540,31 +554,14 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
         }
         return
       }
-      // If the click point falls inside a Region that has a defaultCwd,
-      // a "New Terminal" inherits that cwd. Editors/browsers don't.
-      const regions = Object.values(canvasApi.getState().regions)
-      const containingRegion = regions.find(
-        (r) =>
-          point.x >= r.origin.x &&
-          point.x <= r.origin.x + r.size.width &&
-          point.y >= r.origin.y &&
-          point.y <= r.origin.y + r.size.height,
-      )
       switch (id) {
         case 'new-terminal':
-          if (containingRegion?.defaultCwd) {
-            useAppStore.getState().createTerminal(wsId, undefined, point, here(), containingRegion.defaultCwd)
-          } else {
-            onCreateAtPoint?.('terminal', point)
-          }
+          onCreateAtPoint?.('terminal', point)
           break
         case 'new-editor': onCreateAtPoint?.('editor', point); break
         case 'new-browser': onCreateAtPoint?.('browser', point); break
         case 'new-agent': onCreateAtPoint?.('agent', point); break
         case 'new-canvas': onCreateAtPoint?.('canvas', point); break
-        case 'new-region':
-          canvasApi.getState().addRegion('Region', point, { width: 400, height: 300 })
-          break
         case 'layout-grid': canvasApi.getState().autoLayout(); break
         case 'layout-columns': canvasApi.getState().layoutColumns(); break
         case 'layout-rows': canvasApi.getState().layoutRows(); break
@@ -611,6 +608,16 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
         containerHeight={containerSize.height}
       />
 
+      {/* Worktree territory — colours the grid dots per worktree. Screen-space
+          (outside the world transform), above the grid, behind all panels.
+          Opt-out via Settings → Canvas → Worktree territories. */}
+      {showWorktreeTerritory && (
+        <WorktreeTerritoryLayer
+          containerWidth={containerSize.width}
+          containerHeight={containerSize.height}
+        />
+      )}
+
       {/* World div: transformed to implement pan/zoom */}
       <div
         ref={worldRef}
@@ -621,11 +628,11 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
           width: 1,
           height: 1,
           transformOrigin: '0 0',
-          willChange: 'transform',
+          // will-change is toggled imperatively during pan/zoom (see applyTransform)
+          // so the layer de-promotes at rest and re-rasters icons crisply.
         }}
         onClick={handleWorldClick}
       >
-        <RegionsLayer />
         <SnapGuides />
         {marqueeRect && (
           <div

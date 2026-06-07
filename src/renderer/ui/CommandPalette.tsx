@@ -1,11 +1,13 @@
 // =============================================================================
-// CommandPalette — Unified searchable command launcher + workspace search.
-// Handles commands, file search (name + content), terminal scrollback,
-// and open panel switching — all from a single Cmd+K overlay.
+// CommandPalette — Unified searchable command launcher + workspace navigator.
+// A single Cmd+K overlay listing all commands, all open panels, and workspace
+// files. Files and panels are matched by NAME ONLY (no content search — that's
+// the separate ripgrep-backed Search view). With no query typed, it lists all
+// commands, all open panels, and recently-opened files — so it's obvious the
+// palette reaches panels and files too, not just commands.
 // =============================================================================
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useShallow } from 'zustand/shallow'
 import {
   Terminal,
   Globe,
@@ -21,17 +23,25 @@ import {
   ArrowsClockwise,
   Trash,
   GraduationCap,
+  PuzzlePiece,
+  X,
+  MapTrifold,
+  Selection,
+  ArrowUUpLeft,
+  ArrowUUpRight,
 } from '@phosphor-icons/react'
-import type { PanelType } from '../../shared/types'
+import type { PanelType, MenuActionId } from '../../shared/types'
 import { CateLogo } from './CateLogo'
+import { BACKDROP, CARD_SURFACE } from './Modal'
 import { useUIStore } from '../stores/uiStore'
 import { useAppStore } from '../stores/appStore'
 import { useSettingsStore } from '../stores/settingsStore'
-import { useCanvasStoreContext, useCanvasStoreApi } from '../stores/CanvasStoreContext'
-import { getWorkspaceDockStore } from '../stores/workspaceStores'
-import { findTabStack } from '../stores/dockTreeUtils'
+import { useCanvasStoreApi } from '../stores/CanvasStoreContext'
+import { runAction } from '../lib/runAction'
+import { useWorkspacePanelTree } from '../lib/workspace/useWorkspacePanelTree'
+import { revealPanel } from '../lib/workspace/panelReveal'
 import { openFileAsPanel } from '../lib/fs/fileRouting'
-import { terminalRegistry } from '../lib/terminal/terminalRegistry'
+import { getRecentFiles } from '../lib/fs/recentFiles'
 
 // -----------------------------------------------------------------------------
 // Command definitions
@@ -40,7 +50,6 @@ import { terminalRegistry } from '../lib/terminal/terminalRegistry'
 interface CommandItem {
   id: string
   title: string
-  shortcutText: string
   icon: React.ReactNode
   action: () => void
 }
@@ -53,34 +62,47 @@ const FileTextIcon = () => <FileText size={ICON_SIZE} />
 const LayoutIcon = () => <SquaresFour size={ICON_SIZE} />
 const SidebarIcon = () => <Sidebar size={ICON_SIZE} />
 const FolderOpenIcon = () => <FolderOpen size={ICON_SIZE} />
+const SearchIcon = () => <MagnifyingGlass size={ICON_SIZE} />
 const LayersIcon = () => <Stack size={ICON_SIZE} />
 const ZoomResetIcon = () => <MagnifyingGlass size={ICON_SIZE} />
 const ZoomToFitIcon = () => <ArrowsOutSimple size={ICON_SIZE} />
-const RectangleIcon = () => <Square size={ICON_SIZE} />
+const ZoomSelectionIcon = () => <Selection size={ICON_SIZE} />
 const SaveIcon = () => <FloppyDisk size={ICON_SIZE} />
 const ReloadIcon = () => <ArrowsClockwise size={ICON_SIZE} />
 const DeleteCompanionIcon = () => <Trash size={ICON_SIZE} />
 const TutorialIcon = () => <GraduationCap size={ICON_SIZE} />
+const SkillsIcon = () => <PuzzlePiece size={ICON_SIZE} />
 const AgentIcon = () => <CateLogo size={ICON_SIZE} />
+const CloseIcon = () => <X size={ICON_SIZE} />
+const MinimapIcon = () => <MapTrifold size={ICON_SIZE} />
+const UndoIcon = () => <ArrowUUpLeft size={ICON_SIZE} />
+const RedoIcon = () => <ArrowUUpRight size={ICON_SIZE} />
 
 // -----------------------------------------------------------------------------
-// Search result types (merged from GlobalSearch)
+// Result types
 // -----------------------------------------------------------------------------
 
-type SearchResultKind = 'file' | 'panel' | 'terminal'
-
-interface SearchResult {
-  key: string
-  kind: SearchResultKind
-  primary: string
-  secondary: string
-  score: number
-  filePath?: string
-  line?: number
-  panelId?: string
-  panelType?: PanelType
-  nodeId?: string
+interface FileResult {
+  path: string
+  name: string
+  relativePath: string
 }
+
+interface PanelResult {
+  panelId: string
+  title: string
+  type: PanelType
+  secondary: string
+}
+
+// A single navigable entry in the flat list, used for keyboard selection.
+type FlatItem =
+  | { kind: 'command'; command: CommandItem }
+  | { kind: 'panel'; panel: PanelResult }
+  | { kind: 'file'; file: FileResult }
+
+// Panel types worth surfacing as navigable destinations.
+const NAVIGABLE_PANEL_TYPES: PanelType[] = ['terminal', 'editor', 'browser', 'agent', 'document']
 
 // -----------------------------------------------------------------------------
 // Component
@@ -89,22 +111,9 @@ interface SearchResult {
 export const CommandPalette: React.FC = () => {
   const showCommandPalette = useUIStore((s) => s.showCommandPalette)
   const setShowCommandPalette = useUIStore((s) => s.setShowCommandPalette)
-  const setShowNodeSwitcher = useUIStore((s) => s.setShowNodeSwitcher)
   const selectedWorkspaceId = useAppStore((s) => s.selectedWorkspaceId)
-  const createTerminal = useAppStore((s) => s.createTerminal)
-  const createBrowser = useAppStore((s) => s.createBrowser)
-  const createEditor = useAppStore((s) => s.createEditor)
-  const createCanvas = useAppStore((s) => s.createCanvas)
-  const createAgent = useAppStore((s) => s.createAgent)
-  const toggleSidebar = useUIStore((s) => s.toggleSidebar)
-  const setActiveRightSidebarView = useUIStore((s) => s.setActiveRightSidebarView)
   const canvasApi = useCanvasStoreApi()
-  const setZoom = useCanvasStoreContext((s) => s.setZoom)
 
-  const rootPath = useAppStore((s) => {
-    const ws = s.workspaces.find((w) => w.id === s.selectedWorkspaceId)
-    return ws?.rootPath
-  })
   // The reinstall command is only meaningful for a remote (ssh/wsl) workspace.
   const isRemoteWorkspace = useAppStore((s) => {
     const ws = s.workspaces.find((w) => w.id === s.selectedWorkspaceId)
@@ -114,117 +123,58 @@ export const CommandPalette: React.FC = () => {
 
   const [searchText, setSearchText] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([])
+  const [fileResults, setFileResults] = useState<FileResult[]>([])
   const [searching, setSearching] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const selectedRowRef = useRef<HTMLDivElement>(null)
 
   const close = useCallback(() => {
     setShowCommandPalette(false)
     setSearchText('')
     setSelectedIndex(0)
-    setSearchResults([])
+    setFileResults([])
   }, [setShowCommandPalette])
 
-  const dockCenter = { target: 'dock', zone: 'center' } as const
+  // Dispatch a menu/shortcut action through the SAME code path as the keyboard
+  // shortcut and native menu (lib/runAction) — so panel creation here is
+  // context-aware (drops onto the focused canvas or tabs into the focused dock
+  // stack) exactly like ⌘T / ⌘⇧B do, instead of the old dock-center default.
+  const run = useCallback(
+    (action: MenuActionId) => () => { void runAction(action, canvasApi) },
+    [canvasApi],
+  )
 
   // Build command items
   const allCommands: CommandItem[] = useMemo(
     () => [
+      { id: 'newTerminal', title: 'New Terminal', icon: <TerminalIcon />, action: run('newTerminal') },
+      { id: 'newBrowser', title: 'New Browser', icon: <GlobeIcon />, action: run('newBrowser') },
+      { id: 'newEditor', title: 'New Editor', icon: <FileTextIcon />, action: run('newEditor') },
+      { id: 'newAgent', title: 'New Cate Agent', icon: <AgentIcon />, action: run('newAgent') },
+      { id: 'newCanvas', title: 'New Canvas', icon: <LayoutIcon />, action: run('newCanvas') },
+      { id: 'closePanel', title: 'Close Panel', icon: <CloseIcon />, action: run('closePanel') },
+      { id: 'saveFile', title: 'Save File', icon: <SaveIcon />, action: run('saveFile') },
+      { id: 'toggleSidebar', title: 'Toggle Sidebar', icon: <SidebarIcon />, action: run('toggleSidebar') },
+      { id: 'toggleFileExplorer', title: 'Toggle File Explorer', icon: <FolderOpenIcon />, action: run('toggleFileExplorer') },
+      { id: 'toggleSearch', title: 'Toggle Search', icon: <SearchIcon />, action: run('toggleSearch') },
+      { id: 'toggleMinimap', title: 'Toggle Minimap', icon: <MinimapIcon />, action: run('toggleMinimap') },
+      { id: 'nodeSwitcher', title: 'Switch Panel', icon: <LayersIcon />, action: run('nodeSwitcher') },
+      { id: 'zoomReset', title: 'Reset Zoom', icon: <ZoomResetIcon />, action: run('zoomReset') },
+      { id: 'zoomToFit', title: 'Zoom to Fit', icon: <ZoomToFitIcon />, action: run('zoomToFit') },
+      { id: 'zoomToSelection', title: 'Zoom to Selection', icon: <ZoomSelectionIcon />, action: run('zoomToSelection') },
+      { id: 'autoLayout', title: 'Auto-Layout Canvas', icon: <LayersIcon />, action: run('autoLayout') },
+      { id: 'undo', title: 'Undo', icon: <UndoIcon />, action: run('undo') },
+      { id: 'redo', title: 'Redo', icon: <RedoIcon />, action: run('redo') },
+      { id: 'manageLayouts', title: 'Saved Layouts…', icon: <SaveIcon />, action: run('manageLayouts') },
       {
-        id: 'newTerminal',
-        title: 'New Terminal',
-        shortcutText: '⌘T',
-        icon: <TerminalIcon />,
-        action: () => createTerminal(selectedWorkspaceId, undefined, undefined, dockCenter),
-      },
-      {
-        id: 'newBrowser',
-        title: 'New Browser',
-        shortcutText: '⌘⇧B',
-        icon: <GlobeIcon />,
-        action: () => createBrowser(selectedWorkspaceId, undefined, undefined, dockCenter),
-      },
-      {
-        id: 'newEditor',
-        title: 'New Editor',
-        shortcutText: '⌘⇧E',
-        icon: <FileTextIcon />,
-        action: () => createEditor(selectedWorkspaceId, undefined, undefined, dockCenter),
-      },
-      {
-        id: 'newAgent',
-        title: 'New Pi Agent',
-        shortcutText: '',
-        icon: <AgentIcon />,
-        action: () => createAgent(selectedWorkspaceId, undefined, dockCenter),
-      },
-      {
-        id: 'newCanvas',
-        title: 'New Canvas',
-        shortcutText: '',
-        icon: <LayoutIcon />,
-        action: () => createCanvas(selectedWorkspaceId),
-      },
-      {
-        id: 'toggleSidebar',
-        title: 'Toggle Sidebar',
-        shortcutText: '⌘\\',
-        icon: <SidebarIcon />,
-        action: () => toggleSidebar(),
-      },
-      {
-        id: 'toggleFileExplorer',
-        title: 'Toggle File Explorer',
-        shortcutText: '⌘⇧X',
-        icon: <FolderOpenIcon />,
-        action: () => { setActiveRightSidebarView('explorer') },
-      },
-      {
-        id: 'nodeSwitcher',
-        title: 'Switch Panel',
-        shortcutText: '⌃Space',
-        icon: <LayersIcon />,
-        action: () => setShowNodeSwitcher(true),
-      },
-      {
-        id: 'zoomReset',
-        title: 'Reset Zoom',
-        shortcutText: '⌘0',
-        icon: <ZoomResetIcon />,
-        action: () => setZoom(1.0),
-      },
-      {
-        id: 'zoomToFit',
-        title: 'Zoom to Fit',
-        shortcutText: '⌘1',
-        icon: <ZoomToFitIcon />,
-        action: () => canvasApi.getState().zoomToFit(),
-      },
-      {
-        id: 'autoLayout',
-        title: 'Auto-Layout Canvas',
-        shortcutText: '⇧⌘L',
-        icon: <LayersIcon />,
-        action: () => canvasApi.getState().autoLayout(),
-      },
-      {
-        id: 'newRegion',
-        title: 'New Region',
-        shortcutText: '',
-        icon: <RectangleIcon />,
-        action: () => canvasApi.getState().addRegion('Region', { x: 200, y: 200 }, { width: 400, height: 300 }),
-      },
-      {
-        id: 'manageLayouts',
-        title: 'Saved Layouts…',
-        shortcutText: '',
-        icon: <SaveIcon />,
-        action: () => useUIStore.getState().setShowLayoutsDialog(true),
+        id: 'skills',
+        title: 'Skills…',
+        icon: <SkillsIcon />,
+        action: () => useUIStore.getState().setShowSkillsDialog(true),
       },
       {
         id: 'showTutorial',
         title: 'Show Tutorial',
-        shortcutText: '',
         icon: <TutorialIcon />,
         // Replays the first-run guided tour by clearing the completed flag.
         action: () => {
@@ -232,15 +182,7 @@ export const CommandPalette: React.FC = () => {
           try { window.electronAPI?.trackFeatureUsed?.('onboarding_replayed') } catch { /* noop */ }
         },
       },
-      {
-        id: 'reloadWorkspace',
-        title: 'Reload Workspace from Disk',
-        shortcutText: '',
-        icon: <ReloadIcon />,
-        action: () => {
-          void import('../lib/workspace/session').then((m) => m.reloadActiveWorkspaceFromDisk())
-        },
-      },
+      { id: 'reloadWorkspace', title: 'Reload Workspace from Disk', icon: <ReloadIcon />, action: run('reloadWorkspace') },
       // Remote-only: delete the daemon from the host. Main re-probes to the
       // 'missing' phase; the canvas lock then offers "Install Companion" for a
       // clean reinstall — the deliberate delete → install two-step.
@@ -248,328 +190,185 @@ export const CommandPalette: React.FC = () => {
         ? [{
             id: 'deleteCompanion',
             title: 'Delete Companion',
-            shortcutText: '',
             icon: <DeleteCompanionIcon />,
             action: () => { void deleteCompanion(selectedWorkspaceId) },
           }]
         : []),
     ],
-    [
-      selectedWorkspaceId,
-      createTerminal,
-      createBrowser,
-      createEditor,
-      createCanvas,
-      createAgent,
-      toggleSidebar,
-      setActiveRightSidebarView,
-      setShowNodeSwitcher,
-      setZoom,
-      isRemoteWorkspace,
-      deleteCompanion,
-    ],
+    [run, isRemoteWorkspace, deleteCompanion, selectedWorkspaceId],
   )
 
-  // Open panels in the current workspace (for recommended items)
-  const openPanels = useAppStore(useShallow((s) => {
-    const ws = s.workspaces.find((w) => w.id === s.selectedWorkspaceId)
-    if (!ws) return []
-    return Object.values(ws.panels)
-  }))
+  // Open panels in the current workspace.
+  // Panels come from the SAME source as the sidebar workspace overview
+  // (useWorkspacePanelTree): ws.panels joined against every canvas store + the
+  // dock store. So a panel docked or on a secondary canvas still appears, ghosts
+  // (placed nowhere) and panels detached into other windows don't, and the order
+  // mirrors the overview's tree.
+  const { panels, orderedPanels } = useWorkspacePanelTree(selectedWorkspaceId)
 
-  // When no search text, show open panels
-  const showRecommended = !searchText.trim()
-  const recommendedPanels = useMemo(() => {
-    if (!showRecommended) return []
-    return openPanels.filter((p) => p.type === 'terminal' || p.type === 'editor' || p.type === 'browser' || p.type === 'agent')
-  }, [openPanels, showRecommended])
+  const rootPath = useAppStore((s) => s.workspaces.find((w) => w.id === s.selectedWorkspaceId)?.rootPath)
 
-  // Filter commands by search text
+  const query = searchText.trim().toLowerCase()
+
+  // Commands matched by title (empty query → all).
   const filteredCommands = useMemo(() => {
-    if (!searchText.trim()) return allCommands
-    const lower = searchText.toLowerCase()
-    return allCommands.filter((cmd) => cmd.title.toLowerCase().includes(lower))
-  }, [allCommands, searchText])
+    if (!query) return allCommands
+    return allCommands.filter((cmd) => cmd.title.toLowerCase().includes(query))
+  }, [allCommands, query])
 
-  // Debounced deep search (files + terminals + panels) when user types 2+ chars
-  useEffect(() => {
-    if (!showCommandPalette) return
-    if (searchText.length < 2) {
-      setSearchResults([])
-      return
+  // Navigable panels in overview order, matched by title.
+  const filteredPanels = useMemo<PanelResult[]>(() => {
+    const results: PanelResult[] = []
+    for (const panel of orderedPanels) {
+      if (!NAVIGABLE_PANEL_TYPES.includes(panel.type)) continue
+      const title = panel.title ?? panel.type
+      if (query && !title.toLowerCase().includes(query)) continue
+      results.push({
+        panelId: panel.id,
+        title,
+        type: panel.type,
+        secondary: panel.filePath ?? panel.url ?? panel.type,
+      })
     }
+    return results
+  }, [orderedPanels, query])
+
+  // With a query, search workspace files by name (debounced). With an empty box,
+  // skip the filesystem walk and show recently-opened files instead.
+  useEffect(() => {
+    if (!showCommandPalette || !query) { setFileResults([]); return }
+    const ws = useAppStore.getState().workspaces.find(
+      (w) => w.id === useAppStore.getState().selectedWorkspaceId,
+    )
+    if (!ws?.rootPath) { setFileResults([]); return }
 
     setSearching(true)
     const timer = setTimeout(async () => {
-      const q = searchText.toLowerCase()
-      const workspace = useAppStore.getState().workspaces.find(
-        (w) => w.id === useAppStore.getState().selectedWorkspaceId,
-      )
-      if (!workspace) { setSearching(false); return }
-
-      const canvasNodes = canvasApi.getState().nodes
-      const focusedNodeId = canvasApi.getState().focusedNodeId
-      const nodeByPanelId = new Map<string, { id: string; creationIndex: number }>()
-      for (const n of Object.values(canvasNodes)) {
-        nodeByPanelId.set(n.panelId, { id: n.id, creationIndex: n.creationIndex })
+      try {
+        const hits = await window.electronAPI.fsSearch(ws.rootPath!, searchText, { maxResults: 50 }, ws.id)
+        setFileResults(
+          hits
+            .filter((h) => !h.isDirectory)
+            .map((h) => ({ path: h.path, name: h.name, relativePath: h.relativePath })),
+        )
+      } catch {
+        setFileResults([])
       }
-
-      const out: SearchResult[] = []
-
-      // 1) Open panels (title + file path + URL)
-      for (const panel of Object.values(workspace.panels)) {
-        const title = panel.title ?? ''
-        const fp = panel.filePath ?? ''
-        const url = panel.url ?? ''
-        const hay = `${title}\n${fp}\n${url}`.toLowerCase()
-        if (!hay.includes(q)) continue
-        const n = nodeByPanelId.get(panel.id)
-        const recency = n ? (focusedNodeId === n.id ? 1_000_000 : n.creationIndex) : 0
-        out.push({
-          key: `panel:${panel.id}`,
-          kind: 'panel',
-          primary: title || panel.type,
-          secondary: fp || url || panel.type,
-          score: 2000 + recency,
-          panelId: panel.id,
-          panelType: panel.type,
-          nodeId: n?.id,
-        })
-      }
-
-      // 2) Terminal scrollback
-      const terminalPanels = Object.values(workspace.panels).filter((p) => p.type === 'terminal')
-      for (const panel of terminalPanels) {
-        const entry = terminalRegistry.getEntry(panel.id)
-        if (!entry) continue
-        const buffer = entry.terminal.buffer.active
-        const last = buffer.baseY + buffer.cursorY
-        let matches = 0
-        for (let i = 0; i < last && matches < 5; i++) {
-          const line = buffer.getLine(i)
-          if (!line) continue
-          const text = line.translateToString(true)
-          if (text.toLowerCase().includes(q)) {
-            matches++
-            const n = nodeByPanelId.get(panel.id)
-            out.push({
-              key: `term:${panel.id}:${i}`,
-              kind: 'terminal',
-              primary: `${panel.title}:${i + 1}`,
-              secondary: text.trim().slice(0, 200),
-              score: 1000 + (n ? n.creationIndex : 0),
-              panelId: panel.id,
-              nodeId: n?.id,
-              line: i + 1,
-            })
-          }
-        }
-      }
-
-      // 3) Workspace files (name + content) via fsSearch
-      if (workspace.rootPath) {
-        try {
-          const hits = await window.electronAPI.fsSearch(workspace.rootPath, searchText, { maxResults: 50 }, workspace.id)
-          for (const h of hits) {
-            if (h.isDirectory) continue
-            out.push({
-              key: `file:${h.path}${h.contentLine ?? ''}`,
-              kind: 'file',
-              primary: h.name + (h.contentLine ? `:${h.contentLine}` : ''),
-              secondary: h.contentPreview?.trim().slice(0, 200) || h.relativePath,
-              score: h.nameMatch ? 500 : 100,
-              filePath: h.path,
-              line: h.contentLine,
-            })
-          }
-        } catch {
-          /* filesystem search unavailable */
-        }
-      }
-
-      out.sort((a, b) => b.score - a.score)
-      setSearchResults(out.slice(0, 80))
-      setSelectedIndex(0)
       setSearching(false)
-    }, 250)
+    }, 200)
 
     return () => { clearTimeout(timer); setSearching(false) }
-  }, [searchText, showCommandPalette, canvasApi])
+  }, [searchText, query, showCommandPalette])
 
-  // Flat list of all items for keyboard navigation
-  const totalItems = showRecommended
-    ? recommendedPanels.length + filteredCommands.length
-    : filteredCommands.length + searchResults.length
+  // Recently-opened files, shown when the search box is empty. Skip files that
+  // are already open (they appear under Panels), and resolve a display name/path.
+  const recentFileResults = useMemo<FileResult[]>(() => {
+    if (query) return []
+    const openPaths = new Set(Object.values(panels).map((p) => p.filePath).filter(Boolean) as string[])
+    return getRecentFiles(selectedWorkspaceId)
+      .filter((p) => !openPaths.has(p))
+      .map((p) => ({
+        path: p,
+        name: p.split('/').pop() ?? p,
+        relativePath: rootPath && p.startsWith(rootPath) ? p.slice(rootPath.length).replace(/^\/+/, '') : p,
+      }))
+  }, [query, panels, selectedWorkspaceId, rootPath])
 
-  // Clamp selection when filtered list changes
+  const displayedFiles = query ? fileResults : recentFileResults
+
+  // Flat list of every navigable item, in render order. Drives keyboard nav.
+  const flatItems = useMemo<FlatItem[]>(() => [
+    ...filteredCommands.map((command) => ({ kind: 'command', command }) as FlatItem),
+    ...filteredPanels.map((panel) => ({ kind: 'panel', panel }) as FlatItem),
+    ...displayedFiles.map((file) => ({ kind: 'file', file }) as FlatItem),
+  ], [filteredCommands, filteredPanels, displayedFiles])
+
+  const totalItems = flatItems.length
+
+  // Clamp selection when the list changes.
   useEffect(() => {
-    setSelectedIndex((prev) =>
-      prev >= totalItems ? Math.max(0, totalItems - 1) : prev,
-    )
+    setSelectedIndex((prev) => (prev >= totalItems ? Math.max(0, totalItems - 1) : prev))
   }, [totalItems])
 
-  // Focus input when shown
+  // Keep the selected row in view as arrow-nav moves through items that have
+  // scrolled out of the (max-height, overflow-y-auto) results list.
+  useEffect(() => {
+    selectedRowRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selectedIndex])
+
+  // Focus input when shown.
   useEffect(() => {
     if (showCommandPalette) {
       setSearchText('')
       setSelectedIndex(0)
-      setSearchResults([])
-      requestAnimationFrame(() => {
-        inputRef.current?.focus()
-      })
+      setFileResults([])
+      requestAnimationFrame(() => { inputRef.current?.focus() })
     }
   }, [showCommandPalette])
 
-  const executeCommand = useCallback(
-    (cmd: CommandItem) => {
-      close()
-      cmd.action()
-    },
-    [close],
-  )
-
-  // Focus an open panel by id: pan/center the canvas node if it lives on the
-  // canvas, otherwise reveal it in its dock zone. Shared by the "Open Panels"
-  // click + Enter handlers and the panel search results.
+  // Navigate to a panel the same way the sidebar overview does — revealPanel
+  // resolves the panel's real location (dock zone or any canvas) and brings it
+  // forward, so docked / secondary-canvas panels are reached correctly.
   const focusPanelById = useCallback(
-    (panelId: string) => {
-      const cs = canvasApi.getState()
-      const node = Object.values(cs.nodes).find((n) => n.panelId === panelId)
-      if (node) {
-        cs.focusAndCenter(node.id)
-        return
-      }
-      const dock = getWorkspaceDockStore(selectedWorkspaceId)?.getState()
-      if (!dock) return
-      const loc = dock.getPanelLocation(panelId)
-      if (loc && loc.type === 'dock') {
-        const zone = dock.zones[loc.zone]
-        if (!zone.visible) dock.toggleZone(loc.zone)
-        if (zone.layout) {
-          const stack = findTabStack(zone.layout, loc.stackId)
-          if (stack) {
-            const idx = stack.panelIds.indexOf(panelId)
-            if (idx >= 0) dock.setActiveTab(loc.stackId, idx)
-          }
-        }
-      }
-    },
-    [canvasApi, selectedWorkspaceId],
+    (panelId: string) => { void revealPanel(selectedWorkspaceId, panelId, { retry: true }) },
+    [selectedWorkspaceId],
   )
 
-  const selectSearchResult = useCallback(
-    async (result: SearchResult) => {
+  const openFile = useCallback(
+    (file: FileResult) => {
       const appStore = useAppStore.getState()
       const wsId = appStore.selectedWorkspaceId
-      if (result.kind === 'file') {
-        const ws = appStore.workspaces.find((w) => w.id === wsId)
-        let panelId: string | undefined
-        if (ws) {
-          const existing = Object.values(ws.panels).find(
-            (p) => (p.type === 'editor' || p.type === 'document') && p.filePath === result.filePath,
-          )
-          panelId = existing?.id
-        }
-        if (!panelId) {
-          panelId = openFileAsPanel(wsId, result.filePath!)
-        }
-        const cs = canvasApi.getState()
-        const node = panelId ? Object.values(cs.nodes).find((n) => n.panelId === panelId) : undefined
-        if (node) cs.focusAndCenter(node.id)
-      } else if (result.kind === 'panel' || result.kind === 'terminal') {
-        if (result.nodeId) {
-          canvasApi.getState().focusAndCenter(result.nodeId)
-        } else if (result.panelId) {
-          focusPanelById(result.panelId)
-        }
+      const ws = appStore.workspaces.find((w) => w.id === wsId)
+      let panelId: string | undefined
+      if (ws) {
+        const existing = Object.values(ws.panels).find(
+          (p) => (p.type === 'editor' || p.type === 'document') && p.filePath === file.path,
+        )
+        panelId = existing?.id
       }
-      close()
+      if (!panelId) panelId = openFileAsPanel(wsId, file.path)
+      const cs = canvasApi.getState()
+      const node = panelId ? Object.values(cs.nodes).find((n) => n.panelId === panelId) : undefined
+      if (node) cs.focusAndCenter(node.id)
     },
-    [canvasApi, close, focusPanelById],
+    [canvasApi],
   )
 
-  // Keyboard navigation
-  useEffect(() => {
-    if (!showCommandPalette) return
-
-    function handleKey(e: KeyboardEvent) {
-      switch (e.key) {
-        case 'ArrowDown':
-          e.preventDefault()
-          setSelectedIndex((prev) =>
-            totalItems === 0 ? 0 : (prev + 1) % totalItems,
-          )
-          break
-        case 'ArrowUp':
-          e.preventDefault()
-          setSelectedIndex((prev) =>
-            totalItems === 0 ? 0 : (prev - 1 + totalItems) % totalItems,
-          )
-          break
-        case 'Enter':
-          e.preventDefault()
-          if (showRecommended) {
-            if (selectedIndex < recommendedPanels.length) {
-              const panel = recommendedPanels[selectedIndex]
-              if (panel) {
-                focusPanelById(panel.id)
-                close()
-              }
-            } else {
-              const cmdIndex = selectedIndex - recommendedPanels.length
-              const cmd = filteredCommands[cmdIndex]
-              if (cmd) executeCommand(cmd)
-            }
-          } else {
-            if (selectedIndex < filteredCommands.length) {
-              const cmd = filteredCommands[selectedIndex]
-              if (cmd) executeCommand(cmd)
-            } else {
-              const result = searchResults[selectedIndex - filteredCommands.length]
-              if (result) selectSearchResult(result)
-            }
-          }
-          break
-        case 'Escape':
-          e.preventDefault()
-          close()
-          break
+  const activate = useCallback(
+    (item: FlatItem) => {
+      close()
+      if (item.kind === 'command') {
+        item.command.action()
+      } else if (item.kind === 'panel') {
+        focusPanelById(item.panel.panelId)
+      } else {
+        openFile(item.file)
       }
-    }
+    },
+    [close, focusPanelById, openFile],
+  )
 
-    document.addEventListener('keydown', handleKey, { capture: true })
-    return () =>
-      document.removeEventListener('keydown', handleKey, { capture: true })
-  }, [showCommandPalette, filteredCommands, searchResults, recommendedPanels, showRecommended, selectedIndex, totalItems, executeCommand, selectSearchResult, close, canvasApi, focusPanelById])
-
-  // Group search results by kind for section headers. Must run before the
-  // early return below — a hook called conditionally changes the hook order
-  // between renders and crashes React when the palette is toggled.
-  const groupedResults = useMemo(() => {
-    const seen = new Set<SearchResultKind>()
-    const sections: { kind: SearchResultKind; items: SearchResult[] }[] = []
-    for (const r of searchResults) {
-      if (!seen.has(r.kind)) { seen.add(r.kind); sections.push({ kind: r.kind, items: [] }) }
-      sections.find((s) => s.kind === r.kind)!.items.push(r)
-    }
-    return sections
-  }, [searchResults])
+  // Arrow/Enter/Escape are handled on the search input's own onKeyDown (see the
+  // <input> below). The input is the element that actually holds focus while the
+  // palette is open, so binding there is reliable — a document-level listener
+  // would only fire if focus happened to stay on the host document, which it
+  // doesn't when the palette opens over a focused terminal/canvas surface.
 
   if (!showCommandPalette) return null
 
-  const sectionLabel = (kind: SearchResultKind) =>
-    kind === 'file' ? 'Files' : kind === 'panel' ? 'Panels' : 'Terminals'
-
-  let flatSearchIndex = filteredCommands.length
+  // Section boundaries within the flat list.
+  const panelStart = filteredCommands.length
+  const fileStart = panelStart + filteredPanels.length
+  const filesLabel = query ? 'Files' : 'Recent Files'
 
   return (
     <div
-      className="fixed inset-0 bg-black/30 flex justify-center z-50"
+      className={`fixed inset-0 flex justify-center z-50 ${BACKDROP}`}
       onClick={close}
     >
       <div
         data-onboarding="command-palette"
-        className="w-[600px] max-w-[600px] max-h-[440px] mt-[120px] rounded-xl overflow-hidden flex flex-col self-start bg-surface-2/95 backdrop-blur-xl border border-strong shadow-[0_16px_48px_rgba(0,0,0,0.55)]"
+        className={`w-[600px] max-w-[600px] max-h-[440px] mt-[120px] overflow-hidden flex flex-col self-start ${CARD_SURFACE}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Search input */}
@@ -578,13 +377,33 @@ export const CommandPalette: React.FC = () => {
             <MagnifyingGlass size={15} className="text-muted shrink-0" />
             <input
               ref={inputRef}
+              autoFocus
               type="text"
               value={searchText}
-              onChange={(e) => {
-                setSearchText(e.target.value)
-                setSelectedIndex(0)
+              onChange={(e) => { setSearchText(e.target.value); setSelectedIndex(0) }}
+              onKeyDown={(e) => {
+                switch (e.key) {
+                  case 'ArrowDown':
+                    e.preventDefault()
+                    setSelectedIndex((prev) => (totalItems === 0 ? 0 : (prev + 1) % totalItems))
+                    break
+                  case 'ArrowUp':
+                    e.preventDefault()
+                    setSelectedIndex((prev) => (totalItems === 0 ? 0 : (prev - 1 + totalItems) % totalItems))
+                    break
+                  case 'Enter': {
+                    e.preventDefault()
+                    const item = flatItems[selectedIndex]
+                    if (item) activate(item)
+                    break
+                  }
+                  case 'Escape':
+                    e.preventDefault()
+                    close()
+                    break
+                }
               }}
-              placeholder="Search files, panels, terminals and more by name"
+              placeholder="Search commands, panels and files by name"
               className="flex-1 bg-transparent text-primary text-[13px] outline-none placeholder:text-muted"
             />
           </div>
@@ -592,28 +411,51 @@ export const CommandPalette: React.FC = () => {
 
         {/* Results list */}
         <div className="flex-1 overflow-y-auto pb-1.5">
-          {totalItems === 0 && !searching ? (
+          {totalItems === 0 ? (
             <div className="text-muted text-[13px] text-center py-5">
-              {searchText.length >= 2 ? 'No results' : 'No matching results'}
+              {searching ? 'Searching…' : 'No results'}
             </div>
-          ) : showRecommended ? (
+          ) : (
             <>
-              {/* Open panels */}
-              {recommendedPanels.length > 0 && (
+              {/* Commands */}
+              {filteredCommands.length > 0 && (
                 <>
-                  <SectionHeader>Open Panels</SectionHeader>
-                  {recommendedPanels.map((panel, i) => {
+                  <SectionHeader>Commands</SectionHeader>
+                  {filteredCommands.map((cmd, i) => {
                     const isSelected = i === selectedIndex
-                    const iconForType = panel.type === 'terminal' ? <TerminalIcon /> : panel.type === 'browser' ? <GlobeIcon /> : panel.type === 'agent' ? <AgentIcon /> : <FileTextIcon />
-                    const colorForType = panel.type === 'terminal' ? 'text-emerald-400' : panel.type === 'browser' ? 'text-sky-400' : panel.type === 'agent' ? 'text-[rgb(var(--agent-rgb))]' : 'text-amber-400'
                     return (
                       <Row
-                        key={panel.id}
+                        key={cmd.id}
+                        ref={isSelected ? selectedRowRef : undefined}
                         selected={isSelected}
-                        onClick={() => { focusPanelById(panel.id); close() }}
+                        onClick={() => activate({ kind: 'command', command: cmd })}
                         onMouseEnter={() => setSelectedIndex(i)}
                       >
-                        <span className={`shrink-0 ${colorForType}`}>{iconForType}</span>
+                        <span className="shrink-0 text-secondary">{cmd.icon}</span>
+                        <span className="text-[13px] text-primary flex-1 truncate">{cmd.title}</span>
+                      </Row>
+                    )
+                  })}
+                </>
+              )}
+
+              {/* Panels */}
+              {filteredPanels.length > 0 && (
+                <>
+                  {filteredCommands.length > 0 && <Separator />}
+                  <SectionHeader>Panels</SectionHeader>
+                  {filteredPanels.map((panel, i) => {
+                    const itemIndex = panelStart + i
+                    const isSelected = itemIndex === selectedIndex
+                    return (
+                      <Row
+                        key={panel.panelId}
+                        ref={isSelected ? selectedRowRef : undefined}
+                        selected={isSelected}
+                        onClick={() => activate({ kind: 'panel', panel })}
+                        onMouseEnter={() => setSelectedIndex(itemIndex)}
+                      >
+                        <PanelIcon type={panel.type} />
                         <span className="text-[13px] text-primary flex-1 truncate">{panel.title}</span>
                         <span className="text-[11px] text-muted capitalize">{panel.type}</span>
                       </Row>
@@ -622,82 +464,32 @@ export const CommandPalette: React.FC = () => {
                 </>
               )}
 
-              {/* Commands */}
-              {filteredCommands.length > 0 && (
+              {/* Files */}
+              {displayedFiles.length > 0 && (
                 <>
-                  {recommendedPanels.length > 0 && <Separator />}
-                  <SectionHeader>Commands</SectionHeader>
-                  {filteredCommands.map((cmd, i) => {
-                    const itemIndex = recommendedPanels.length + i
+                  {(filteredCommands.length > 0 || filteredPanels.length > 0) && <Separator />}
+                  <SectionHeader>{filesLabel}</SectionHeader>
+                  {displayedFiles.map((file, i) => {
+                    const itemIndex = fileStart + i
                     const isSelected = itemIndex === selectedIndex
                     return (
                       <Row
-                        key={cmd.id}
+                        key={file.path}
+                        ref={isSelected ? selectedRowRef : undefined}
                         selected={isSelected}
-                        onClick={() => executeCommand(cmd)}
+                        onClick={() => activate({ kind: 'file', file })}
                         onMouseEnter={() => setSelectedIndex(itemIndex)}
                       >
-                        <span className="shrink-0 text-secondary">{cmd.icon}</span>
-                        <span className="text-[13px] text-primary flex-1 truncate">{cmd.title}</span>
-                        <Shortcut text={cmd.shortcutText} />
+                        <span className="shrink-0 text-amber-400"><FileText size={ICON_SIZE} /></span>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-primary text-[13px] truncate">{file.name}</div>
+                          <div className="text-muted text-[11px] truncate">{file.relativePath}</div>
+                        </div>
                       </Row>
                     )
                   })}
                 </>
               )}
-            </>
-          ) : (
-            <>
-              {/* Matching commands */}
-              {filteredCommands.length > 0 && (
-                <>
-                  <SectionHeader>Commands</SectionHeader>
-                  {filteredCommands.map((cmd, index) => {
-                    const isSelected = index === selectedIndex
-                    return (
-                      <Row
-                        key={cmd.id}
-                        selected={isSelected}
-                        onClick={() => executeCommand(cmd)}
-                        onMouseEnter={() => setSelectedIndex(index)}
-                      >
-                        <span className="shrink-0 text-secondary">{cmd.icon}</span>
-                        <span className="text-[13px] text-primary flex-1 truncate">{cmd.title}</span>
-                        <Shortcut text={cmd.shortcutText} />
-                      </Row>
-                    )
-                  })}
-                </>
-              )}
-
-              {/* Search results grouped by kind */}
-              {groupedResults.map((section, si) => {
-                const showSeparator = si > 0 || filteredCommands.length > 0
-                return (
-                  <div key={section.kind}>
-                    {showSeparator && <Separator />}
-                    <SectionHeader>{sectionLabel(section.kind)}</SectionHeader>
-                    {section.items.map((r) => {
-                      const thisIndex = flatSearchIndex++
-                      const isSelected = thisIndex === selectedIndex
-                      return (
-                        <Row
-                          key={r.key}
-                          selected={isSelected}
-                          onClick={() => selectSearchResult(r)}
-                          onMouseEnter={() => setSelectedIndex(thisIndex)}
-                        >
-                          <SearchResultIcon result={r} />
-                          <div className="flex-1 min-w-0">
-                            <div className="text-primary text-[13px] truncate">{r.primary}</div>
-                            <div className="text-muted text-[11px] truncate">{r.secondary}</div>
-                          </div>
-                        </Row>
-                      )
-                    })}
-                  </div>
-                )
-              })}
             </>
           )}
         </div>
@@ -710,22 +502,24 @@ export const CommandPalette: React.FC = () => {
 // Layout primitives — slim rows, section headers, separators, keycap shortcuts
 // -----------------------------------------------------------------------------
 
-const Row: React.FC<{
+const Row = React.forwardRef<HTMLDivElement, {
   selected: boolean
   onClick: () => void
   onMouseEnter: () => void
   children: React.ReactNode
-}> = ({ selected, onClick, onMouseEnter, children }) => (
+}>(({ selected, onClick, onMouseEnter, children }, ref) => (
   <div
+    ref={ref}
     className={`flex items-center gap-2.5 mx-1.5 px-2.5 py-1.5 cursor-pointer rounded-md ${
-      selected ? 'bg-[rgb(var(--agent-rgb))]/12' : ''
+      selected ? 'bg-[rgb(var(--agent-rgb))]/25 ring-1 ring-inset ring-[rgb(var(--agent-rgb))]/40' : ''
     }`}
     onClick={onClick}
     onMouseEnter={onMouseEnter}
   >
     {children}
   </div>
-)
+))
+Row.displayName = 'Row'
 
 const SectionHeader: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <div className="px-3.5 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">
@@ -735,42 +529,15 @@ const SectionHeader: React.FC<{ children: React.ReactNode }> = ({ children }) =>
 
 const Separator: React.FC = () => <div className="mx-3.5 my-1 border-t border-subtle" />
 
-// Render a shortcut string (e.g. "⌘⇧B", "⌃Space") as individual keycaps.
-const Shortcut: React.FC<{ text: string }> = ({ text }) => {
-  if (!text) return null
-  const mods = new Set(['⌘', '⌥', '⌃', '⇧'])
-  const keys: string[] = []
-  let rest = ''
-  for (const ch of text) {
-    if (mods.has(ch)) keys.push(ch)
-    else rest += ch
-  }
-  if (rest) keys.push(rest)
-  return (
-    <span className="flex items-center gap-1 shrink-0">
-      {keys.map((k, i) => (
-        <kbd
-          key={i}
-          className="min-w-[18px] h-[18px] px-1 rounded border border-strong bg-surface-4 text-secondary text-[10px] leading-none flex items-center justify-center"
-        >
-          {k}
-        </kbd>
-      ))}
-    </span>
-  )
-}
-
 // -----------------------------------------------------------------------------
-// Search result icon — bare type-aware glyph
+// Panel icon — type-aware glyph matching the canvas panel colors
 // -----------------------------------------------------------------------------
 
-function SearchResultIcon({ result }: { result: SearchResult }) {
+function PanelIcon({ type }: { type: PanelType }) {
   const cls = 'shrink-0'
-  if (result.kind === 'file') return <span className={`${cls} text-amber-400`}><FileText size={ICON_SIZE} /></span>
-  if (result.kind === 'terminal') return <span className={`${cls} text-emerald-400`}><Terminal size={ICON_SIZE} /></span>
-  const { panelType } = result
-  if (panelType === 'terminal') return <span className={`${cls} text-emerald-400`}><Terminal size={ICON_SIZE} /></span>
-  if (panelType === 'browser')  return <span className={`${cls} text-sky-400`}><Globe size={ICON_SIZE} /></span>
-  if (panelType === 'editor')   return <span className={`${cls} text-orange-400`}><FileText size={ICON_SIZE} /></span>
+  if (type === 'terminal') return <span className={`${cls} text-emerald-400`}><Terminal size={ICON_SIZE} /></span>
+  if (type === 'browser')  return <span className={`${cls} text-sky-400`}><Globe size={ICON_SIZE} /></span>
+  if (type === 'editor' || type === 'document') return <span className={`${cls} text-orange-400`}><FileText size={ICON_SIZE} /></span>
+  if (type === 'agent')    return <span className={`${cls} text-[rgb(var(--agent-rgb))]`}><CateLogo size={ICON_SIZE} /></span>
   return <span className={`${cls} text-violet-400`}><Square size={ICON_SIZE} /></span>
 }

@@ -4,10 +4,12 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useCanvasStoreContext, useCanvasStoreApi, shallow } from '../stores/CanvasStoreContext'
-import { useWorkspacePanels } from '../stores/appStore'
+import { useWorkspacePanels, useAppStore } from '../stores/appStore'
+import { useAgentInfoByPanel } from '../hooks/useAgentPanelInfo'
+import { useUIStateStore } from '../stores/uiStateStore'
 
-const MINIMAP_DEFAULT_WIDTH = 200
-const MINIMAP_DEFAULT_HEIGHT = 150
+// Default minimap size lives in DEFAULT_UI_STATE (shared/types); the floating
+// size is restored from ui-state.json.
 const MINIMAP_MIN_WIDTH = 120
 const MINIMAP_MIN_HEIGHT = 90
 const MINIMAP_MAX_WIDTH = 600
@@ -16,22 +18,10 @@ const MINIMAP_PADDING = 10
 const MINIMAP_GAP = 12
 
 type Corner = 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left'
-const CORNER_KEY = 'cate.minimap.corner'
-const SIZE_KEY = 'cate.minimap.size'
-const loadCorner = (): Corner => {
-  const v = (typeof localStorage !== 'undefined' && localStorage.getItem(CORNER_KEY)) as Corner | null
-  return v || 'bottom-right'
-}
-const loadSize = (): { w: number; h: number } => {
-  try {
-    const raw = localStorage.getItem(SIZE_KEY)
-    if (raw) {
-      const p = JSON.parse(raw)
-      if (typeof p.w === 'number' && typeof p.h === 'number') return { w: p.w, h: p.h }
-    }
-  } catch {}
-  return { w: MINIMAP_DEFAULT_WIDTH, h: MINIMAP_DEFAULT_HEIGHT }
-}
+// Minimap placement persists in ui-state.json via the UI-state store (loaded on
+// launch, before the canvas mounts). These read the current store value.
+const loadCorner = (): Corner => useUIStateStore.getState().minimapCorner
+const loadSize = (): { w: number; h: number } => useUIStateStore.getState().minimapSize
 
 // Map a panel type to a themed CSS variable so the minimap follows the active
 // theme. Falls back to a generic surface accent for unknown types.
@@ -53,7 +43,6 @@ interface MinimapProps {
 
 const Minimap: React.FC<MinimapProps> = ({ mode = 'floating' }) => {
   const nodeList = useCanvasStoreContext((s) => Object.values(s.nodes), shallow)
-  const regionList = useCanvasStoreContext((s) => Object.values(s.regions), shallow)
   // NOTE: viewportOffset is intentionally NOT subscribed via React here.
   // The viewport rect div is updated imperatively via canvasApi.subscribe
   // so panning never triggers a Minimap re-render.
@@ -63,6 +52,10 @@ const Minimap: React.FC<MinimapProps> = ({ mode = 'floating' }) => {
     (a, b) => a.width === b.width && a.height === b.height,
   )
   const panels = useWorkspacePanels()
+  // Agent logos are keyed by panelId, scoped to the selected workspace — same
+  // scope `useWorkspacePanels()` reads from, so they line up with the nodes.
+  const workspaceId = useAppStore((s) => s.selectedWorkspaceId)
+  const agentInfoByPanel = useAgentInfoByPanel(workspaceId)
   const canvasApi = useCanvasStoreApi()
   const minimapRef = useRef<HTMLDivElement>(null)
   // Ref to the viewport indicator div — updated imperatively on pan
@@ -100,7 +93,7 @@ const Minimap: React.FC<MinimapProps> = ({ mode = 'floating' }) => {
       setSize({ w, h })
       if (sizeDebounceRef.current) clearTimeout(sizeDebounceRef.current)
       sizeDebounceRef.current = setTimeout(() => {
-        try { localStorage.setItem(SIZE_KEY, JSON.stringify({ w, h })) } catch {}
+        useUIStateStore.getState().setUIState('minimapSize', { w, h })
       }, 500)
     }
     const handleUp = () => {
@@ -124,7 +117,7 @@ const Minimap: React.FC<MinimapProps> = ({ mode = 'floating' }) => {
         if (prev === next) return prev
         if (cornerDebounceRef.current) clearTimeout(cornerDebounceRef.current)
         cornerDebounceRef.current = setTimeout(() => {
-          try { localStorage.setItem(CORNER_KEY, next) } catch {}
+          useUIStateStore.getState().setUIState('minimapCorner', next)
         }, 500)
         return next
       })
@@ -185,24 +178,12 @@ const Minimap: React.FC<MinimapProps> = ({ mode = 'floating' }) => {
 
   const contentBounds = useMemo(() => {
     if (nodeList.length === 0) return null
-    const minX = Math.min(
-      ...nodeList.map(n => n.origin.x),
-      ...(regionList.length > 0 ? regionList.map(r => r.origin.x) : []),
-    )
-    const minY = Math.min(
-      ...nodeList.map(n => n.origin.y),
-      ...(regionList.length > 0 ? regionList.map(r => r.origin.y) : []),
-    )
-    const maxX = Math.max(
-      ...nodeList.map(n => n.origin.x + n.size.width),
-      ...(regionList.length > 0 ? regionList.map(r => r.origin.x + r.size.width) : []),
-    )
-    const maxY = Math.max(
-      ...nodeList.map(n => n.origin.y + n.size.height),
-      ...(regionList.length > 0 ? regionList.map(r => r.origin.y + r.size.height) : []),
-    )
+    const minX = Math.min(...nodeList.map(n => n.origin.x))
+    const minY = Math.min(...nodeList.map(n => n.origin.y))
+    const maxX = Math.max(...nodeList.map(n => n.origin.x + n.size.width))
+    const maxY = Math.max(...nodeList.map(n => n.origin.y + n.size.height))
     return { minX, minY, maxX, maxY }
-  }, [nodeList, regionList])
+  }, [nodeList])
 
   if (!contentBounds) return null
 
@@ -314,27 +295,15 @@ const Minimap: React.FC<MinimapProps> = ({ mode = 'floating' }) => {
         >⠿</div>
       )}
 
-      {/* Region rectangles */}
-      {regionList.map((region) => (
-        <div
-          key={`region-${region.id}`}
-          style={{
-            position: 'absolute',
-            left: toMiniX(region.origin.x),
-            top: toMiniY(region.origin.y),
-            width: Math.max(region.size.width * scale, 3),
-            height: Math.max(region.size.height * scale, 3),
-            border: `1px solid ${region.color.replace(/[\d.]+\)$/, '0.5)')}`,
-            borderRadius: 1,
-            backgroundColor: region.color.replace(/[\d.]+\)$/, '0.15)'),
-          }}
-        />
-      ))}
-
       {/* Node rectangles */}
       {nodeList.map((node) => {
         const panel = panels?.[node.panelId]
         const type = panel?.type || 'terminal'
+        const rectW = Math.max(node.size.width * scale, 2)
+        const rectH = Math.max(node.size.height * scale, 2)
+        // Show the agent logo when an agent is open in this panel's terminal.
+        const agentLogo = agentInfoByPanel[node.panelId]?.logo ?? null
+        const iconSize = Math.min(rectW, rectH) - 2
         return (
           <div
             key={node.id}
@@ -347,14 +316,32 @@ const Minimap: React.FC<MinimapProps> = ({ mode = 'floating' }) => {
               position: 'absolute',
               left: toMiniX(node.origin.x),
               top: toMiniY(node.origin.y),
-              width: Math.max(node.size.width * scale, 2),
-              height: Math.max(node.size.height * scale, 2),
+              width: rectW,
+              height: rectH,
               backgroundColor: themedPanelColor(type),
               borderRadius: 1,
               opacity: 1,
               cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              overflow: 'hidden',
             }}
-          />
+          >
+            {agentLogo && iconSize >= 6 && (
+              <img
+                src={agentLogo}
+                alt=""
+                draggable={false}
+                style={{
+                  width: Math.min(iconSize, 16),
+                  height: Math.min(iconSize, 16),
+                  objectFit: 'contain',
+                  pointerEvents: 'none',
+                }}
+              />
+            )}
+          </div>
         )
       })}
 

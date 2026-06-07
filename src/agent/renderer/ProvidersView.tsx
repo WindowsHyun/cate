@@ -44,31 +44,44 @@ interface ProvidersViewProps {
   scopedProviderId?: string
   /** When true, render without the outer header (parent owns navigation). */
   embedded?: boolean
-  /** Models from the Pi runtime session, used for the default model picker. */
-  availableModels?: Array<{ provider: string; model: string; label?: string }>
 }
 
-export function ProvidersView({ onBack, scopedProviderId, embedded = false, availableModels }: ProvidersViewProps) {
+export function ProvidersView({ onBack, scopedProviderId, embedded = false }: ProvidersViewProps) {
   const [providers, setProviders] = useState<AuthProviderDescriptor[]>([])
   const [statuses, setStatuses] = useState<AuthProviderStatus[]>([])
+  // Selectable models for the default-model picker — derived from the connected
+  // providers in auth.json, so it works here without an agent session running.
+  const [models, setModels] = useState<Array<{ provider: string; model: string; label?: string }>>([])
   // Accordion: at most one provider expanded at a time. Keyed by `${kind}-${id}`
   // because the same provider id can appear as both an OAuth and an API-key entry.
   const [expandedKey, setExpandedKey] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
-      const [pList, sList] = await Promise.all([
+      const [pList, sList, mList] = await Promise.all([
         window.electronAPI.authListProviders(),
         window.electronAPI.authStatus(),
+        window.electronAPI.agentListModels(),
       ])
       setProviders(pList)
       setStatuses(sList)
+      setModels(mList.map((m) => ({ provider: m.provider, model: m.id, label: m.label })))
     } catch (err) {
       log.warn('[ProvidersView] refresh failed', err)
     }
   }, [])
 
   useEffect(() => { refresh() }, [refresh])
+
+  // Credentials can change in another window (or via a background token
+  // refresh). Re-pull provider status + the model list when the main process
+  // broadcasts a change so neither the Connected/Disconnected state nor the
+  // default-model picker goes stale.
+  useEffect(() => {
+    if (!window.electronAPI?.onAuthChanged) return
+    const unsub = window.electronAPI.onAuthChanged(() => { void refresh() })
+    return unsub
+  }, [refresh])
 
   useEffect(() => {
     if (!scopedProviderId) return
@@ -98,61 +111,70 @@ export function ProvidersView({ onBack, scopedProviderId, embedded = false, avai
     setExpandedKey((prev) => (prev === key ? null : key))
   }, [])
 
+  const body = (
+    <>
+      <DefaultModelSection models={models} />
+      <Section label="Sign in">
+        {grouped.oauth.map((p) => {
+          const key = `oauth-${p.id}`
+          return (
+            <ProviderAccordionRow
+              key={key}
+              provider={p}
+              status={statusFor(p.id)}
+              expanded={expandedKey === key}
+              onToggle={() => toggle(key)}
+              onRefresh={refresh}
+            />
+          )
+        })}
+      </Section>
+      <Section label="API key">
+        {grouped.apiKey.map((p) => {
+          const key = `apiKey-${p.id}`
+          return (
+            <ProviderAccordionRow
+              key={key}
+              provider={p}
+              status={statusFor(p.id)}
+              expanded={expandedKey === key}
+              onToggle={() => toggle(key)}
+              onRefresh={refresh}
+            />
+          )
+        })}
+      </Section>
+      <Section label="Custom">
+        <CustomOpenAIRow
+          expanded={expandedKey === 'custom-openai'}
+          onToggle={() => toggle('custom-openai')}
+        />
+      </Section>
+    </>
+  )
+
+  // Embedded in the main Settings window: render as a plain block so it inherits
+  // the section column's width + padding and the page's single scroll — no extra
+  // horizontal inset or nested scroll area like the in-panel (agent) chrome has.
+  if (embedded) {
+    return <div className="space-y-4 text-primary">{body}</div>
+  }
+
   return (
     <div className="flex-1 flex flex-col text-primary min-h-0">
-      {!embedded && (
-        <div className="flex items-center gap-2 px-3 h-9 border-b border-subtle shrink-0">
-          <button
-            onClick={() => onBack?.()}
-            className="p-1 -ml-1 rounded-md text-muted hover:text-primary hover:bg-white/5"
-            title="Back to chat"
-          >
-            <ArrowLeft size={14} />
-          </button>
-          <div className="text-[12px] font-medium text-primary truncate flex-1 min-w-0">Providers</div>
-        </div>
-      )}
+      <div className="flex items-center gap-2 px-3 h-9 border-b border-subtle shrink-0">
+        <button
+          onClick={() => onBack?.()}
+          className="p-1 -ml-1 rounded-md text-muted hover:text-primary hover:bg-hover"
+          title="Back to chat"
+        >
+          <ArrowLeft size={14} />
+        </button>
+        <div className="text-[12px] font-medium text-primary truncate flex-1 min-w-0">Providers</div>
+      </div>
 
       <div className="flex-1 overflow-y-auto min-h-0">
-        <div className="px-3 py-3 space-y-4">
-          <DefaultModelSection models={availableModels ?? []} />
-          <Section label="Sign in">
-            {grouped.oauth.map((p) => {
-              const key = `oauth-${p.id}`
-              return (
-                <ProviderAccordionRow
-                  key={key}
-                  provider={p}
-                  status={statusFor(p.id)}
-                  expanded={expandedKey === key}
-                  onToggle={() => toggle(key)}
-                  onRefresh={refresh}
-                />
-              )
-            })}
-          </Section>
-          <Section label="API key">
-            {grouped.apiKey.map((p) => {
-              const key = `apiKey-${p.id}`
-              return (
-                <ProviderAccordionRow
-                  key={key}
-                  provider={p}
-                  status={statusFor(p.id)}
-                  expanded={expandedKey === key}
-                  onToggle={() => toggle(key)}
-                  onRefresh={refresh}
-                />
-              )
-            })}
-          </Section>
-          <Section label="Custom">
-            <CustomOpenAIRow
-              expanded={expandedKey === 'custom-openai'}
-              onToggle={() => toggle('custom-openai')}
-            />
-          </Section>
-        </div>
+        <div className="px-3 py-3 space-y-4">{body}</div>
       </div>
     </div>
   )
@@ -180,11 +202,11 @@ function CustomOpenAIRow({
 
   const configured = !!cfg && !!cfg.baseUrl && cfg.models.length > 0
   return (
-    <div className="border-b border-white/5 last:border-0">
+    <div className="border-b border-subtle last:border-0">
       <button
         onClick={onToggle}
         aria-expanded={expanded}
-        className="w-full flex items-center gap-2 px-2.5 py-2 text-left hover:bg-white/[0.04]"
+        className="w-full flex items-center gap-2 px-2.5 py-2 text-left hover:bg-hover"
       >
         <span className="flex-1 truncate text-[12.5px] text-primary">Custom OpenAI endpoint</span>
         {configured ? (
@@ -199,7 +221,7 @@ function CustomOpenAIRow({
           : <CaretRight size={10} className="text-muted/60" />}
       </button>
       {expanded && (
-        <div className="p-2.5 border-t border-white/5 bg-black/10">
+        <div className="p-2.5 border-t border-subtle bg-surface-0">
           <CustomOpenAIForm cfg={cfg} onSaved={setCfg} />
         </div>
       )}
@@ -263,7 +285,7 @@ function CustomOpenAIForm({
         autoComplete="off"
         spellCheck={false}
         placeholder="Base URL (e.g. http://localhost:11434/v1)"
-        className="w-full bg-surface-3 border border-white/10 rounded-md px-2 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60 font-mono"
+        className="w-full bg-surface-3 border border-strong rounded-md px-2 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60 font-mono"
       />
       <div className="relative">
         <input
@@ -273,7 +295,7 @@ function CustomOpenAIForm({
           autoComplete="off"
           spellCheck={false}
           placeholder="API key (optional for local servers)"
-          className="w-full bg-surface-3 border border-white/10 rounded-md pl-2 pr-8 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60 font-mono"
+          className="w-full bg-surface-3 border border-strong rounded-md pl-2 pr-8 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60 font-mono"
         />
         <button
           type="button"
@@ -291,7 +313,7 @@ function CustomOpenAIForm({
         autoComplete="off"
         spellCheck={false}
         placeholder="Model ids, comma-separated (e.g. llama3.1:8b)"
-        className="w-full bg-surface-3 border border-white/10 rounded-md px-2 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60 font-mono"
+        className="w-full bg-surface-3 border border-strong rounded-md px-2 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60 font-mono"
       />
       <div className="text-[11px] text-muted leading-relaxed">
         Any OpenAI-compatible server.
@@ -309,14 +331,14 @@ function CustomOpenAIForm({
           <button
             disabled={saving}
             onClick={handleRemove}
-            className="text-[11px] text-muted hover:text-rose-200"
+            className="text-[11px] text-muted hover:text-danger"
           >
             Remove
           </button>
         )}
       </div>
 
-      {error && <div className="text-[11px] text-rose-300">{error}</div>}
+      {error && <div className="text-[11px] text-danger">{error}</div>}
       {savedAt && !error && (
         <div className="flex items-center gap-1 text-[11px] text-agent-light">
           <CheckCircle size={12} weight="fill" /> Saved.
@@ -333,10 +355,10 @@ function CustomOpenAIForm({
 function Section({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <div className="px-2 mb-1 text-[10px] uppercase tracking-wider text-muted/70 font-semibold">
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted/70 font-semibold">
         {label}
       </div>
-      <div className="rounded-lg border border-white/5 bg-white/[0.02] overflow-hidden">
+      <div className="rounded-lg border border-subtle bg-white/[0.02] overflow-hidden">
         {children}
       </div>
     </div>
@@ -358,11 +380,11 @@ function ProviderAccordionRow({
 }) {
   const connected = !!status?.connected
   return (
-    <div className="border-b border-white/5 last:border-0">
+    <div className="border-b border-subtle last:border-0">
       <button
         onClick={onToggle}
         aria-expanded={expanded}
-        className="w-full flex items-center gap-2 px-2.5 py-2 text-left hover:bg-white/[0.04]"
+        className="w-full flex items-center gap-2 px-2.5 py-2 text-left hover:bg-hover"
       >
         <span className="flex-1 truncate text-[12.5px] text-primary">{provider.name}</span>
         {connected ? (
@@ -377,7 +399,7 @@ function ProviderAccordionRow({
           : <CaretRight size={10} className="text-muted/60" />}
       </button>
       {expanded && (
-        <div className="p-2.5 border-t border-white/5 bg-black/10">
+        <div className="p-2.5 border-t border-subtle bg-surface-0">
           <ProviderDetail provider={provider} status={status} onRefresh={onRefresh} />
         </div>
       )}
@@ -493,13 +515,13 @@ function OAuthForm({
         <div className="flex items-center gap-2">
           <button
             onClick={handleStart}
-            className="flex-1 px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-primary text-[12px]"
+            className="flex-1 px-3 py-1.5 rounded-md bg-hover hover:bg-hover-strong text-primary text-[12px]"
           >
             Re-authenticate
           </button>
           <button
             onClick={handleDisconnect}
-            className="shrink-0 px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-[12px] text-rose-300 hover:text-rose-200"
+            className="shrink-0 px-3 py-1.5 rounded-md bg-hover hover:bg-hover-strong text-[12px] text-danger hover:text-danger"
           >
             Disconnect
           </button>
@@ -511,7 +533,7 @@ function OAuthForm({
       )}
 
       {phase.type === 'deviceCode' && (
-        <div className="space-y-3 rounded-md border border-white/10 bg-white/[0.03] p-2.5">
+        <div className="space-y-3 rounded-md border border-strong bg-hover p-2.5">
           <div className="text-[12px] text-primary">
             Enter this code in your browser at{' '}
             <a href={phase.verificationUri} target="_blank" rel="noreferrer" className="underline text-agent-light">
@@ -520,12 +542,12 @@ function OAuthForm({
             :
           </div>
           <div className="flex items-center gap-2">
-            <code className="flex-1 text-center font-mono text-[18px] tracking-[0.3em] py-2 rounded-md bg-black/30 text-primary">
+            <code className="flex-1 text-center font-mono text-[18px] tracking-[0.3em] py-2 rounded-md bg-surface-0 text-primary">
               {phase.userCode}
             </code>
             <button
               onClick={() => { try { navigator.clipboard.writeText(phase.userCode) } catch { /* */ } }}
-              className="p-2 rounded-md bg-white/5 hover:bg-white/10 text-primary"
+              className="p-2 rounded-md bg-hover hover:bg-hover-strong text-primary"
               title="Copy code"
             >
               <Copy size={12} />
@@ -547,7 +569,7 @@ function OAuthForm({
       )}
 
       {phase.type === 'prompt' && (
-        <div className="space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-2.5">
+        <div className="space-y-2 rounded-md border border-strong bg-hover p-2.5">
           <div className="text-[12px] text-primary">{phase.message}</div>
           <input
             type="text"
@@ -556,7 +578,7 @@ function OAuthForm({
             onChange={(e) => setPromptValue(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') handlePromptSubmit(phase.promptId, promptValue) }}
             placeholder={phase.placeholder ?? ''}
-            className="w-full bg-surface-3 border border-white/10 rounded-md px-2 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60"
+            className="w-full bg-surface-3 border border-strong rounded-md px-2 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60"
           />
           <div className="flex justify-end">
             <button
@@ -571,14 +593,14 @@ function OAuthForm({
       )}
 
       {phase.type === 'select' && (
-        <div className="space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-2.5">
+        <div className="space-y-2 rounded-md border border-strong bg-hover p-2.5">
           <div className="text-[12px] text-primary">{phase.message}</div>
           <div className="flex flex-col gap-1">
             {phase.options.map((opt) => (
               <button
                 key={opt.id}
                 onClick={() => handlePromptSubmit(phase.promptId, opt.id)}
-                className="text-left px-2 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-[12px] text-primary"
+                className="text-left px-2 py-1.5 rounded-md bg-hover hover:bg-hover-strong text-[12px] text-primary"
               >
                 {opt.label}
               </button>
@@ -588,7 +610,7 @@ function OAuthForm({
       )}
 
       {phase.type === 'manualCode' && (
-        <div className="space-y-2 rounded-md border border-white/10 bg-white/[0.03] p-2.5">
+        <div className="space-y-2 rounded-md border border-strong bg-hover p-2.5">
           <div className="text-[12px] text-primary">
             Sign in completes automatically when the browser callback fires.
             If it doesn't, paste the code (or full redirect URL) here:
@@ -599,7 +621,7 @@ function OAuthForm({
             value={promptValue}
             onChange={(e) => setPromptValue(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') handlePromptSubmit(phase.promptId, promptValue) }}
-            className="w-full bg-surface-3 border border-white/10 rounded-md px-2 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60"
+            className="w-full bg-surface-3 border border-strong rounded-md px-2 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60"
           />
           <div className="flex justify-end">
             <button
@@ -620,11 +642,11 @@ function OAuthForm({
       )}
 
       {phase.type === 'error' && (
-        <div className="space-y-2 rounded-md border border-white/10 bg-white/5 p-2.5">
+        <div className="space-y-2 rounded-md border border-strong bg-hover p-2.5">
           <div className="text-[12px] text-primary">{phase.message}</div>
           <button
             onClick={handleStart}
-            className="px-3 py-1.5 rounded-md bg-white/10 hover:bg-white/15 text-primary text-[12px]"
+            className="px-3 py-1.5 rounded-md bg-hover-strong hover:bg-hover-strong text-primary text-[12px]"
           >
             Retry
           </button>
@@ -636,7 +658,7 @@ function OAuthForm({
 
 function AuthUrlCard({ url, instructions }: { url: string; instructions?: string }) {
   return (
-    <div className="space-y-3 rounded-md border border-white/10 bg-white/[0.03] p-2.5">
+    <div className="space-y-3 rounded-md border border-strong bg-hover p-2.5">
       <div className="flex items-center gap-2 text-[12px] text-primary">
         <CloudArrowUp size={14} className="text-agent-light" />
         Browser opened for sign in.
@@ -651,13 +673,13 @@ function AuthUrlCard({ url, instructions }: { url: string; instructions?: string
           href={url}
           target="_blank"
           rel="noreferrer"
-          className="inline-flex items-center gap-1 text-[12px] px-2 py-1 rounded-md bg-white/5 hover:bg-white/10 text-primary"
+          className="inline-flex items-center gap-1 text-[12px] px-2 py-1 rounded-md bg-hover hover:bg-hover-strong text-primary"
         >
           <ArrowSquareOut size={12} /> Open URL again
         </a>
         <button
           onClick={() => { try { navigator.clipboard.writeText(url) } catch { /* */ } }}
-          className="inline-flex items-center gap-1 text-[12px] px-2 py-1 rounded-md bg-white/5 hover:bg-white/10 text-primary"
+          className="inline-flex items-center gap-1 text-[12px] px-2 py-1 rounded-md bg-hover hover:bg-hover-strong text-primary"
         >
           <Copy size={12} /> Copy URL
         </button>
@@ -723,7 +745,7 @@ function ApiKeyForm({
             autoComplete="off"
             spellCheck={false}
             placeholder={status?.connected ? '••••••••••••' : `Paste your ${provider.name} key`}
-            className="w-full bg-surface-3 border border-white/10 rounded-md pl-2 pr-8 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60 font-mono"
+            className="w-full bg-surface-3 border border-strong rounded-md pl-2 pr-8 py-1.5 text-[13px] text-primary outline-none focus:border-agent/60 font-mono"
           />
           <button
             type="button"
@@ -743,7 +765,7 @@ function ApiKeyForm({
         </button>
       </div>
 
-      {error && <div className="text-[11px] text-rose-300">{error}</div>}
+      {error && <div className="text-[11px] text-danger">{error}</div>}
       {savedAt && !error && (
         <div className="flex items-center gap-1 text-[11px] text-agent-light">
           <CheckCircle size={12} weight="fill" /> Saved.
@@ -752,7 +774,7 @@ function ApiKeyForm({
       {status?.connected && (
         <button
           onClick={handleDisconnect}
-          className="text-[11px] text-muted hover:text-rose-200"
+          className="text-[11px] text-muted hover:text-danger"
         >
           Disconnect
         </button>
@@ -785,13 +807,13 @@ function DefaultModelSection({ models }: { models: Array<{ provider: string; mod
 
   return (
     <div className="space-y-1.5">
-      <div className="text-[10.5px] uppercase tracking-wider text-muted/70 font-semibold px-0.5">
+      <div className="text-[10.5px] uppercase tracking-wider text-muted/70 font-semibold">
         Default model
       </div>
       <div className="relative">
         <button
           onClick={() => setOpen((v) => !v)}
-          className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded-md bg-white/[0.04] border border-white/10 text-[12.5px] text-primary hover:bg-white/[0.06] focus:outline-none focus:border-agent-light/50"
+          className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded-md bg-hover border border-strong text-[12.5px] text-primary hover:bg-hover-strong focus:outline-none focus:border-agent-light/50"
         >
           <CateLogo size={12} className="text-agent-light shrink-0" />
           <span className="truncate flex-1 text-left">
@@ -878,10 +900,10 @@ function DefaultModelPicker({
   return (
     <div
       ref={wrapRef}
-      className="absolute top-full left-0 mt-1 w-full max-h-[320px] flex flex-col rounded-lg border border-white/10 bg-surface-4/98 backdrop-blur-xl shadow-[0_12px_32px_rgba(0,0,0,0.45)] z-20"
+      className="absolute top-full left-0 mt-1 w-full max-h-[320px] flex flex-col rounded-lg border border-strong bg-surface-4/98 backdrop-blur-xl shadow-[0_12px_32px_var(--shadow-node)] z-20"
     >
-      <div className="px-2 py-2 border-b border-white/10 shrink-0">
-        <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-black/20 border border-white/5">
+      <div className="px-2 py-2 border-b border-strong shrink-0">
+        <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-surface-0 border border-subtle">
           <MagnifyingGlass size={11} className="text-muted shrink-0" />
           <input
             ref={searchRef}
@@ -896,7 +918,7 @@ function DefaultModelPicker({
         <button
           onClick={() => onPick(null)}
           className={`w-full text-left px-3 py-1.5 text-[12px] flex items-center gap-2 ${
-            !selected ? 'bg-white/10 text-primary' : 'text-muted hover:bg-white/5'
+            !selected ? 'bg-hover-strong text-primary' : 'text-muted hover:bg-hover'
           }`}
         >
           <span className="truncate flex-1">First available</span>
@@ -930,7 +952,7 @@ function DefaultModelPicker({
                       key={`${m.provider}:${m.model}`}
                       onClick={() => onPick(m)}
                       className={`w-full text-left px-3 py-1.5 text-[12px] flex items-center gap-2 ${
-                        isSelected ? 'bg-white/10 text-primary' : 'text-primary hover:bg-white/5'
+                        isSelected ? 'bg-hover-strong text-primary' : 'text-primary hover:bg-hover'
                       }`}
                     >
                       <span className="truncate flex-1">{m.label ?? m.model}</span>

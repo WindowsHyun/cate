@@ -2,14 +2,16 @@ import log from './logger'
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, screen, webContents, session, nativeTheme } from 'electron'
 import fs from 'fs'
 import path from 'path'
-import { SHELL_SHOW_IN_FOLDER, WEBVIEW_SCREENSHOT, BROWSER_SET_PROXY, NATIVE_FILE_DRAG, CAPTURE_PAGE, DIALOG_OPEN_FOLDER, DIALOG_OPEN_IMAGE, DIALOG_SAVE_FILE, DIALOG_CONFIRM_UNSAVED, DIALOG_CONFIRM_CLOSE_TERMINAL, DIALOG_CONFIRM_CLOSE_CANVAS, DIALOG_CONFIRM_DELETE_REGION, DIALOG_CONFIRM_IMPORT, DIALOG_CONFIRM_RELOAD_WORKSPACE, DIALOG_TERMINAL_LINK_OPEN, CANVAS_READ_BACKGROUND_IMAGE, APP_OPEN_PATH } from '../shared/ipc-channels'
+import { SHELL_SHOW_IN_FOLDER, WEBVIEW_SCREENSHOT, BROWSER_SET_PROXY, NATIVE_FILE_DRAG, CAPTURE_PAGE, DIALOG_OPEN_FOLDER, DIALOG_OPEN_IMAGE, DIALOG_SAVE_FILE, DIALOG_CONFIRM_UNSAVED, DIALOG_CONFIRM_CLOSE_TERMINAL, DIALOG_CONFIRM_CLOSE_CANVAS, DIALOG_CONFIRM_IMPORT, DIALOG_CONFIRM_RELOAD_WORKSPACE, DIALOG_TERMINAL_LINK_OPEN, CANVAS_READ_BACKGROUND_IMAGE, APP_OPEN_PATH } from '../shared/ipc-channels'
 import {
   WINDOW_SET_TITLE,
+  WINDOW_MINIMIZE, WINDOW_TOGGLE_MAXIMIZE, WINDOW_CLOSE, WINDOW_IS_MAXIMIZED, WINDOW_MAXIMIZE_STATE,
   PANEL_TRANSFER, PANEL_RECEIVE, PANEL_TRANSFER_ACK,
   PANEL_WINDOWS_LIST, PANEL_WINDOW_DOCK_BACK, PANEL_WINDOW_SYNC_PTY, PANEL_WINDOW_SYNC_META,
   DRAG_START, DRAG_DETACH, DRAG_END,
   WINDOW_FULLSCREEN_STATE,
-  DOCK_WINDOW_INIT, DOCK_WINDOW_SYNC_STATE, DOCK_WINDOWS_LIST,
+  DOCK_WINDOW_INIT, DOCK_WINDOW_SYNC_STATE, DOCK_WINDOWS_LIST, DOCK_WINDOW_RESTORE,
+  DOCK_WINDOW_FLUSH_SYNC, DOCK_WINDOW_FLUSH_SYNC_DONE,
   CROSS_WINDOW_DRAG_START, CROSS_WINDOW_DRAG_UPDATE, CROSS_WINDOW_DRAG_DROP, CROSS_WINDOW_DRAG_CANCEL, CROSS_WINDOW_DRAG_RESOLVE,
   SESSION_FLUSH_SAVE,
   SESSION_FLUSH_SAVE_DONE,
@@ -24,10 +26,14 @@ import { registerHandlers as registerShellHandlers, unregisterTerminalsForWindow
 import { registerHandlers as registerGitMonitorHandlers, stopMonitorsForWindow } from './ipc/git-monitor'
 import { registerHandlers as registerStoreHandlers, loadSettingsSyncFromDisk, readBootSnapshot, writeBootSnapshot, getSettingSync, setSettingsFromMain } from './store'
 import { flushPendingWritesSync as flushSettingsPendingWritesSync } from './settingsFile'
-import { registerProjectStateHandlers, saveProjectStateSync, runLegacyMigrationIfNeeded } from './projectWorkspaceStore'
+import { flushWorkspaceStateSync } from './workspaceStateStore'
+import { registerUIStateHandlers, flushUIStateSync } from './uiStateStore'
+import { importCanvasBackgroundImage } from './canvasBackgroundStore'
+import { registerProjectStateHandlers, saveProjectStateSync } from './projectWorkspaceStore'
 import { registerHandlers as registerMenuHandlers } from './ipc/menu'
 import { registerHandlers as registerNotificationHandlers } from './ipc/notifications'
 import { registerAgentHandlers } from '../agent/main/ipcAgent'
+import { registerSkillHandlers } from '../skills/main/ipcSkills'
 import { registerAuthHandlers } from '../agent/main/ipcAuth'
 import { authManager } from '../agent/main/authManager'
 import { AgentManager } from '../agent/main/agentManager'
@@ -35,7 +41,8 @@ import { AgentManager } from '../agent/main/agentManager'
 // Shared singletons for pi agent + auth.
 const agentManager = new AgentManager(authManager)
 import { writeDragTempFile, cleanupDragTempFile, createDragGhostImage } from './ipc/drag'
-import { registerWindow, getWindowType, sendToWindow, broadcastToAll, broadcastToAllExcept, setPanelWindowMeta, setPanelWindowTerminalPtyId, listPanelWindows, getWindow, setDockWindowState, listDockWindows, focusWindow } from './windowRegistry'
+import { registerWindow, getWindowType, sendToWindow, broadcastToAll, broadcastToAllExcept, setPanelWindowMeta, setPanelWindowTerminalPtyId, listPanelWindows, getWindow, setDockWindowState, listDockWindows, listDockWindowIds, focusWindow, getWindowWorkspaceId, getActiveMainWindow, windowFromEvent } from './windowRegistry'
+import { flushDockWindowsBeforeQuit } from './dockWindowFlush'
 import { registerWorkspaceHandlers } from './workspaceManager'
 import { addAllowedRoot, clearFileGrantsForWindow, clearScopedWriteAllowancesForWindow, grantFileAccess, validatePath } from './ipc/pathValidation'
 import { isLocalLocator } from './companion/locator'
@@ -43,12 +50,12 @@ import { listPersistentGrants, recordPersistentGrant } from './grantedPathStore'
 import { buildApplicationMenu, rebuildApplicationMenu, setNewMainWindowFn } from './menu'
 import { initShellEnv, getShellEnv } from './shellEnv'
 import { currentExclusionSet } from './ipc/filesystem'
-import { initAutoUpdater, isInstallingUpdate } from './auto-updater'
+import { initAutoUpdater, isUpdatePendingInstall } from './auto-updater'
 import { initSentry, captureMainException, captureMainMessage, flushSentry } from './sentry'
 import { initAnalytics, trackAppStart, checkAndReportUpdate, hasRunBefore, devSimulateUpdateFrom } from './analytics'
 import { TELEMETRY_SET_CONSENT } from '../shared/ipc-channels'
 import { beginTerminalTransfer, acknowledgeTerminalTransfer, handleCrossWindowDropTerminalTransfer } from './ipc/terminal'
-import type { CateWindowParams, DockWindowInitPayload, PanelState, PanelTransferSnapshot, WindowDockState } from '../shared/types'
+import type { CanvasLayoutSnapshot, CateWindowParams, DetachedDockWindowSnapshot, DockLayoutNode, DockWindowInitPayload, PanelState, PanelTransferSnapshot, WindowDockState } from '../shared/types'
 import { disableRendererSandbox, disableTrustScoping } from './featureFlags'
 import { getSharedPanelDef } from '../shared/panels'
 import { startPerfMonitor, getLatestSnapshot } from './perf/perfMonitor'
@@ -63,6 +70,9 @@ import {
   cancelCrossWindowDrag,
   claimCrossWindowDrop,
   resolveCrossWindowDrag,
+  recordClaim,
+  lookupClaim,
+  pruneClaims,
   decideDetach,
   clampGhostSize,
   ghostPosition,
@@ -70,6 +80,7 @@ import {
   CROSS_WINDOW_POLL_MS,
   CROSS_WINDOW_CLAIM_WAIT_MS,
   type CrossWindowDragState,
+  type ClaimRecord,
   type GhostHostWindow,
 } from './dragLogic'
 
@@ -148,7 +159,7 @@ async function showCrashLoopDialog(win: BrowserWindow, windowType: string, reaso
       type: 'error',
       title: 'A window keeps crashing',
       message: 'This window’s display process exited unexpectedly several times.',
-      detail: `Reason: ${reason}. Auto-reloading hasn’t recovered it. You can try once more, or close the window — your other windows and saved work are unaffected.`,
+      detail: `Reason: ${reason}. Auto-reloading hasn’t recovered it. You can try once more, or close the window. Your other windows and saved work are unaffected.`,
       buttons: ['Reload', 'Close Window'],
       defaultId: 0,
       cancelId: 1,
@@ -263,19 +274,26 @@ function createWindow(params?: CateWindowParams): BrowserWindow {
     minWidth: isDock ? 400 : isPanel ? undefined : 800,
     minHeight: isDock ? 300 : isPanel ? undefined : 600,
     title: isDock ? 'Cate' : isPanel ? 'Cate Panel' : 'Cate',
-    // Main + dock windows hide the native title bar and draw a themed strip in
-    // its place (the macOS native bar can't be tinted to a theme color — only
-    // dark/light — so we always use `hiddenInset` and render TitlebarStrip).
-    titleBarStyle: isPanel ? 'hidden' : 'hiddenInset',
+    // macOS: hide the native title bar and draw a themed strip in its place (the
+    // macOS native bar can't be tinted to a theme color — only dark/light — so we
+    // always use `hiddenInset`/`hidden` and render TitlebarStrip).
+    // Windows/Linux: go fully frameless and draw our own window controls in the
+    // renderer (WindowControls), so the chrome matches the theme. `titleBarStyle`
+    // is irrelevant once `frame:false`.
+    titleBarStyle: process.platform === 'darwin' ? (isPanel ? 'hidden' : 'hiddenInset') : 'default',
     // Align traffic lights with our 28px themed TitlebarStrip on macOS. Apple's
     // standard NSWindow title bar is ~28pt with lights at y≈7; matching that
     // here makes the themed bar visually identical to a native title bar.
-    trafficLightPosition: isDock
-      ? { x: 12, y: 11 }
-      : (process.platform === 'darwin' && windowType === 'main')
-        ? { x: 10, y: 6 }
-        : undefined,
-    frame: !(isPanel || isDock),
+    trafficLightPosition: process.platform !== 'darwin'
+      ? undefined
+      : isDock
+        ? { x: 12, y: 11 }
+        : windowType === 'main'
+          ? { x: 10, y: 6 }
+          : undefined,
+    // macOS main windows keep a (hidden-inset) native frame; everything else —
+    // all panel/dock windows, and every window on Windows/Linux — is frameless.
+    frame: process.platform === 'darwin' ? !(isPanel || isDock) : false,
     backgroundColor: bgColor,
     icon: nativeImage.createFromPath(iconPath),
     webPreferences: {
@@ -317,7 +335,7 @@ function createWindow(params?: CateWindowParams): BrowserWindow {
   }
 
   // Track this window in the registry with its type
-  registerWindow(win, windowType)
+  registerWindow(win, windowType, params?.workspaceId)
 
   // Capture ID before window is destroyed (win.id throws after 'closed')
   const windowId = win.id
@@ -440,6 +458,17 @@ function createWindow(params?: CateWindowParams): BrowserWindow {
   ;(win as unknown as { on: (e: string, fn: () => void) => void }).on('will-enter-full-screen', broadcastEntering)
   ;(win as unknown as { on: (e: string, fn: () => void) => void }).on('will-leave-full-screen', broadcastLeaving)
   win.webContents.once('did-finish-load', broadcastFullscreenState)
+
+  // Push this window's own maximize state to its renderer so the custom window
+  // controls (WindowControls, Windows/Linux) can swap the maximize/restore glyph.
+  // Per-window (not broadcast): each window's maximize state is independent.
+  const sendMaximizeState = (): void => {
+    if (win.isDestroyed()) return
+    try { win.webContents.send(WINDOW_MAXIMIZE_STATE, win.isMaximized()) } catch { /* noop */ }
+  }
+  win.on('maximize', sendMaximizeState)
+  win.on('unmaximize', sendMaximizeState)
+  win.webContents.once('did-finish-load', sendMaximizeState)
 
   // Build query string from params
   const queryParts: string[] = []
@@ -585,6 +614,7 @@ function destroyDragGhostWindow(): void {
  */
 function registerCriticalHandlers(): void {
   registerStoreHandlers()
+  registerUIStateHandlers()
   registerProjectStateHandlers()
   registerWorkspaceHandlers()
   registerFilesystemHandlers()
@@ -609,6 +639,7 @@ function registerDeferredHandlers(): void {
   registerNotificationHandlers()
   registerAuthHandlers(authManager)
   registerAgentHandlers(authManager, agentManager)
+  registerSkillHandlers()
   registerCompanionHandlers()
 }
 
@@ -644,10 +675,12 @@ function registerWindowAndDialogHandlers(): void {
     return result.filePaths[0]
   })
 
-  // Pick an image to use as the canvas wallpaper. Returns the absolute path
-  // (stored in settings); the renderer reads the bytes via
-  // CANVAS_READ_BACKGROUND_IMAGE. No path grant is needed because that reader
-  // runs in main (full fs access) rather than through the sandboxed fs IPC.
+  // Pick an image to use as the canvas wallpaper. The picked file is COPIED into
+  // managed app data (see ./canvasBackgroundStore) and the managed path is
+  // returned for storage in settings — so the wallpaper survives the source
+  // file moving/being deleted and stays self-contained. The renderer reads the
+  // bytes via CANVAS_READ_BACKGROUND_IMAGE; no path grant is needed because that
+  // reader runs in main (full fs access) rather than through the sandboxed fs IPC.
   ipcMain.handle(DIALOG_OPEN_IMAGE, async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? undefined
     const result = await dialog.showOpenDialog(win!, {
@@ -658,7 +691,7 @@ function registerWindowAndDialogHandlers(): void {
       ],
     })
     if (result.canceled || result.filePaths.length === 0) return null
-    return result.filePaths[0]
+    return importCanvasBackgroundImage(result.filePaths[0])
   })
 
   // Read a canvas-wallpaper image as a data URL. Used both right after the user
@@ -822,9 +855,11 @@ function registerWindowAndDialogHandlers(): void {
       const result = await dialog.showMessageBox(win!, {
         type: 'warning',
         message: 'Close this canvas?',
-        detail: isLast
-          ? 'This is the only canvas in the workspace.'
-          : 'This canvas has no open panels.',
+        detail: panelCount > 0
+          ? `Closing it will also close its ${panelCount} open ${panelCount === 1 ? 'panel' : 'panels'}.`
+          : isLast
+            ? 'This is the only canvas in the workspace.'
+            : 'This canvas has no open panels.',
         buttons: ['Close', 'Cancel'],
         defaultId: 0,
         cancelId: 1,
@@ -844,23 +879,6 @@ function registerWindowAndDialogHandlers(): void {
       noLink: true,
     })
     return result.response === 0 ? 'move' : result.response === 1 ? 'delete' : 'cancel'
-  })
-
-  // Confirm deletion of a region that contains panels. Lets the user choose
-  // between also deleting the panels inside or just removing the region frame.
-  ipcMain.handle(DIALOG_CONFIRM_DELETE_REGION, async (event, payload: { panelCount: number }) => {
-    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined
-    const panelCount = payload?.panelCount ?? 0
-    const result = await dialog.showMessageBox(win!, {
-      type: 'warning',
-      message: 'Delete this region?',
-      detail: `This region contains ${panelCount} ${panelCount === 1 ? 'panel' : 'panels'}. Delete them too, or just remove the region around them?`,
-      buttons: ['Delete Region + Contents', 'Delete Region Only', 'Cancel'],
-      defaultId: 1,
-      cancelId: 2,
-      noLink: true,
-    })
-    return result.response === 0 ? 'with-contents' : result.response === 1 ? 'region-only' : 'cancel'
   })
 
   // Ask whether to copy or move external files/folders dropped onto the file
@@ -994,6 +1012,13 @@ function registerWindowAndDialogHandlers(): void {
     }
   })
 
+  // Id of the most recently started cross-window drag. Declared up here (above
+  // DRAG_DETACH, which references it) but owned by the cross-window section
+  // below. Survives the live-state null-out so RESOLVE can look up the claim
+  // record by id even when DROP cleared crossWindowDragState before the
+  // resolver was armed. Only one drag is in flight at a time (single cursor).
+  let lastCrossWindowDragId: string | null = null
+
   // Renderer-driven title sync — used so each native macOS tab shows the
   // active workspace name instead of the generic app title.
   ipcMain.handle(WINDOW_SET_TITLE, async (event, title: string) => {
@@ -1004,8 +1029,26 @@ function registerWindowAndDialogHandlers(): void {
     }
   })
 
+  // Custom window controls (frameless Windows/Linux chrome). Per-window: resolve
+  // the calling window from the IPC sender so a panel/dock window controls itself.
+  ipcMain.handle(WINDOW_MINIMIZE, (event) => {
+    windowFromEvent(event)?.minimize()
+  })
+  ipcMain.handle(WINDOW_TOGGLE_MAXIMIZE, (event) => {
+    const win = windowFromEvent(event)
+    if (!win) return
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+  })
+  ipcMain.handle(WINDOW_CLOSE, (event) => {
+    windowFromEvent(event)?.close()
+  })
+  ipcMain.on(WINDOW_IS_MAXIMIZED, (event) => {
+    event.returnValue = windowFromEvent(event)?.isMaximized() ?? false
+  })
+
   // Panel transfer protocol
-  ipcMain.handle(PANEL_TRANSFER, async (event, snapshot: PanelTransferSnapshot, targetWindowId?: number) => {
+  ipcMain.handle(PANEL_TRANSFER, async (event, snapshot: PanelTransferSnapshot, targetWindowId?: number, workspaceId?: string) => {
     // Begin terminal buffering if this is a terminal transfer
     if (snapshot.terminalPtyId) {
       beginTerminalTransfer(snapshot.terminalPtyId, targetWindowId ?? -1)
@@ -1014,24 +1057,40 @@ function registerWindowAndDialogHandlers(): void {
     if (targetWindowId) {
       // Transfer to existing window
       sendToWindow(targetWindowId, PANEL_RECEIVE, snapshot)
-      // Track panel metadata for the target window
-      setPanelWindowMeta(targetWindowId, snapshot.panel, undefined)
+      // Track panel metadata for the target window (keep its existing workspace
+      // id unless the caller supplied one)
+      setPanelWindowMeta(targetWindowId, snapshot.panel, workspaceId)
     } else {
       // Refuse creating a new panel window while any Cate window is in
       // macOS native fullscreen — the new window would land in a separate
       // Space and appear as an empty black page. Caller should fall back to
       // keeping the panel in the source window.
       if (anyWindowFullscreen()) return null
-      // Create a new panel window and send the transfer there
+      // Create a new panel window and send the transfer there. Pass the source
+      // workspaceId so the window is registered to it at creation — otherwise it
+      // is persisted to no workspace and lost on the next restart. The caller
+      // SHOULD supply one, but guard against a falsy value: fall back to the
+      // sender window's workspace, then the active main window's.
+      const senderId = BrowserWindow.fromWebContents(event.sender)?.id
+      const resolvedWorkspaceId =
+        workspaceId ||
+        (senderId != null ? getWindowWorkspaceId(senderId) : undefined) ||
+        (() => {
+          const main = getActiveMainWindow()
+          return main ? getWindowWorkspaceId(main.id) : undefined
+        })()
+      if (!resolvedWorkspaceId) {
+        log.warn('PANEL_TRANSFER: creating panel window with no workspace id — it may be lost on restart', { panelId: snapshot.panel.id })
+      }
       const newWin = createWindow({
         type: 'panel',
         panelType: snapshot.panel.type,
         panelId: snapshot.panel.id,
-        workspaceId: undefined,
+        workspaceId: resolvedWorkspaceId,
       })
 
       // Track panel metadata
-      setPanelWindowMeta(newWin.id, snapshot.panel, undefined)
+      setPanelWindowMeta(newWin.id, snapshot.panel, resolvedWorkspaceId)
 
       // Position at saved geometry if available
       if (snapshot.geometry) {
@@ -1085,13 +1144,42 @@ function registerWindowAndDialogHandlers(): void {
     setPanelWindowMeta(win.id, payload.panel, payload.workspaceId)
   })
 
-  // Double-click panel window title bar → close the panel window and signal main window to dock
-  ipcMain.handle(PANEL_WINDOW_DOCK_BACK, async (event) => {
+  // Double-click panel window title bar → re-integrate the panel into the main
+  // window, then close the panel window. The panel's record was already removed
+  // from the main workspace at detach time, so the renderer sends a full
+  // snapshot (live panel + canvas/terminal state) the main window uses to
+  // reconstruct it. We also arm the terminal-ownership transfer HOME — exactly
+  // like a cross-window drop — so the live PTY (and any canvas child PTYs)
+  // follow the panel back instead of dying with the window.
+  ipcMain.handle(PANEL_WINDOW_DOCK_BACK, async (event, snapshot?: PanelTransferSnapshot) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) return
-    // Broadcast to main window(s) that this panel should be re-docked
-    broadcastToAll(PANEL_WINDOW_DOCK_BACK, win.id)
-    // Close the panel window
+
+    const mainWin = getActiveMainWindow()
+
+    // Arm terminal transfer back to the main window so reconnectTerminal's
+    // panelTransferAck on the receiving side finds a pending transfer (ack is a
+    // no-op without a prior begin).
+    if (mainWin && snapshot) {
+      if (snapshot.terminalPtyId) {
+        handleCrossWindowDropTerminalTransfer(snapshot.terminalPtyId, mainWin.id)
+      }
+      for (const t of Object.values(snapshot.canvasState?.childTerminals ?? {})) {
+        if (t.ptyId) handleCrossWindowDropTerminalTransfer(t.ptyId, mainWin.id)
+      }
+    }
+
+    // Tell the main window to re-add the panel (App.tsx re-integrates it). Send
+    // ONLY to the main window so a second panel window doesn't try to claim it.
+    if (mainWin) {
+      sendToWindow(mainWin.id, PANEL_WINDOW_DOCK_BACK, { panelWindowId: win.id, snapshot })
+    } else {
+      // No main window to dock into — fall back to broadcasting the id so any
+      // listener can react (and at minimum the window still closes below).
+      broadcastToAll(PANEL_WINDOW_DOCK_BACK, { panelWindowId: win.id, snapshot })
+    }
+
+    // Close the panel window once the snapshot is on its way home.
     win.close()
   })
 
@@ -1129,9 +1217,16 @@ function registerWindowAndDialogHandlers(): void {
     })
     if (decision.kind === 'refuse') return null
 
-    // Begin terminal buffering if applicable
+    // Begin terminal buffering if applicable. For a canvas, each child terminal
+    // is its own PTY that must transfer too — buffer them all so no output is
+    // lost between detach and the new window reconnecting.
     if (snapshot.terminalPtyId) {
       beginTerminalTransfer(snapshot.terminalPtyId, -1)
+    }
+    for (const t of Object.values(snapshot.canvasState?.childTerminals ?? {})) {
+      // Only LIVE transfer entries (ptyId) have a running PTY to buffer; restore
+      // entries (replayPtyId) spawn fresh in the new window, so skip them.
+      if (t.ptyId) beginTerminalTransfer(t.ptyId, -1)
     }
 
     const newWin = createWindow({
@@ -1144,6 +1239,9 @@ function registerWindowAndDialogHandlers(): void {
     // Update terminal transfer target now that we have the window ID
     if (snapshot.terminalPtyId) {
       beginTerminalTransfer(snapshot.terminalPtyId, newWin.id)
+    }
+    for (const t of Object.values(snapshot.canvasState?.childTerminals ?? {})) {
+      if (t.ptyId) beginTerminalTransfer(t.ptyId, newWin.id)
     }
 
     newWin.setBounds({
@@ -1158,6 +1256,7 @@ function registerWindowAndDialogHandlers(): void {
       panels: { [snapshot.panel.id]: snapshot.panel },
       dockState: buildSinglePanelDockState(snapshot.panel.id),
       workspaceId: workspaceId ?? '',
+      rootPath: snapshot.rootPath,
     }
 
     // Send the init payload + transfer snapshot once the window is ready
@@ -1171,7 +1270,11 @@ function registerWindowAndDialogHandlers(): void {
     })
 
     cleanupDragTempFile()
-    broadcastToAll(DRAG_END)
+    // End only the just-finished cross-window drag (if any) in other windows —
+    // a window tracking a DIFFERENT active drag must not be force-ended here.
+    // (DRAG_DETACH is the fallback when no window claimed the cross-window drop,
+    // so the relevant remote drag is the last-started one.)
+    broadcastToAll(DRAG_END, lastCrossWindowDragId ?? undefined)
 
     return newWin.id
   })
@@ -1192,12 +1295,45 @@ function registerWindowAndDialogHandlers(): void {
   ipcMain.handle(DOCK_WINDOW_SYNC_STATE, async (event, state: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) return
-    setDockWindowState(win.id, state as { dockState: any; panels: Record<string, PanelState>; workspaceId: string })
+    setDockWindowState(win.id, state as { dockState: any; panels: Record<string, PanelState>; workspaceId: string; terminalPtyIds?: Record<string, string>; canvasStates?: Record<string, CanvasLayoutSnapshot> })
   })
 
   // List all dock windows with state and bounds
   ipcMain.handle(DOCK_WINDOWS_LIST, async () => {
     return listDockWindows()
+  })
+
+  // Session restore of a detached dock window — rebuilds the FULL window (every
+  // top-level tab + their terminal-replay / canvas-children hydration) from its
+  // persisted snapshot, rather than synthesizing a single tab via DRAG_DETACH.
+  // PTYs are dead on restore (terminals replay scrollback), so no terminal
+  // buffering is needed and bounds come straight from the snapshot.
+  ipcMain.handle(DOCK_WINDOW_RESTORE, async (
+    _event,
+    payload: DetachedDockWindowSnapshot & { initPayload: DockWindowInitPayload },
+  ) => {
+    const { initPayload, bounds, workspaceId } = payload
+    const topLevelIds = collectTopLevelPanelIds(initPayload.dockState)
+    const firstId = topLevelIds[0]
+    if (!firstId) return null
+    const firstPanel = initPayload.panels[firstId]
+    if (!firstPanel) return null
+
+    const newWin = createWindow({
+      type: 'dock',
+      panelType: firstPanel.type,
+      panelId: firstPanel.id,
+      workspaceId: workspaceId || undefined,
+    })
+
+    if (bounds) newWin.setBounds(bounds)
+
+    newWin.webContents.once('did-finish-load', () => {
+      sendToWindow(newWin.id, DOCK_WINDOW_INIT, initPayload)
+      revealWindow(newWin, { focus: false })
+    })
+
+    return newWin.id
   })
 
   // Cross-window drag coordination — `crossWindowDragState` is the pure state
@@ -1209,6 +1345,12 @@ function registerWindowAndDialogHandlers(): void {
   // Used by CROSS_WINDOW_DRAG_RESOLVE to detect if a target window claimed the
   // drop before the claim-wait timer fires.
   let crossWindowDropClaimedResolve: (() => void) | null = null
+
+  // Claim outcomes keyed by dragId — survive the live-state teardown so a late
+  // RESOLVE (one arriving after DROP already cleared crossWindowDragState
+  // because no resolver was pending) still reads claimed=true rather than
+  // inferring false from a nulled pointer. Pruned to the claim-wait window.
+  let crossWindowClaims: Map<string, ClaimRecord> = new Map()
 
   const stopPollTimer = (): void => {
     if (pollTimer) {
@@ -1228,10 +1370,12 @@ function registerWindowAndDialogHandlers(): void {
 
     const cursor = screen.getCursorScreenPoint()
     crossWindowDragState = startCrossWindowDrag({
+      dragId: crypto.randomUUID(),
       sourceWindowId: win.id,
       snapshot,
       cursor,
     })
+    lastCrossWindowDragId = crossWindowDragState.dragId
 
     // Create the native drag ghost window — size to match the source panel
     // (canvas-space size; clamped inside createDragGhostWindow).
@@ -1265,7 +1409,7 @@ function registerWindowAndDialogHandlers(): void {
         }
       }
 
-      broadcastToAllExcept(crossWindowDragState.sourceWindowId, CROSS_WINDOW_DRAG_UPDATE, pos, crossWindowDragState.snapshot)
+      broadcastToAllExcept(crossWindowDragState.sourceWindowId, CROSS_WINDOW_DRAG_UPDATE, pos, crossWindowDragState.snapshot, crossWindowDragState.dragId)
     }, CROSS_WINDOW_POLL_MS)
   })
 
@@ -1275,18 +1419,33 @@ function registerWindowAndDialogHandlers(): void {
       // Mark the state as claimed (pure transition). The resolver below reads
       // `claimed` to decide whether to tell the source to remove its node.
       crossWindowDragState = claimCrossWindowDrop(crossWindowDragState, Date.now())
+      // Record the claim keyed by dragId so a RESOLVE that arrives AFTER this
+      // DROP clears the live state (the no-resolver branch below) still sees
+      // claimed=true — preventing a duplicate detach. Pruned on every write.
+      const now = Date.now()
+      crossWindowClaims = pruneClaims(crossWindowClaims, now, CROSS_WINDOW_CLAIM_WAIT_MS)
+      crossWindowClaims = recordClaim(crossWindowClaims, crossWindowDragState!.dragId, true, now)
       // Arm terminal-ownership transfer to the target (receiver) window — the
       // receiver's reconnectTerminal will panelTransferAck after wiring its
       // listeners, and ack is a no-op without a prior begin.
       const targetWin = BrowserWindow.fromWebContents(event.sender)
-      if (targetWin && crossWindowDragState!.snapshot.terminalPtyId) {
-        handleCrossWindowDropTerminalTransfer(
-          crossWindowDragState!.snapshot.terminalPtyId,
-          targetWin.id,
-        )
+      if (targetWin) {
+        if (crossWindowDragState!.snapshot.terminalPtyId) {
+          handleCrossWindowDropTerminalTransfer(
+            crossWindowDragState!.snapshot.terminalPtyId,
+            targetWin.id,
+          )
+        }
+        // A canvas carries its child terminals — arm each live PTY for the
+        // receiver. (Cross-window drag is always a live transfer, so every entry
+        // has a ptyId; the guard satisfies the now-optional type.)
+        for (const t of Object.values(crossWindowDragState!.snapshot.canvasState?.childTerminals ?? {})) {
+          if (t.ptyId) handleCrossWindowDropTerminalTransfer(t.ptyId, targetWin.id)
+        }
       }
-      // Notify source window to remove the panel
-      sendToWindow(crossWindowDragState!.sourceWindowId, DRAG_END)
+      // Notify source window to remove the panel (carry the dragId so an
+      // unrelated active drag in that window isn't force-ended).
+      sendToWindow(crossWindowDragState!.sourceWindowId, DRAG_END, crossWindowDragState!.dragId)
     }
     destroyDragGhostWindow()
 
@@ -1296,8 +1455,11 @@ function registerWindowAndDialogHandlers(): void {
     if (crossWindowDropClaimedResolve) {
       crossWindowDropClaimedResolve()
     } else {
-      // No resolve in flight — clear state directly so a future resolve
-      // (which would arrive after the source mouseup) returns unclaimed.
+      // No resolve in flight — clear the LIVE state directly. The claim is
+      // preserved in crossWindowClaims (recorded above, keyed by dragId), so a
+      // RESOLVE arriving after this still reads claimed=true rather than
+      // inferring false from the nulled pointer (which would duplicate the
+      // panel via a fallback detach).
       crossWindowDragState = cancelCrossWindowDrag(crossWindowDragState)
     }
   })
@@ -1305,9 +1467,10 @@ function registerWindowAndDialogHandlers(): void {
   ipcMain.handle(CROSS_WINDOW_DRAG_CANCEL, async () => {
     if (!crossWindowDragState) return
     stopPollTimer()
+    const dragId = crossWindowDragState.dragId
     crossWindowDragState = cancelCrossWindowDrag(crossWindowDragState)
     destroyDragGhostWindow()
-    broadcastToAll(DRAG_END)
+    broadcastToAll(DRAG_END, dragId)
   })
 
   // Resolve cross-window drag on mouseup from source window.
@@ -1315,9 +1478,21 @@ function registerWindowAndDialogHandlers(): void {
   // CROSS_WINDOW_DRAG_DROP, then returns whether the drop was claimed. If not,
   // source falls back to DRAG_DETACH.
   ipcMain.handle(CROSS_WINDOW_DRAG_RESOLVE, async () => {
-    if (!crossWindowDragState) return { claimed: false }
+    // The live state may already be gone if a DROP landed (and cleared it)
+    // before this RESOLVE arrived. In that case the claim outcome lives in the
+    // dragId-keyed record, NOT in the (nulled) pointer — read it there so a
+    // just-completed claim isn't misread as unclaimed (which would duplicate
+    // the panel via a fallback detach).
+    if (!crossWindowDragState) {
+      const dragId = lastCrossWindowDragId
+      const claimed = dragId
+        ? lookupClaim(crossWindowClaims, dragId, Date.now(), CROSS_WINDOW_CLAIM_WAIT_MS)
+        : false
+      return { claimed }
+    }
 
     const sourceId = crossWindowDragState.sourceWindowId
+    const dragId = crossWindowDragState.dragId
 
     // Stop polling but keep the state alive so DROP can still claim it within
     // the short wait window below.
@@ -1327,17 +1502,24 @@ function registerWindowAndDialogHandlers(): void {
 
     destroyDragGhostWindow()
 
-    // Broadcast DRAG_END to non-source windows so target windows check their drop targets
-    broadcastToAllExcept(sourceId, DRAG_END)
+    // Broadcast DRAG_END to non-source windows so target windows check their
+    // drop targets. The dragId lets each window force-end only ITS OWN remote
+    // drag (a window with an unrelated active drag ignores this).
+    broadcastToAllExcept(sourceId, DRAG_END, dragId)
 
     // Wait briefly for a target window to call CROSS_WINDOW_DRAG_DROP.
     return new Promise<{ claimed: boolean }>((resolve) => {
       const finish = (now: number): void => {
         crossWindowDropClaimedResolve = null
-        void now
-        const decision = resolveCrossWindowDrag(crossWindowDragState)
+        // Decide from the live state if present, else fall back to the claim
+        // record (covers a DROP that cleared the pointer between arming and
+        // firing the resolver).
+        const liveDecision = resolveCrossWindowDrag(crossWindowDragState)
+        const claimed =
+          liveDecision.claimed ||
+          lookupClaim(crossWindowClaims, dragId, now, CROSS_WINDOW_CLAIM_WAIT_MS)
         crossWindowDragState = cancelCrossWindowDrag(crossWindowDragState)
-        resolve({ claimed: decision.claimed })
+        resolve({ claimed })
       }
 
       const timeout = setTimeout(() => finish(Date.now()), CROSS_WINDOW_CLAIM_WAIT_MS)
@@ -1355,6 +1537,18 @@ function registerWindowAndDialogHandlers(): void {
 // =============================================================================
 
 /** Build a WindowDockState with a single panel in the center zone */
+/** Collect every panelId referenced by a WindowDockState's zone layout trees. */
+function collectTopLevelPanelIds(zones: WindowDockState): string[] {
+  const ids: string[] = []
+  const walk = (node: DockLayoutNode | null): void => {
+    if (!node) return
+    if (node.type === 'tabs') ids.push(...node.panelIds)
+    else for (const child of node.children) walk(child)
+  }
+  for (const zone of Object.values(zones)) walk(zone.layout)
+  return ids
+}
+
 function buildSinglePanelDockState(panelId: string): WindowDockState {
   const stackId = crypto.randomUUID()
   return {
@@ -1427,6 +1621,19 @@ if (!app.isPackaged && (process.env.CATE_SIMULATE_UPDATE === 'major' || process.
 // In E2E mode, use a fresh tmpdir per launch so Playwright runs are isolated
 // from each other and from local dev state. The harness sets CATE_E2E=1.
 if (process.env.CATE_E2E === '1') {
+  // The e2e window is never shown, so Chromium throttles it. Per-window
+  // backgroundThrottling:false isn't enough on Windows: its native occlusion
+  // detection marks a never-mapped window as occluded and freezes the
+  // compositor — and with it the rAF loop that applies node-drag transforms —
+  // so every drag spec times out on the Windows runner while no-op specs pass.
+  // These switches (no-ops on macOS/Linux, where the symptom doesn't occur)
+  // disable that occlusion freeze and renderer/timer backgrounding. Must run
+  // before app-ready, which this module-level block does.
+  app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+  app.commandLine.appendSwitch('disable-renderer-backgrounding')
+  app.commandLine.appendSwitch('disable-background-timer-throttling')
+
   const fs = require('fs') as typeof import('fs')
   const os = require('os') as typeof import('os')
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cate-e2e-'))
@@ -1653,8 +1860,6 @@ app.whenReady().then(async () => {
   // Install the cate-theme authoring skill into ~/.claude/skills (copy-if-missing).
   void installThemeSkill()
 
-  await runLegacyMigrationIfNeeded()
-
   const mainWin = createWindow({ type: 'main' })
   log.info('Main window created (id=%d)', mainWin.id)
 
@@ -1724,6 +1929,10 @@ let sessionFlushed = false
 // flush/quit sequence below so the confirmation only runs on the first pass.
 let quitConfirmed = false
 const FLUSH_TIMEOUT_MS = 1500
+// Bound the pre-quit dock-window sync so an unresponsive detached window can't
+// stall quit. Kept short relative to FLUSH_TIMEOUT_MS — it runs BEFORE the main
+// renderer's session flush, so dock sync + session save share the quit budget.
+const DOCK_FLUSH_TIMEOUT_MS = 600
 
 app.on('before-quit', (event) => {
   if (sessionFlushed) {
@@ -1736,6 +1945,10 @@ app.on('before-quit', (event) => {
   // foreground process (dev server, editor, agent, …). Mirrors the per-terminal
   // close confirmation. Deferred async, so we prevent the quit and re-trigger it
   // once the user confirms.
+  //
+  // Note: updates install on a NORMAL quit (electron-updater autoInstallOnAppQuit),
+  // so there's no special update case here — the user is quitting deliberately and
+  // the normal terminal-confirmation applies. will-quit handles the install hook.
   if (!quitConfirmed) {
     const running = getRunningTerminals()
     if (running.length > 0) {
@@ -1811,7 +2024,30 @@ app.on('before-quit', (event) => {
     }
   }, FLUSH_TIMEOUT_MS)
 
-  mainWin.webContents.send(SESSION_FLUSH_SAVE)
+  // FINAL, AWAITED sync from every dock window FIRST, so the main renderer's
+  // session flush (which reads listDockWindows() / main's cached dock state)
+  // sees the freshest dock layout + terminal/canvas state instead of stale data
+  // from the last 5s tick. Bounded by DOCK_FLUSH_TIMEOUT_MS so an unresponsive
+  // dock window can't delay quit. Runs before SESSION_FLUSH_SAVE either way.
+  const dockWindowIds = listDockWindowIds()
+  flushDockWindowsBeforeQuit({
+    windowIds: dockWindowIds,
+    requestSync: (id) => sendToWindow(id, DOCK_WINDOW_FLUSH_SYNC),
+    subscribeAck: (handler) => {
+      const listener = (e: Electron.IpcMainEvent) => {
+        const win = BrowserWindow.fromWebContents(e.sender)
+        if (win) handler(win.id)
+      }
+      ipcMain.on(DOCK_WINDOW_FLUSH_SYNC_DONE, listener)
+      return () => ipcMain.removeListener(DOCK_WINDOW_FLUSH_SYNC_DONE, listener)
+    },
+    timeoutMs: DOCK_FLUSH_TIMEOUT_MS,
+  })
+    .catch(() => {})
+    .finally(() => {
+      if (sessionFlushed) return
+      mainWin.webContents.send(SESSION_FLUSH_SAVE)
+    })
 })
 
 app.on('will-quit', () => {
@@ -1823,6 +2059,11 @@ app.on('will-quit', () => {
   // Flush any pending debounced settings.json write so a just-changed setting
   // survives the quit (the async writer wouldn't fire before process exit).
   flushSettingsPendingWritesSync()
+  // Same for the workspace-state files (recent projects, sidebar, remote
+  // workspaces, layouts) — flush their debounced writes before the process exits.
+  flushWorkspaceStateSync()
+  // And the ui-state.json file (minimap placement).
+  flushUIStateSync()
   // Drop per-project locks so a co-running instance can take over immediately
   // (a crash skips this; the next instance reclaims the stale lock by pid).
   releaseAllProjectLocks()
@@ -1835,14 +2076,13 @@ app.on('will-quit', () => {
   // Tear down any remote/WSL companion connections (kills their daemons /
   // closes SSH). Fire-and-forget — quit must not block on a remote socket.
   void companions.disposeAll()
-  // When an update install is in flight, DO NOT reallyExit — that bypasses
-  // Electron's relaunch hook (queued by autoUpdater.quitAndInstall(_, true)).
-  // We need the natural quit path to run so the updater can launch the new
-  // version. The PTY/SIGABRT risk we guard against below is only a problem
-  // when many native handles are still alive; the updater install path takes
-  // over the process shortly anyway, so a plain return is safe here.
-  if (isInstallingUpdate()) {
-    log.info('will-quit: update install in progress, deferring to Electron relaunch')
+  // An update has been downloaded and is queued to install on quit. DO NOT
+  // reallyExit — electron-updater's install-on-quit hook runs on the 'quit'
+  // event (which fires AFTER will-quit), so reallyExit (libc exit()) would kill
+  // the process first and the update would never apply. Let the natural quit
+  // path run; the installer takes over the process shortly.
+  if (isUpdatePendingInstall()) {
+    log.info('will-quit: update staged, yielding to electron-updater install-on-quit')
     return
   }
   // Force immediate exit to bypass node::FreeEnvironment → CleanupHandles →

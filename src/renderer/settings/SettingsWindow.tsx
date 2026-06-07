@@ -9,8 +9,9 @@
 // collapse, and the sidebar lists only sections that still have matches.
 // =============================================================================
 
-import { X, MagnifyingGlass, BracketsCurly } from '@phosphor-icons/react'
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { MagnifyingGlass, BracketsCurly } from '@phosphor-icons/react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Modal } from '../ui/Modal'
 import log from '../lib/logger'
 import { useAppStore } from '../stores/appStore'
 import { openFileAsPanel } from '../lib/fs/fileRouting'
@@ -24,11 +25,14 @@ import { FileExplorerSettings } from './FileExplorerSettings'
 import { ShortcutSettings } from './ShortcutSettings'
 import { NotificationSettings } from './NotificationSettings'
 import { UpdatesSettings } from './UpdatesSettings'
+import { ProvidersSettings } from './ProvidersSettings'
+import { SkillsSettings } from './SkillsSettings'
 import { SettingsSearchContext } from './SettingsSearchContext'
 import { useTranslation } from '../hooks/useTranslation'
 import type { StringKey } from '../i18n/strings'
 
-const SECTIONS: { titleKey: StringKey; id: string; component: React.ComponentType }[] = [
+import type { ComponentType } from 'react'
+const SECTIONS: { titleKey: StringKey; id: string; component: ComponentType }[] = [
   { titleKey: 'settings.section.general', id: 'general', component: GeneralSettings },
   { titleKey: 'settings.section.appearance', id: 'appearance', component: AppearanceSettings },
   { titleKey: 'settings.section.canvas', id: 'canvas', component: CanvasSettings },
@@ -37,6 +41,8 @@ const SECTIONS: { titleKey: StringKey; id: string; component: React.ComponentTyp
   { titleKey: 'settings.section.sidebar', id: 'sidebar', component: SidebarSettings },
   { titleKey: 'settings.section.fileExplorer', id: 'file-explorer', component: FileExplorerSettings },
   { titleKey: 'settings.section.notifications', id: 'notifications', component: NotificationSettings },
+  { titleKey: 'settings.section.providers' as StringKey, id: 'providers', component: ProvidersSettings },
+  { titleKey: 'settings.section.skills' as StringKey, id: 'skills', component: SkillsSettings },
   { titleKey: 'settings.section.updates', id: 'updates', component: UpdatesSettings },
   { titleKey: 'settings.section.shortcuts', id: 'shortcuts', component: ShortcutSettings },
 ]
@@ -116,6 +122,21 @@ export function SettingsWindow({ isOpen, onClose, initialTab }: SettingsWindowPr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, visibleSections])
 
+  // Escape clears an active search first, and only closes the window when the
+  // search box is already empty. Owned here (Modal's own Escape-close is off via
+  // closeOnEscape) so the two-step behaviour survives.
+  useEffect(() => {
+    if (!isOpen) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      if (rawQuery) setRawQuery('')
+      else onClose()
+    }
+    document.addEventListener('keydown', onKey, { capture: true })
+    return () => document.removeEventListener('keydown', onKey, { capture: true })
+  }, [isOpen, rawQuery, onClose])
+
   // Open the underlying settings.json in a Cate editor panel (VS Code's "Open
   // Settings (JSON)"). Main grants this window access to the file and returns
   // its path; we then close the dialog and mount an editor on it. Edits saved
@@ -147,37 +168,27 @@ export function SettingsWindow({ isOpen, onClose, initialTab }: SettingsWindowPr
   const navSections = SECTIONS.filter(({ id }) => query === '' || visibleSections.has(id))
 
   return (
-    <div
-      className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[100001]"
-      onClick={onClose}
+    <Modal
+      onClose={onClose}
+      width="min(900px,92vw)"
+      height="80vh"
+      zClassName="z-[100001]"
+      closeOnEscape={false}
+      title="Settings"
+      bodyClassName="contents"
+      headerActions={
+        <button
+          onClick={openSettingsJson}
+          title="Open settings.json in an editor to edit and export your settings directly"
+          className="flex items-center gap-1.5 px-2 h-7 rounded-md border border-subtle text-secondary hover:bg-hover hover:text-primary text-xs"
+        >
+          <BracketsCurly size={14} />
+          Open settings.json
+        </button>
+      }
     >
-      <div
-        className="w-[min(900px,92vw)] h-[80vh] bg-surface-1 rounded-xl border border-subtle shadow-[0_24px_64px_-12px_rgba(0,0,0,0.7)] ring-1 ring-black/40 flex flex-col overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 pt-5 pb-3 flex-shrink-0 border-b border-subtle bg-surface-0/40">
-          <h2 className="text-lg font-semibold text-primary">{t('settings.title')}</h2>
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={openSettingsJson}
-              title="Open settings.json in an editor to edit and export your settings directly"
-              className="flex items-center gap-1.5 px-2 h-7 rounded-md border border-subtle text-secondary hover:bg-hover hover:text-primary text-xs"
-            >
-              <BracketsCurly size={14} />
-              Open settings.json
-            </button>
-            <button
-              onClick={onClose}
-              className="w-6 h-6 flex items-center justify-center rounded-md hover:bg-hover text-secondary hover:text-primary"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        </div>
-
-        {/* Body: sidebar + scrollable content */}
-        <div className="flex flex-1 min-h-0" data-sidebar-scrollarea>
+      {/* Body: sidebar + scrollable content */}
+      <div className="flex flex-1 min-h-0" data-sidebar-scrollarea>
           {/* Sidebar */}
           <div className="w-[208px] flex-shrink-0 flex flex-col bg-surface-0/30">
             <div className="p-3 flex-shrink-0">
@@ -247,8 +258,8 @@ export function SettingsWindow({ isOpen, onClose, initialTab }: SettingsWindowPr
               )}
             </div>
           </div>
-        </div>
       </div>
-    </div>
+    </Modal>
   )
 }
+

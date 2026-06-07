@@ -14,10 +14,6 @@ const SHADOW_UNFOCUSED = `0 12px 36px -14px rgba(0,0,0,0.28), 0 4px 10px -5px rg
 const SHADOW_HOVERED = `${SHADOW_UNFOCUSED}, 0 0 18px rgba(255,255,255,0.015)`
 // Active/focused pane: a very faint bright (white) halo — no blue tint.
 const FOCUS_GLOW = `0 0 20px 1px rgba(255,255,255,0.025), 0 0 8px rgba(255,255,255,0.02)`
-// Selected-but-not-activated pane (e.g. jumped to via Cmd+Arrow): a crisp
-// accent outline ring so it's clearly "this is the current node" without the
-// active-pane halo. Distinct from the focus glow above.
-const SELECTION_RING = `0 0 0 2px var(--focus-blue), 0 0 14px -2px var(--focus-blue)`
 
 function boxShadow(hovered: boolean): string {
   if (hovered) return SHADOW_HOVERED
@@ -39,24 +35,32 @@ function activityOutline(activity: NodeActivityState | undefined): string {
 interface StyleArgs {
   node: CanvasNodeState | undefined
   isFocused: boolean
-  isSelected: boolean
   activityState: NodeActivityState | undefined
   isAnimatingLayout: boolean
   isHovered: boolean
   chromeTint: { background: string; accent: string } | null
   isWholeNodeDragSource: boolean
+  /** Active tab's worktree color, or null when the node isn't worktree-tagged
+   *  (or the workspace has <2 worktrees). Tints the node border. */
+  worktreeColor?: string | null
+  /** This node's worktree is hovered or is the focus-lens target → colored ring. */
+  worktreeHighlight?: boolean
+  /** The focus lens is locked on a DIFFERENT worktree → push this node back. */
+  worktreeDim?: boolean
 }
 
 export function useCanvasNodeStyle(args: StyleArgs) {
   const {
     node,
     isFocused,
-    isSelected,
     activityState,
     isAnimatingLayout,
     isHovered,
     chromeTint,
     isWholeNodeDragSource,
+    worktreeColor,
+    worktreeHighlight,
+    worktreeDim,
   } = args
 
   const containerStyle = useMemo<React.CSSProperties>(() => {
@@ -67,10 +71,14 @@ export function useCanvasNodeStyle(args: StyleArgs) {
     const isExiting = node.animationState === 'exiting'
 
     const baseTransition =
-      'border-color 150ms ease, box-shadow 200ms ease, outline-color 200ms ease, transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 150ms ease-out'
+      'border-color 150ms ease, box-shadow 200ms ease, outline-color 200ms ease, transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 150ms ease-out, filter 200ms ease'
     const layoutTransition = isAnimatingLayout
       ? ', left 250ms cubic-bezier(0.16, 1, 0.3, 1), top 250ms cubic-bezier(0.16, 1, 0.3, 1), width 250ms cubic-bezier(0.16, 1, 0.3, 1), height 250ms cubic-bezier(0.16, 1, 0.3, 1)'
       : ''
+
+    const baseOpacity = isEntering ? 0 : isExiting ? 0 : isWholeNodeDragSource ? 0 : 1
+    // Focus lens: nodes outside the focused worktree recede.
+    const opacity = worktreeDim ? baseOpacity * 0.5 : baseOpacity
 
     return {
       position: 'absolute',
@@ -93,16 +101,17 @@ export function useCanvasNodeStyle(args: StyleArgs) {
         : 'var(--surface-3)',
       ['--node-chrome-accent' as any]: chromeTint?.accent ?? 'var(--focus-blue)',
       transition: baseTransition + layoutTransition,
+      filter: worktreeDim ? 'saturate(0.4)' : undefined,
       transform: isEntering ? 'scale(0.85)' : isExiting ? 'scale(0.9)' : 'scale(1)',
-      opacity: isEntering ? 0 : isExiting ? 0 : isWholeNodeDragSource ? 0 : 1,
+      opacity,
       pointerEvents: isExiting || isWholeNodeDragSource ? 'none' : undefined,
       userSelect: 'none',
     }
-  }, [node, isFocused, isSelected, activityState, isAnimatingLayout, isHovered, chromeTint, isWholeNodeDragSource])
+  }, [node, isFocused, activityState, isAnimatingLayout, isHovered, chromeTint, isWholeNodeDragSource, worktreeDim])
 
   const glowStyle = useMemo<React.CSSProperties | null>(() => {
     if (!node) return null
-    if (!(isFocused || isSelected)) return null
+    if (!(isFocused || worktreeHighlight)) return null
     // Hide the focus glow while the node is the drag source — the source node
     // itself is hidden (containerStyle.opacity = 0 above) and the glow would
     // otherwise float at the node's original origin while the ghost moves.
@@ -120,14 +129,18 @@ export function useCanvasNodeStyle(args: StyleArgs) {
       height: node.size.height,
       zIndex: 999,
       borderRadius: CORNER_RADIUS,
-      // Focused/active → soft halo; selected-only (keyboard jump) → outline ring.
-      boxShadow: isFocused ? FOCUS_GLOW : SELECTION_RING,
+      // Worktree highlight (hover/lens) → colored ring in the branch color;
+      // else focused/active → soft halo.
+      boxShadow:
+        worktreeHighlight && worktreeColor
+          ? `0 0 0 2px ${worktreeColor}, 0 0 18px -2px ${worktreeColor}`
+          : FOCUS_GLOW,
       pointerEvents: 'none',
       transform: isEntering ? 'scale(0.85)' : isExiting ? 'scale(0.9)' : 'scale(1)',
       opacity: isEntering || isExiting ? 0 : 1,
-      transition: `${layoutTransition}transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 150ms ease-out`,
+      transition: `${layoutTransition}transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 150ms ease-out, box-shadow 200ms ease`,
     }
-  }, [node, isFocused, isSelected, isAnimatingLayout, isWholeNodeDragSource])
+  }, [node, isFocused, isAnimatingLayout, isWholeNodeDragSource, worktreeHighlight, worktreeColor])
 
   return { containerStyle, glowStyle }
 }

@@ -16,7 +16,9 @@ import type {
   Point,
 } from '../../shared/types'
 import { SIDE_ZONES, ALL_ZONES } from '../../shared/types'
-import { findTabStack, findZoneForStack } from './dockTreeUtils'
+import { findTabStack, findZoneForStack, findStackContainingPanel } from './dockTreeUtils'
+import { clearActivePanelIfMatches } from '../lib/activePanel'
+import { generateId } from './canvas/helpers'
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -29,10 +31,6 @@ const MIN_ZONE_SIZE = 120
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
-
-function generateId(): string {
-  return crypto.randomUUID()
-}
 
 function createEmptyZone(position: DockZonePosition): DockZoneState {
   const isBottom = position === 'bottom'
@@ -165,7 +163,6 @@ function insertIntoSplit(
 
 interface DockStoreState {
   zones: WindowDockState
-  panelLocations: Record<string, PanelLocation>
 }
 
 interface DockStoreActions {
@@ -176,7 +173,6 @@ interface DockStoreActions {
   // Panel placement
   dockPanel: (panelId: string, zone: DockZonePosition, target?: DockDropTarget) => void
   undockPanel: (panelId: string) => void
-  moveToCanvas: (panelId: string, canvasId: string, canvasNodeId: string) => void
 
   // Tab management within a stack
   moveTab: (panelId: string, fromStackId: string, toStackId: string, index?: number) => void
@@ -186,9 +182,8 @@ interface DockStoreActions {
   setSplitRatio: (splitId: string, ratios: number[]) => void
   collapseStack: (stackId: string) => void
 
-  // Location tracking
-  setPanelLocation: (panelId: string, location: PanelLocation) => void
-  removePanelLocation: (panelId: string) => void
+  // Location tracking — the dock location of a panel is DERIVED from the zones
+  // tree, not stored. getPanelLocation computes it on demand.
   getPanelLocation: (panelId: string) => PanelLocation | undefined
 
   // Serialization
@@ -205,7 +200,6 @@ export type DockStore = DockStoreState & DockStoreActions
 export function createDockStore(initialState?: { zones: WindowDockState; locations: Record<string, PanelLocation> }) {
   return create<DockStore>((set, get) => ({
   zones: initialState?.zones ?? createDefaultDockState(),
-  panelLocations: initialState?.locations ?? {},
 
   // --- Zone visibility ---
 
@@ -246,10 +240,13 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
         newLayout = removePanelFromTree(newLayout, panelId)
       }
 
-      if (target?.type === 'tab' && target.stackId) {
+      // A 'tab' target whose stack no longer exists (e.g. it was closed since the
+      // user last interacted with it) falls through to the default zone-append
+      // below, rather than silently dropping the panel.
+      if (target?.type === 'tab' && target.stackId && findTabStack(newLayout, target.stackId)) {
         // Add to existing tab stack
-        const stack = findTabStack(newLayout, target.stackId)
-        if (stack) {
+        const stack = findTabStack(newLayout, target.stackId)!
+        {
           const insertIndex = target.index ?? stack.panelIds.length
           const newPanelIds = [...stack.panelIds]
           newPanelIds.splice(insertIndex, 0, panelId)
@@ -336,30 +333,27 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
             layout: newLayout,
           },
         },
-        panelLocations: {
-          ...state.panelLocations,
-          [panelId]: {
-            type: 'dock',
-            zone,
-            stackId: getStackIdForPanel(newLayout, panelId) ?? '',
-          },
-        },
       }
     })
   },
 
   undockPanel(panelId) {
     set((state) => {
-      const location = state.panelLocations[panelId]
-      if (!location || location.type !== 'dock') return state
+      // Derive the panel's zone from the tree (no stored reverse-index).
+      const zone = findZoneForStack(
+        state.zones,
+        findStackContainingPanel(state.zones.left.layout, panelId)?.id
+          ?? findStackContainingPanel(state.zones.right.layout, panelId)?.id
+          ?? findStackContainingPanel(state.zones.bottom.layout, panelId)?.id
+          ?? findStackContainingPanel(state.zones.center.layout, panelId)?.id
+          ?? '',
+      )
+      if (!zone) return state
 
-      const zone = location.zone
       const zoneState = state.zones[zone]
       if (!zoneState.layout) return state
 
       const newLayout = removePanelFromTree(zoneState.layout, panelId)
-
-      const { [panelId]: _removed, ...remainingLocations } = state.panelLocations
 
       return {
         zones: {
@@ -371,24 +365,8 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
             visible: zone === 'center' ? true : (newLayout !== null ? zoneState.visible : false),
           },
         },
-        panelLocations: remainingLocations,
       }
     })
-  },
-
-  moveToCanvas(panelId, canvasId, canvasNodeId) {
-    // First undock if docked
-    const location = get().panelLocations[panelId]
-    if (location?.type === 'dock') {
-      get().undockPanel(panelId)
-    }
-    // Set canvas location
-    set((state) => ({
-      panelLocations: {
-        ...state.panelLocations,
-        [panelId]: { type: 'canvas', canvasId, canvasNodeId },
-      },
-    }))
   },
 
   // --- Tab management ---
@@ -444,17 +422,7 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
         }
       }
 
-      return {
-        zones,
-        panelLocations: {
-          ...state.panelLocations,
-          [panelId]: {
-            type: 'dock',
-            zone: findZoneForStack(zones, toStackId) ?? 'left',
-            stackId: toStackId,
-          },
-        },
-      }
+      return { zones }
     })
   },
 
@@ -497,17 +465,29 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
   },
 
   collapseStack(stackId) {
+    // Forget the active panel up front if it lives in the stack being collapsed,
+    // so a gone panel can't keep attracting newly-created panels. Read state
+    // outside the set() reducer to keep the reducer side-effect-free.
+    const collapsing = (() => {
+      for (const pos of ALL_ZONES) {
+        const layout = get().zones[pos].layout
+        if (layout) {
+          const stack = findTabStack(layout, stackId)
+          if (stack) return stack.panelIds
+        }
+      }
+      return [] as string[]
+    })()
+    for (const panelId of collapsing) clearActivePanelIfMatches(panelId)
+
     set((state) => {
       const zones = { ...state.zones }
-      const removedPanelIds: string[] = []
 
       for (const pos of ALL_ZONES) {
         const zoneState = zones[pos]
         if (!zoneState.layout) continue
         const stack = findTabStack(zoneState.layout, stackId)
         if (!stack) continue
-
-        removedPanelIds.push(...stack.panelIds)
 
         // Remove the entire stack from the tree
         let newLayout: DockLayoutNode | null = zoneState.layout
@@ -525,48 +505,40 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
         break
       }
 
-      const newLocations = { ...state.panelLocations }
-      for (const panelId of removedPanelIds) {
-        delete newLocations[panelId]
-      }
-
-      return { zones, panelLocations: newLocations }
+      return { zones }
     })
   },
 
   // --- Location tracking ---
 
-  setPanelLocation(panelId, location) {
-    set((state) => ({
-      panelLocations: { ...state.panelLocations, [panelId]: location },
-    }))
-  },
-
-  removePanelLocation(panelId) {
-    set((state) => {
-      const { [panelId]: _removed, ...remaining } = state.panelLocations
-      return { panelLocations: remaining }
-    })
-  },
-
   getPanelLocation(panelId) {
-    return get().panelLocations[panelId]
+    const zones = get().zones
+    const stack = findStackContainingPanel(zones.left.layout, panelId)
+      ?? findStackContainingPanel(zones.right.layout, panelId)
+      ?? findStackContainingPanel(zones.bottom.layout, panelId)
+      ?? findStackContainingPanel(zones.center.layout, panelId)
+    if (!stack) return undefined
+    const zone = findZoneForStack(zones, stack.id)
+    if (!zone) return undefined
+    return { type: 'dock', zone, stackId: stack.id }
   },
 
   // --- Serialization ---
+  // `locations` is a derived projection of the zones tree, emitted only for
+  // on-disk/cross-window snapshot back-compat; it is not stored live and is
+  // re-derived (ignored) on restore.
 
   getSnapshot() {
     const state = get()
     return {
       zones: state.zones,
-      locations: { ...state.panelLocations },
+      locations: deriveLocations(state.zones),
     }
   },
 
   restoreSnapshot(snapshot) {
     set({
       zones: snapshot.zones,
-      panelLocations: snapshot.locations,
     })
   },
 }))
@@ -588,16 +560,26 @@ function findFirstTabStack(node: DockLayoutNode): DockTabStack | null {
   return null
 }
 
-function getStackIdForPanel(layout: DockLayoutNode | null, panelId: string): string | null {
-  if (!layout) return null
-  if (layout.type === 'tabs') {
-    return layout.panelIds.includes(panelId) ? layout.id : null
+/** Derive the {panelId -> dock location} map from the zones tree. Used only to
+ *  fill the `locations` field of a snapshot for on-disk/cross-window
+ *  back-compat; live code derives single lookups via getPanelLocation. */
+function deriveLocations(zones: WindowDockState): Record<string, PanelLocation> {
+  const out: Record<string, PanelLocation> = {}
+  for (const pos of ALL_ZONES) {
+    const layout = zones[pos].layout
+    if (!layout) continue
+    const walk = (node: DockLayoutNode) => {
+      if (node.type === 'tabs') {
+        for (const panelId of node.panelIds) {
+          out[panelId] = { type: 'dock', zone: pos, stackId: node.id }
+        }
+      } else {
+        for (const child of node.children) walk(child)
+      }
+    }
+    walk(layout)
   }
-  for (const child of layout.children) {
-    const found = getStackIdForPanel(child, panelId)
-    if (found) return found
-  }
-  return null
+  return out
 }
 
 

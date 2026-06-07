@@ -14,6 +14,7 @@ import { PANEL_REGISTRY, getPanelDef } from '../panels/registry'
 import { useAppStore } from '../stores/appStore'
 import { useAgentInfoByPanel } from '../hooks/useAgentPanelInfo'
 import { worktreeTitleStyle } from '../lib/worktreeTitleStyle'
+import { WorktreePill } from '../canvas/WorktreePill'
 import { isMiddleClick } from '../lib/mouse'
 
 const AWAIT_COLOR = '#c08a5a'
@@ -30,7 +31,9 @@ function useWorktreeColorByPanel(): Record<string, string> {
     for (const ws of s.workspaces) {
       const worktrees = ws.worktrees ?? []
       if (worktrees.length < 2) continue
-      const primary = worktrees.find((w) => w.isPrimary)
+      // isPrimary is a live-git fact, no longer persisted; the primary record is
+      // the one keyed by the workspace's own rootPath.
+      const primary = worktrees.find((w) => w.path === ws.rootPath)
       for (const panel of Object.values(ws.panels)) {
         if (panel.type !== 'terminal' && panel.type !== 'agent') continue
         const wt = worktrees.find((w) => w.id === panel.worktreeId) ?? primary
@@ -187,7 +190,7 @@ export function DockTabBar(props: DockTabBarProps) {
             panelId={panelId}
             className={`
               group relative flex items-center gap-1.5 whitespace-nowrap
-              cursor-grab select-none min-w-0 flex-1 max-w-[200px]
+              cursor-grab select-none min-w-0 shrink max-w-[200px]
               ${compact ? 'pl-2 pr-1.5 text-[11px]' : 'pl-3 pr-2 text-xs'}
               ${isActive ? 'text-secondary font-medium' : 'text-muted hover:text-secondary'}
             `}
@@ -267,6 +270,14 @@ export function DockTabBar(props: DockTabBarProps) {
             {agentInfoByPanel[panelId]?.state === 'waitingForInput' && (
               <span className="cate-await-indicator shrink-0" aria-label="awaiting input">
                 <span className="cate-await-dot" style={{ backgroundColor: AWAIT_COLOR }} />
+              </span>
+            )}
+            {/* Worktree chip lives in the active tab (it used to sit in the node's
+                trailing controls). Self-hides for non-terminal/agent panels and
+                single-worktree workspaces, so it only shows where meaningful. */}
+            {isActive && panel && workspaceId && (
+              <span className="shrink-0">
+                <WorktreePill panel={panel} workspaceId={workspaceId} />
               </span>
             )}
             {onClosePanel && (

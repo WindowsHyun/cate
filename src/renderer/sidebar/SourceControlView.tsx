@@ -19,8 +19,10 @@ import {
   Check,
 } from '@phosphor-icons/react'
 import { useAppStore } from '../stores/appStore'
-import { useUIStore } from '../stores/uiStore'
 import { SidebarSectionHeader, SidebarHeaderButton } from './SidebarSectionHeader'
+import { useGitStatusSnapshot, gitStatusStore } from '../stores/gitStatusStore'
+import { useWorktrees } from '../stores/useWorktrees'
+import { errorMessage } from '../lib/errorMessage'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,13 +40,6 @@ interface GitStatusResult {
   tracking: string | null
   ahead: number
   behind: number
-}
-
-interface Worktree {
-  path: string
-  branch: string
-  isBare: boolean
-  isCurrent: boolean
 }
 
 interface GitBranchInfo {
@@ -238,7 +233,7 @@ const BranchPicker: React.FC<{
       setIsOpen(false)
       onSwitch()
     } catch (err: any) {
-      setError(err?.message || 'Checkout failed')
+      setError(errorMessage(err, 'Checkout failed'))
     }
   }, [rootPath, onSwitch])
 
@@ -250,7 +245,7 @@ const BranchPicker: React.FC<{
       setIsOpen(false)
       onSwitch()
     } catch (err: any) {
-      setError(err?.message || 'Create failed')
+      setError(errorMessage(err, 'Create failed'))
     }
   }, [rootPath, newBranchName, onSwitch])
 
@@ -262,7 +257,7 @@ const BranchPicker: React.FC<{
       await window.electronAPI.gitBranchDelete(rootPath, name)
       loadBranches()
     } catch (err: any) {
-      setError(err?.message || 'Delete failed')
+      setError(errorMessage(err, 'Delete failed'))
     }
   }, [rootPath, currentBranch, loadBranches])
 
@@ -380,8 +375,23 @@ interface SourceControlViewProps {
 }
 
 export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }) => {
-  const [status, setStatus] = useState<GitStatusResult | null>(null)
-  const [worktrees, setWorktrees] = useState<Worktree[]>([])
+  // status + worktrees come from the single per-workspace gitStatusStore (the
+  // shared fsWatch + focus + branch-update loop). The Source Control list can
+  // therefore no longer disagree with the Explorer / Search git tints. Only the
+  // commit log is still fetched locally (it isn't part of the shared snapshot).
+  const snapshot = useGitStatusSnapshot(rootPath)
+  const selectedWorkspaceId = useAppStore((s) => s.selectedWorkspaceId)
+  const worktrees = useWorktrees(rootPath, selectedWorkspaceId)
+  const status: GitStatusResult | null = snapshot.isRepo
+    ? {
+        files: snapshot.statusFiles,
+        current: snapshot.branch,
+        tracking: null,
+        ahead: snapshot.ahead,
+        behind: snapshot.behind,
+      }
+    : null
+
   const [logEntries, setLogEntries] = useState<GitLogEntry[]>([])
   const [commitMessage, setCommitMessage] = useState('')
   const [loading, setLoading] = useState(false)
@@ -393,27 +403,24 @@ export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const createDiffEditor = useAppStore((s) => s.createDiffEditor)
-  const selectedWorkspaceId = useAppStore((s) => s.selectedWorkspaceId)
 
   // -------------------------------------------------------------------------
-  // Data fetching
+  // Data fetching — kick the shared git store and refresh the local commit log.
+  // The store's own loop already refreshes on fs-watch / focus / branch-update,
+  // so this is for explicit user actions (the toolbar Refresh button + after a
+  // git mutation below).
   // -------------------------------------------------------------------------
 
   const refresh = useCallback(async () => {
     if (!rootPath) return
     setLoading(true)
     setActionError(null)
+    gitStatusStore.refresh(rootPath)
     try {
-      const [statusResult, worktreeResult, logResult] = await Promise.all([
-        window.electronAPI.gitStatus(rootPath),
-        window.electronAPI.gitWorktreeList(rootPath),
-        window.electronAPI.gitLog(rootPath, 30),
-      ])
-      setStatus(statusResult as GitStatusResult)
-      setWorktrees(worktreeResult as Worktree[])
+      const logResult = await window.electronAPI.gitLog(rootPath, 30)
       setLogEntries(logResult)
     } catch (err) {
-      log.error('Git status error:', err)
+      log.error('Git log error:', err)
     } finally {
       setLoading(false)
     }
@@ -421,23 +428,6 @@ export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }
 
   useEffect(() => {
     refresh()
-  }, [refresh])
-
-  // Refresh on window focus
-  useEffect(() => {
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') refresh()
-    }
-    document.addEventListener('visibilitychange', handleVisibility)
-    return () => document.removeEventListener('visibilitychange', handleVisibility)
-  }, [refresh])
-
-  // Listen for branch updates
-  useEffect(() => {
-    const cleanup = window.electronAPI.onGitBranchUpdate(() => {
-      refresh()
-    })
-    return cleanup
   }, [refresh])
 
   // -------------------------------------------------------------------------
@@ -468,7 +458,7 @@ export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }
       await window.electronAPI.gitDiscardFile(rootPath, filePath)
       refresh()
     } catch (err: any) {
-      setActionError(err?.message || 'Discard failed')
+      setActionError(errorMessage(err, 'Discard failed'))
     }
   }, [rootPath, refresh])
 
@@ -495,7 +485,7 @@ export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }
       setCommitMessage('')
       refresh()
     } catch (err: any) {
-      setActionError(err?.message || 'Commit failed')
+      setActionError(errorMessage(err, 'Commit failed'))
     } finally {
       setCommitting(false)
     }
@@ -509,7 +499,7 @@ export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }
       await window.electronAPI.gitPush(rootPath)
       refresh()
     } catch (err: any) {
-      setActionError(err?.message || 'Push failed')
+      setActionError(errorMessage(err, 'Push failed'))
     } finally {
       setPushing(false)
     }
@@ -523,7 +513,7 @@ export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }
       await window.electronAPI.gitPull(rootPath)
       refresh()
     } catch (err: any) {
-      setActionError(err?.message || 'Pull failed')
+      setActionError(errorMessage(err, 'Pull failed'))
     } finally {
       setPulling(false)
     }
@@ -537,7 +527,7 @@ export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }
       await window.electronAPI.gitFetch(rootPath)
       refresh()
     } catch (err: any) {
-      setActionError(err?.message || 'Fetch failed')
+      setActionError(errorMessage(err, 'Fetch failed'))
     } finally {
       setFetching(false)
     }
@@ -549,7 +539,7 @@ export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }
       await window.electronAPI.gitStash(rootPath)
       refresh()
     } catch (err: any) {
-      setActionError(err?.message || 'Stash failed')
+      setActionError(errorMessage(err, 'Stash failed'))
     }
   }, [rootPath, refresh])
 
@@ -559,7 +549,7 @@ export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }
       await window.electronAPI.gitStashPop(rootPath)
       refresh()
     } catch (err: any) {
-      setActionError(err?.message || 'Stash pop failed')
+      setActionError(errorMessage(err, 'Stash pop failed'))
     }
   }, [rootPath, refresh])
 
@@ -795,26 +785,14 @@ export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }
           ))}
         </Section>
 
-        {/* Worktrees — read-only mirror; manage in Parallel Work tab. */}
+        {/* Worktrees — read-only mirror; manage from the canvas toolbar's
+            parallel-worktrees drop-up. */}
         <Section
           title="Worktrees"
-          count={worktrees.length}
+          count={worktrees.filter((wt) => !wt.isOrphan).length}
           defaultOpen={false}
-          actions={
-            <button
-              className="text-[10px] text-muted hover:text-primary px-1 py-0.5 rounded hover:bg-hover"
-              onClick={(e) => {
-                e.stopPropagation()
-                useUIStore.getState().setActiveLeftSidebarView('parallelWork')
-                useUIStore.getState().setActiveRightSidebarView('parallelWork')
-              }}
-              title="Open Parallel Work tab"
-            >
-              Manage →
-            </button>
-          }
         >
-          {worktrees.map((wt) => (
+          {worktrees.filter((wt) => !wt.isOrphan).map((wt) => (
             <div
               key={wt.path}
               className={`flex items-center gap-1.5 px-3 py-[3px] ${
@@ -823,7 +801,7 @@ export const SourceControlView: React.FC<SourceControlViewProps> = ({ rootPath }
               title={wt.path}
             >
               <GitBranch size={12} className="flex-shrink-0" />
-              <span className="truncate flex-1">{wt.branch || '(detached)'}</span>
+              <span className="truncate flex-1">{wt.label || wt.branch || '(detached)'}</span>
               {wt.isCurrent && (
                 <span className="text-[10px] text-green-400/60">current</span>
               )}

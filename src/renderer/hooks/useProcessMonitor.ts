@@ -1,21 +1,18 @@
 import { useEffect } from 'react'
-import { useStatusStore } from '../stores/statusStore'
+import { useStatusStore, workspaceIdForTerminal } from '../stores/statusStore'
 import { useAppStore } from '../stores/appStore'
 import { terminalRegistry } from '../lib/terminal/terminalRegistry'
 import { noteAgentPresence } from '../lib/agent/agentScreenDetector'
 import { isWorkspaceMonitorReady } from './workspaceMonitorReady'
+import { syncWorktrees } from '../lib/worktreeSync'
+import log from '../lib/logger'
 import type { TerminalActivity } from '../../shared/types'
 
-/** Last agent name we observed per terminal — module-level so we only push a
- *  panel-title fallback on the rising edge (null → "Codex") instead of every
- *  activity tick. Cleared when the renderer unregisters the terminal so the
- *  map stays bounded across long dev sessions. */
-const lastAgentName: Map<string, string | null> = new Map()
-
-/** Drop tracking state for a terminal. Wired into `statusStore.unregisterTerminal`
- *  so the module-level map can't grow without bound. */
-export function forgetTerminalForProcessMonitor(terminalId: string): void {
-  lastAgentName.delete(terminalId)
+/** Retained for the statusStore.unregisterTerminal wiring. The per-terminal
+ *  rising-edge agent name is now read from statusStore (its single home) rather
+ *  than a module-level map, so there is nothing left to forget here. */
+export function forgetTerminalForProcessMonitor(_terminalId: string): void {
+  // no-op
 }
 
 export function useProcessMonitor(workspaceId: string): void {
@@ -36,15 +33,22 @@ export function useProcessMonitor(workspaceId: string): void {
         const agentName = (agentNameRaw as string | null) ?? null
         const agentPresent = agentPresentRaw === true
 
-        const actualWorkspaceId =
-          useStatusStore.getState().terminalWorkspaceMap[terminalId] ?? workspaceId
+        // terminal->workspace identity is owned by terminalRegistry's bimap.
+        const actualWorkspaceId = workspaceIdForTerminal(terminalId) ?? workspaceId
+
+        // statusStore is the single home for (agentName, agentPresent). Read the
+        // PRIOR name from there (not a separate module map) so the rising-edge
+        // tab-title push fires once when the name first appears.
+        const prevAgent =
+          useStatusStore.getState().workspaces[actualWorkspaceId]?.agentName[terminalId] ?? null
 
         store().setTerminalActivity(actualWorkspaceId, terminalId, terminalActivity)
         store().setAgentPresent(actualWorkspaceId, terminalId, agentPresent)
         store().setAgentName(actualWorkspaceId, terminalId, agentName)
         // Running-state is derived from the agent's title spinner; feed presence
-        // (and name) into the coordinator for the notRunning/finished edges.
-        noteAgentPresence(terminalId, agentPresent, agentName)
+        // into the coordinator for the notRunning/finished edges. The name is
+        // already in statusStore (above), which the coordinator reads at commit.
+        noteAgentPresence(terminalId, agentPresent)
 
         // Agent tab title: show the clean detected agent name (e.g. "Codex",
         // "Claude Code") on the rising edge. This is the canonical tab label
@@ -52,12 +56,10 @@ export function useProcessMonitor(workspaceId: string): void {
         // / session label) is suppressed for agents in terminalRegistry's
         // onTitleChange (see applyOscTitleIfNoAgent), so this name sticks.
         // `updatePanelTitleFromAgent` skips when the user has manually renamed.
-        const prevAgent = lastAgentName.get(terminalId) ?? null
         if (agentName && agentName !== prevAgent) {
           const panelId = terminalRegistry.panelIdForPty(terminalId) ?? terminalId
           useAppStore.getState().updatePanelTitleFromAgent(actualWorkspaceId, panelId, agentName)
         }
-        lastAgentName.set(terminalId, agentName)
       },
     )
 
@@ -85,13 +87,28 @@ export function useProcessMonitor(workspaceId: string): void {
   useEffect(() => {
     const api = window.electronAPI
     if (!api?.onGitBranchUpdate) return
-    const unsubscribe = api.onGitBranchUpdate(
-      (workspaceId: string, branch: string, isDirty: boolean) => {
-        useStatusStore.getState().setGitInfo(workspaceId, branch, isDirty)
-      },
-    )
+    // GIT_BRANCH_UPDATE is a pure invalidation signal; the live git facts
+    // (branch/ahead/behind/worktree list) are refetched by gitStatusStore, which
+    // owns its own GIT_BRANCH_UPDATE subscription. Here we only reconcile the
+    // UI-owned worktree metadata in appStore so a worktree created without the
+    // parallel-work sidebar open still gets an id/color and shows up on the
+    // canvas (territories/pills). The git monitor debounces this signal, so the
+    // cheap `git worktree list` reconcile runs only when something changed.
+    const unsubscribe = api.onGitBranchUpdate((evWorkspaceId: string) => {
+      void syncWorktrees(evWorkspaceId).catch((err) => {
+        log.debug('[worktree-sync] background reconcile failed', err)
+      })
+    })
     return () => { unsubscribe() }
   }, [])
+
+  // Initial sync for the active workspace, so worktrees are fresh at app start
+  // (and on workspace switch) even before the first GIT_BRANCH_UPDATE lands.
+  useEffect(() => {
+    void syncWorktrees(workspaceId).catch((err) => {
+      log.debug('[worktree-sync] initial reconcile failed', err)
+    })
+  }, [workspaceId])
 
   // Re-arm whenever this workspace's companion becomes ready. During a
   // background restore the renderer can fire GIT_MONITOR_START before a remote

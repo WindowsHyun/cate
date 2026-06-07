@@ -3,18 +3,17 @@ import { ProjectList } from './ProjectList'
 import { FileExplorer } from './FileExplorer'
 import { SearchView } from './SearchView'
 import { SourceControlView } from './SourceControlView'
-import { ParallelWorkTab } from './ParallelWorkTab'
 import { useAppStore } from '../stores/appStore'
-import { useUIStore } from '../stores/uiStore'
+import { useUIStore, useSidebarLayout } from '../stores/uiStore'
 import type { SidebarView, SidebarSide } from '../stores/uiStore'
 import {
   FolderOpen,
   GitBranch,
-  ArrowsSplit,
   Stack,
   Gear,
   MagnifyingGlass,
   FloppyDisk,
+  PuzzlePiece,
   type Icon as PhosphorIcon,
 } from '@phosphor-icons/react'
 import pkg from '../../../package.json'
@@ -28,7 +27,6 @@ const VIEW_META: Record<SidebarView, { icon: PhosphorIcon; title: string }> = {
   explorer: { icon: FolderOpen, title: 'Explorer' },
   search: { icon: MagnifyingGlass, title: 'Search' },
   git: { icon: GitBranch, title: 'Source Control' },
-  parallelWork: { icon: ArrowsSplit, title: 'Parallel Work' },
 }
 
 // ---------------------------------------------------------------------------
@@ -69,8 +67,6 @@ const SidebarViewContent: React.FC<{ view: SidebarView; rootPath: string }> = ({
       return <SearchView rootPath={rootPath} workspaceId={selectedWorkspaceId} />
     case 'git':
       return <SourceControlView rootPath={rootPath} />
-    case 'parallelWork':
-      return <ParallelWorkTab rootPath={rootPath} />
     default:
       return null
   }
@@ -91,7 +87,7 @@ interface ActivityBarSidebarProps {
 }
 
 const ActivityBarSidebar: React.FC<ActivityBarSidebarProps> = ({ side, defaultWidth, minWidth, maxWidth }) => {
-  const layout = useUIStore((s) => s.sidebarLayout)
+  const layout = useSidebarLayout()
   const views = layout[side]
   const activeView = useUIStore((s) => (side === 'left' ? s.activeLeftSidebarView : s.activeRightSidebarView))
   const setActiveView = useUIStore((s) =>
@@ -111,6 +107,7 @@ const ActivityBarSidebar: React.FC<ActivityBarSidebarProps> = ({ side, defaultWi
 
   const isExpanded = activeView !== null
   const isEmpty = views.length === 0
+
   // When empty, the sidebar is hidden. During a drag, if the cursor enters
   // this side's half of the window, we reveal it so the user can drop here.
   const [dragRevealed, setDragRevealed] = useState(false)
@@ -132,18 +129,6 @@ const ActivityBarSidebar: React.FC<ActivityBarSidebarProps> = ({ side, defaultWi
   const [isResizing, setIsResizing] = useState(false)
   const startXRef = useRef(0)
   const startWidthRef = useRef(0)
-
-  // Publish current total sidebar width to a CSS variable so the dock tab bar
-  // can inset itself and keep the tab pills next to (not under) the sidebar.
-  const totalWidth =
-    isEmpty && !dragRevealed ? 0 : isExpanded ? BAR_WIDTH + width : BAR_WIDTH
-  useEffect(() => {
-    const cssVar = side === 'left' ? '--cate-left-sidebar-width' : '--cate-right-sidebar-width'
-    document.documentElement.style.setProperty(cssVar, `${totalWidth}px`)
-    return () => {
-      document.documentElement.style.setProperty(cssVar, '0px')
-    }
-  }, [side, totalWidth])
 
   // Drop indicator: index where the drop would land. Mirrored in a ref so the
   // drop handler reads the latest value (state updates from dragOver may not
@@ -301,7 +286,7 @@ const ActivityBarSidebar: React.FC<ActivityBarSidebarProps> = ({ side, defaultWi
                   isActive ? 'text-primary' : 'text-muted hover:text-secondary'
                 }`}
                 onClick={() => handleIconClick(view)}
-                title={isActive ? `${meta.title} — click to collapse` : meta.title}
+                title={isActive ? `${meta.title}. Click to collapse.` : meta.title}
               >
                 <Icon size={16} className="pointer-events-none" />
               </div>
@@ -320,6 +305,14 @@ const ActivityBarSidebar: React.FC<ActivityBarSidebarProps> = ({ side, defaultWi
         <div className="mt-auto flex flex-col items-center pb-1 w-full">
           {/* The standalone ⌘K search icon was removed now that the dedicated
               Search view exists; ⌘K still opens the command palette via keyboard. */}
+          <button
+            type="button"
+            className="flex items-center justify-center w-8 h-8 my-1 rounded text-muted hover:text-secondary transition-colors"
+            onClick={() => useUIStore.getState().setShowSkillsDialog(true)}
+            title="Skills"
+          >
+            <PuzzlePiece size={16} className="pointer-events-none" />
+          </button>
           <button
             type="button"
             className="flex items-center justify-center w-8 h-8 my-1 rounded text-muted hover:text-secondary transition-colors"
@@ -393,19 +386,14 @@ const ActivityBarSidebar: React.FC<ActivityBarSidebarProps> = ({ side, defaultWi
         // that anything underneath changes (a major sustained WindowServer cost
         // given the canvas/terminals behind it). A near-opaque tint reads as the
         // same frosted surface without the per-frame compositing.
-        backgroundColor:
-          side === 'right'
-            ? 'color-mix(in srgb, var(--surface-0) 96%, transparent)'
-            : 'color-mix(in srgb, var(--surface-1) 96%, transparent)',
+        backgroundColor: 'color-mix(in srgb, var(--surface-1) 96%, transparent)',
       }}
     >
       {/* Opaque top strip — matches the dock tab bar height (36px) so the
-          sidebar chrome lines up with the canvas tab bar. The right sidebar
-          uses a darker shade to stand out against the tab-bar chrome it sits
-          beside. */}
+          sidebar chrome lines up with the canvas tab bar. */}
       <div
         className="pointer-events-none absolute top-0 left-0 right-0 h-9"
-        style={{ backgroundColor: side === 'right' ? 'var(--surface-0)' : 'var(--surface-1)' }}
+        style={{ backgroundColor: 'var(--surface-1)' }}
       />
       {side === 'left' ? (
         <>

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, webUtils, webFrame } from 'electron'
 
 // Phase 0 perf marker — capture preload entry as early as possible.
 try { performance.mark('preload-start') } catch { /* noop */ }
@@ -69,6 +69,8 @@ import {
   SETTINGS_CHANGED,
   SETTINGS_OPEN_IN_EDITOR,
   SETTINGS_RELOADED,
+  UI_STATE_GET_ALL,
+  UI_STATE_SET,
   SESSION_FLUSH_SAVE,
   SESSION_FLUSH_SAVE_DONE,
   PROJECT_STATE_SAVE,
@@ -80,6 +82,7 @@ import {
   MENU_OPEN_SETTINGS,
   MENU_TRIGGER_ACTION,
   MENU_LOAD_LAYOUT,
+  MENU_CREATE_PANEL,
   BROWSER_SHORTCUT,
   MENU_SHOW_CONTEXT,
   DIALOG_OPEN_FOLDER,
@@ -90,7 +93,6 @@ import {
   DIALOG_CONFIRM_CLOSE_TERMINAL,
   DIALOG_CONFIRM_CLOSE_CANVAS,
   DIALOG_CONFIRM_RELOAD_WORKSPACE,
-  DIALOG_CONFIRM_DELETE_REGION,
   DIALOG_CONFIRM_IMPORT,
   DIALOG_TERMINAL_LINK_OPEN,
   RECENT_PROJECTS_GET,
@@ -118,6 +120,11 @@ import {
   NOTIFY_OS,
   NOTIFY_ACTION,
   WINDOW_SET_TITLE,
+  WINDOW_MINIMIZE,
+  WINDOW_TOGGLE_MAXIMIZE,
+  WINDOW_CLOSE,
+  WINDOW_IS_MAXIMIZED,
+  WINDOW_MAXIMIZE_STATE,
   PANEL_TRANSFER,
   PANEL_RECEIVE,
   PANEL_TRANSFER_ACK,
@@ -131,6 +138,9 @@ import {
   DRAG_END,
   DOCK_WINDOW_INIT,
   DOCK_WINDOW_SYNC_STATE,
+  DOCK_WINDOW_RESTORE,
+  DOCK_WINDOW_FLUSH_SYNC,
+  DOCK_WINDOW_FLUSH_SYNC_DONE,
   DOCK_WINDOWS_LIST,
   CROSS_WINDOW_DRAG_START,
   CROSS_WINDOW_DRAG_UPDATE,
@@ -154,10 +164,6 @@ import {
   BROWSER_SET_PROXY,
   NATIVE_FILE_DRAG,
   CAPTURE_PAGE,
-  UPDATE_STATUS,
-  UPDATE_INSTALL,
-  UPDATE_DOWNLOAD,
-  UPDATE_OPEN_RELEASE,
   ANALYTICS_FEEDBACK_PROMPT,
   ANALYTICS_FEEDBACK_SUBMIT,
   ANALYTICS_FEEDBACK_DISMISS,
@@ -203,7 +209,7 @@ import {
   AGENT_ABORT_BASH,
   AGENT_SET_STEERING_MODE,
   AGENT_SET_FOLLOW_UP_MODE,
-  AGENT_GET_AVAILABLE_MODELS,
+  AGENT_LIST_MODELS,
   AGENT_UI_RESPONSE,
   AGENT_LIST_SESSIONS,
   AGENT_LOAD_SESSION_MESSAGES,
@@ -214,11 +220,26 @@ import {
   AGENT_MARKETPLACE_UNINSTALL,
   AGENT_CUSTOM_MODELS_GET,
   AGENT_CUSTOM_MODELS_SAVE,
+  SKILLS_GET_INDEX,
+  SKILLS_REFRESH,
+  SKILLS_GET_PREVIEW,
+  SKILLS_INSTALL,
+  SKILLS_UNINSTALL,
+  SKILLS_LIST_INSTALLED,
+  SKILLS_LIST_SAVED,
+  SKILLS_SAVE,
+  SKILLS_UNSAVE,
+  SKILLS_LIST_SOURCES,
+  SKILLS_ADD_SOURCE,
+  SKILLS_REMOVE_SOURCE,
+  SKILLS_GET_TOKEN,
+  SKILLS_SET_TOKEN,
   AUTH_LIST_PROVIDERS,
   AUTH_STATUS,
   AUTH_OAUTH_START,
   AUTH_OAUTH_PROMPT_REPLY,
   AUTH_OAUTH_EVENT,
+  AUTH_CHANGED,
   AUTH_SAVE_API_KEY,
   AUTH_DELETE,
   PERF_GET,
@@ -244,6 +265,23 @@ function fullscreenLiveCheck(): boolean {
   }
 }
 
+// This window's own maximize state, pushed by main on maximize/unmaximize. Cached
+// so the custom window controls can render synchronously on first paint, with a
+// `sendSync` pull as the authoritative fallback (mirrors the fullscreen pattern).
+let cachedMaximized = false
+ipcRenderer.on(WINDOW_MAXIMIZE_STATE, (_event, value: boolean) => {
+  cachedMaximized = Boolean(value)
+})
+function maximizedLiveCheck(): boolean {
+  try {
+    const v = ipcRenderer.sendSync(WINDOW_IS_MAXIMIZED)
+    cachedMaximized = Boolean(v)
+    return cachedMaximized
+  } catch {
+    return cachedMaximized
+  }
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   isE2E: process.env.CATE_E2E === '1',
   isPerf: process.env.CATE_PERF === '1',
@@ -251,6 +289,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Pull the latest main-process resource snapshot (null until first sample). */
   perfGetSnapshot(): Promise<unknown> {
     return ipcRenderer.invoke(PERF_GET)
+  },
+
+  /** Set this window's UI zoom factor (Cate chrome only — webview content keeps
+   *  its own zoom). Applied per-renderer; each window calls this on mount and
+   *  whenever the uiScale setting changes. */
+  setUiScale(scale: number): void {
+    const clamped = Math.min(2, Math.max(0.5, Number.isFinite(scale) ? scale : 1))
+    webFrame.setZoomFactor(clamped)
   },
   // ---------------------------------------------------------------------------
   // Terminal
@@ -696,6 +742,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(SETTINGS_RESET, key)
   },
 
+  uiStateGetAll(): Promise<unknown> {
+    return ipcRenderer.invoke(UI_STATE_GET_ALL)
+  },
+
+  uiStateSet(key: string, value: unknown): Promise<void> {
+    return ipcRenderer.invoke(UI_STATE_SET, key, value)
+  },
+
   onSettingsChanged(callback: (key: keyof AppSettings, value: unknown) => void): () => void {
     const listener = (_event: Electron.IpcRendererEvent, key: keyof AppSettings, value: unknown): void => {
       callback(key, value)
@@ -796,10 +850,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   confirmReloadWorkspace(payload: { name?: string }): Promise<'reload' | 'cancel'> {
     return ipcRenderer.invoke(DIALOG_CONFIRM_RELOAD_WORKSPACE, payload)
-  },
-
-  confirmDeleteRegion(payload: { panelCount: number }): Promise<'with-contents' | 'region-only' | 'cancel'> {
-    return ipcRenderer.invoke(DIALOG_CONFIRM_DELETE_REGION, payload)
   },
 
   confirmImportEntries(payload: { count: number; destName: string }): Promise<'copy' | 'move' | 'cancel'> {
@@ -938,8 +988,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Panel transfer (cross-window)
   // ---------------------------------------------------------------------------
 
-  panelTransfer(snapshot: unknown, targetWindowId?: number): Promise<number | void> {
-    return ipcRenderer.invoke(PANEL_TRANSFER, snapshot, targetWindowId)
+  panelTransfer(snapshot: unknown, targetWindowId?: number, workspaceId?: string): Promise<number | void> {
+    return ipcRenderer.invoke(PANEL_TRANSFER, snapshot, targetWindowId, workspaceId)
   },
 
   panelTransferAck(ptyId?: string): Promise<void> {
@@ -966,13 +1016,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(PANEL_WINDOW_SYNC_META, payload)
   },
 
-  panelWindowDockBack(): Promise<void> {
-    return ipcRenderer.invoke(PANEL_WINDOW_DOCK_BACK)
+  panelWindowDockBack(snapshot?: unknown): Promise<void> {
+    return ipcRenderer.invoke(PANEL_WINDOW_DOCK_BACK, snapshot)
   },
 
-  onPanelWindowDockBack(callback: (panelWindowId: number) => void): () => void {
-    const listener = (_event: Electron.IpcRendererEvent, panelWindowId: number): void => {
-      callback(panelWindowId)
+  onPanelWindowDockBack(callback: (payload: { panelWindowId: number; snapshot?: unknown }) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { panelWindowId: number; snapshot?: unknown }): void => {
+      callback(payload)
     }
     ipcRenderer.on(PANEL_WINDOW_DOCK_BACK, listener)
     return () => { ipcRenderer.removeListener(PANEL_WINDOW_DOCK_BACK, listener) }
@@ -998,8 +1048,34 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return fullscreenLiveCheck()
   },
 
-  onDragEnd(callback: () => void): () => void {
-    const listener = (): void => { callback() }
+  // Custom window controls (frameless Windows/Linux chrome). Each acts on the
+  // calling window. No-ops visually on macOS, where native chrome is used.
+  windowMinimize(): Promise<void> {
+    return ipcRenderer.invoke(WINDOW_MINIMIZE)
+  },
+  windowToggleMaximize(): Promise<void> {
+    return ipcRenderer.invoke(WINDOW_TOGGLE_MAXIMIZE)
+  },
+  windowClose(): Promise<void> {
+    return ipcRenderer.invoke(WINDOW_CLOSE)
+  },
+  /** Is the calling window currently maximized? Uses the cached push value and
+   *  falls back to a sync IPC for the authoritative answer. */
+  isWindowMaximized(): boolean {
+    return maximizedLiveCheck()
+  },
+  /** Subscribe to this window's maximize-state changes. Fires with the new
+   *  boolean whenever the window is maximized or restored. */
+  onWindowMaximizeChange(callback: (isMaximized: boolean) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, value: boolean): void => {
+      callback(Boolean(value))
+    }
+    ipcRenderer.on(WINDOW_MAXIMIZE_STATE, listener)
+    return () => { ipcRenderer.removeListener(WINDOW_MAXIMIZE_STATE, listener) }
+  },
+
+  onDragEnd(callback: (dragId?: string) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, dragId?: string): void => { callback(dragId) }
     ipcRenderer.on(DRAG_END, listener)
     return () => { ipcRenderer.removeListener(DRAG_END, listener) }
   },
@@ -1051,6 +1127,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(DOCK_WINDOWS_LIST)
   },
 
+  dockWindowRestore(payload: unknown): Promise<number | null> {
+    return ipcRenderer.invoke(DOCK_WINDOW_RESTORE, payload)
+  },
+
+  onDockWindowFlushSync(callback: () => void): () => void {
+    const listener = (): void => { callback() }
+    ipcRenderer.on(DOCK_WINDOW_FLUSH_SYNC, listener)
+    return () => { ipcRenderer.removeListener(DOCK_WINDOW_FLUSH_SYNC, listener) }
+  },
+
+  dockWindowFlushSyncDone(): void {
+    ipcRenderer.send(DOCK_WINDOW_FLUSH_SYNC_DONE)
+  },
+
   // ---------------------------------------------------------------------------
   // Cross-window drag coordination
   // ---------------------------------------------------------------------------
@@ -1059,9 +1149,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(CROSS_WINDOW_DRAG_START, snapshot, screenPos)
   },
 
-  onCrossWindowDragUpdate(callback: (screenPos: unknown, snapshot: unknown) => void): () => void {
-    const listener = (_event: Electron.IpcRendererEvent, screenPos: unknown, snapshot: unknown): void => {
-      callback(screenPos, snapshot)
+  onCrossWindowDragUpdate(callback: (screenPos: unknown, snapshot: unknown, dragId?: unknown) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, screenPos: unknown, snapshot: unknown, dragId?: unknown): void => {
+      callback(screenPos, snapshot, dragId)
     }
     ipcRenderer.on(CROSS_WINDOW_DRAG_UPDATE, listener)
     return () => { ipcRenderer.removeListener(CROSS_WINDOW_DRAG_UPDATE, listener) }
@@ -1179,29 +1269,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => { ipcRenderer.removeListener(MENU_LOAD_LAYOUT, listener) }
   },
 
+  onMenuCreatePanel(callback: (payload: { action: string; workspaceId?: string }) => void): () => void {
+    const listener = (_e: unknown, payload: { action: string; workspaceId?: string }): void => { callback(payload) }
+    ipcRenderer.on(MENU_CREATE_PANEL, listener)
+    return () => { ipcRenderer.removeListener(MENU_CREATE_PANEL, listener) }
+  },
+
   onBrowserShortcut(callback: (action: string) => void): () => void {
     const listener = (_e: unknown, action: string): void => { callback(action) }
     ipcRenderer.on(BROWSER_SHORTCUT, listener)
     return () => { ipcRenderer.removeListener(BROWSER_SHORTCUT, listener) }
   },
-
-  // ---------------------------------------------------------------------------
-  // Auto-updater
-  // ---------------------------------------------------------------------------
-
-  onUpdateStatus(callback: (status: unknown) => void): () => void {
-    const listener = (_e: Electron.IpcRendererEvent, status: unknown): void => callback(status)
-    ipcRenderer.on(UPDATE_STATUS, listener)
-    return () => { ipcRenderer.removeListener(UPDATE_STATUS, listener) }
-  },
-
-  updateGetStatus(): Promise<unknown> {
-    return ipcRenderer.invoke('update:getStatus')
-  },
-
-  updateDownload(): void { ipcRenderer.send(UPDATE_DOWNLOAD) },
-  updateInstall(): void { ipcRenderer.send(UPDATE_INSTALL) },
-  updateOpenRelease(url?: string): void { ipcRenderer.send(UPDATE_OPEN_RELEASE, url) },
 
   // ---------------------------------------------------------------------------
   // Analytics — post-update feedback prompt
@@ -1345,8 +1423,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(AGENT_SET_FOLLOW_UP_MODE, panelId, mode)
   },
 
-  agentGetAvailableModels(panelId: string): Promise<unknown[]> {
-    return ipcRenderer.invoke(AGENT_GET_AVAILABLE_MODELS, panelId)
+  agentListModels(): Promise<unknown[]> {
+    return ipcRenderer.invoke(AGENT_LIST_MODELS)
   },
 
   agentUiResponse(panelId: string, response: unknown): void {
@@ -1423,6 +1501,53 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke(AGENT_MARKETPLACE_UNINSTALL, cwd, name)
   },
 
+  // ---------------------------------------------------------------------------
+  // Cross-agent skills
+  // ---------------------------------------------------------------------------
+
+  skillsGetIndex(): Promise<unknown[]> {
+    return ipcRenderer.invoke(SKILLS_GET_INDEX)
+  },
+  skillsRefresh(): Promise<unknown[]> {
+    return ipcRenderer.invoke(SKILLS_REFRESH)
+  },
+  skillsGetPreview(entry: unknown): Promise<string> {
+    return ipcRenderer.invoke(SKILLS_GET_PREVIEW, entry)
+  },
+  skillsInstall(entry: unknown, targetId: string, cwd: string): Promise<{ ok: boolean; error?: string; warnings?: string[]; installed?: unknown }> {
+    return ipcRenderer.invoke(SKILLS_INSTALL, entry, targetId, cwd)
+  },
+  skillsUninstall(skillId: string, name: string, targetId: string, cwd: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke(SKILLS_UNINSTALL, skillId, name, targetId, cwd)
+  },
+  skillsListInstalled(cwd: string): Promise<unknown[]> {
+    return ipcRenderer.invoke(SKILLS_LIST_INSTALLED, cwd)
+  },
+  skillsListSaved(): Promise<unknown[]> {
+    return ipcRenderer.invoke(SKILLS_LIST_SAVED)
+  },
+  skillsSave(entry: unknown): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke(SKILLS_SAVE, entry)
+  },
+  skillsUnsave(skillId: string): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke(SKILLS_UNSAVE, skillId)
+  },
+  skillsListSources(): Promise<unknown[]> {
+    return ipcRenderer.invoke(SKILLS_LIST_SOURCES)
+  },
+  skillsAddSource(repo: string, opts?: { ref?: string; path?: string }): Promise<{ ok: boolean; error?: string; source?: unknown }> {
+    return ipcRenderer.invoke(SKILLS_ADD_SOURCE, repo, opts)
+  },
+  skillsRemoveSource(id: string): Promise<{ ok: boolean }> {
+    return ipcRenderer.invoke(SKILLS_REMOVE_SOURCE, id)
+  },
+  skillsGetToken(): Promise<{ hasToken: boolean }> {
+    return ipcRenderer.invoke(SKILLS_GET_TOKEN)
+  },
+  skillsSetToken(token: string | null): Promise<{ ok: boolean }> {
+    return ipcRenderer.invoke(SKILLS_SET_TOKEN, token)
+  },
+
   onAgentEvent(callback: (envelope: unknown) => void): () => void {
     const listener = (_e: Electron.IpcRendererEvent, envelope: unknown): void => { callback(envelope) }
     ipcRenderer.on(AGENT_EVENT, listener)
@@ -1469,6 +1594,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
     ipcRenderer.on(AUTH_OAUTH_EVENT, listener)
     return () => { ipcRenderer.removeListener(AUTH_OAUTH_EVENT, listener) }
+  },
+
+  onAuthChanged(callback: () => void): () => void {
+    const listener = (): void => { callback() }
+    ipcRenderer.on(AUTH_CHANGED, listener)
+    return () => { ipcRenderer.removeListener(AUTH_CHANGED, listener) }
   },
 
   authSaveApiKey(providerId: string, apiKey: string): Promise<void> {

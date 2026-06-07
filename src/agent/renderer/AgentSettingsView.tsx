@@ -1,47 +1,43 @@
 // =============================================================================
 // AgentSettingsView — the settings surface that replaces the chat column:
-// providers, the user's agents/prompts/skills files, and the extension
-// marketplace. Reads/writes through electronAPI; opening a file routes to a
-// new editor panel via appStore.
+// the user's agents/prompts/skills files, and the extension marketplace.
+// Reads/writes through electronAPI; opening a file routes to a new editor panel
+// via appStore. Provider sign-in lives in the main Cate Settings (Providers
+// section), not here.
 // =============================================================================
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, FolderOpen, ArrowsClockwise, Trash } from '@phosphor-icons/react'
 import log from '../../renderer/lib/logger'
 import { useAppStore } from '../../renderer/stores/appStore'
-import { ProvidersView } from './ProvidersView'
 import type { AgentSlashCommand } from '../../shared/types'
 
-const TAB_BADGE: Record<'agents' | 'prompts' | 'skills', string> = {
+// Skills moved to the dedicated cross-agent Skills sidebar view; this settings
+// surface keeps the per-agent Agents/Prompts/Extensions only.
+const TAB_BADGE: Record<'agents' | 'prompts', string> = {
   agents: 'Subagent',
   prompts: 'Prompt',
-  skills: 'Skill',
 }
 
-const TAB_BADGE_COLOR: Record<'agents' | 'prompts' | 'skills', string> = {
-  agents: 'text-muted bg-white/5',
-  prompts: 'text-muted bg-white/5',
-  skills: 'text-agent-light bg-agent/10',
+const TAB_BADGE_COLOR: Record<'agents' | 'prompts', string> = {
+  agents: 'text-muted bg-hover',
+  prompts: 'text-muted bg-hover',
 }
 
 export function SettingsView({
-  commands,
   workspaceId,
   cwd,
-  scopedProviderId,
-  availableModels,
   onBack,
   onRefresh,
 }: {
-  commands: AgentSlashCommand[]
+  /** Still accepted from AgentPanel; skills (the only consumer) moved out. */
+  commands?: AgentSlashCommand[]
   workspaceId: string
   cwd: string
-  scopedProviderId?: string
-  availableModels: Array<{ provider: string; model: string; label?: string }>
   onBack: () => void
   onRefresh: () => void
 }) {
-  const [activeSection, setActiveSection] = useState('providers')
+  const [activeSection, setActiveSection] = useState('agents')
   const scrollRef = useRef<HTMLDivElement>(null)
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({})
 
@@ -57,7 +53,7 @@ export function SettingsView({
     const container = scrollRef.current
     if (!container) return
     const handler = () => {
-      const ids = ['providers', 'agents', 'prompts', 'skills', 'extensions']
+      const ids = ['agents', 'prompts', 'extensions']
       let closest = ids[0]
       let closestDist = Infinity
       for (const id of ids) {
@@ -72,34 +68,25 @@ export function SettingsView({
     return () => container.removeEventListener('scroll', handler)
   }, [])
 
-  useEffect(() => { if (scopedProviderId) scrollTo('providers') }, [scopedProviderId, scrollTo])
-
   const [agentFiles, setAgentFiles] = useState<Array<{ name: string; description?: string; path: string }>>([])
   const [promptFiles, setPromptFiles] = useState<Array<{ name: string; description?: string; path: string }>>([])
-  const [skillFiles, setSkillFiles] = useState<Array<{ name: string; description?: string; path: string }>>([])
-  const [creating, setCreating] = useState<'agents' | 'prompts' | 'skills' | null>(null)
+  const [creating, setCreating] = useState<'agents' | 'prompts' | null>(null)
   const [newName, setNewName] = useState('')
   const [error, setError] = useState<string | null>(null)
 
   const refreshAllFiles = useCallback(async () => {
     try {
-      const [a, p, s] = await Promise.all([
+      const [a, p] = await Promise.all([
         window.electronAPI.agentListSkillFiles(cwd, 'agents'),
         window.electronAPI.agentListSkillFiles(cwd, 'prompts'),
-        window.electronAPI.agentListSkillFiles(cwd, 'skills'),
       ])
-      setAgentFiles(a); setPromptFiles(p); setSkillFiles(s)
+      setAgentFiles(a); setPromptFiles(p)
     } catch (err) { log.warn('[SettingsView] list failed', err) }
   }, [cwd])
 
   useEffect(() => { void refreshAllFiles() }, [refreshAllFiles])
 
-  const packageSkills = useMemo(
-    () => commands.filter((c) => c.source === 'skill' && !c.editable),
-    [commands],
-  )
-
-  const handleCreate = async (kind: 'agents' | 'prompts' | 'skills'): Promise<void> => {
+  const handleCreate = async (kind: 'agents' | 'prompts'): Promise<void> => {
     setError(null)
     try {
       const created = await window.electronAPI.agentCreateSkill(cwd, kind, newName)
@@ -131,10 +118,10 @@ export function SettingsView({
 
   const [refreshNonce, setRefreshNonce] = useState(0)
 
-  const sections = ['Providers', 'Agents', 'Prompts', 'Skills', 'Extensions'] as const
+  const sections = ['Agents', 'Prompts', 'Extensions'] as const
 
   const renderSkillSection = (
-    kind: 'agents' | 'prompts' | 'skills',
+    kind: 'agents' | 'prompts',
     files: Array<{ name: string; description?: string; path: string }>,
   ) => (
     <>
@@ -149,13 +136,13 @@ export function SettingsView({
         )}
         <button
           onClick={() => window.electronAPI.agentOpenSkillsFolder(cwd, kind).catch(() => {})}
-          className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 text-primary text-[12px]"
+          className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-hover hover:bg-hover-strong text-primary text-[12px]"
         >
           <FolderOpen size={11} /> Open folder
         </button>
       </div>
       {creating === kind && (
-        <div className="rounded-lg bg-white/[0.03] p-2 flex items-center gap-2 mt-2">
+        <div className="rounded-lg bg-hover p-2 flex items-center gap-2 mt-2">
           <input
             autoFocus
             value={newName}
@@ -165,7 +152,7 @@ export function SettingsView({
               if (e.key === 'Escape') { setCreating(null); setNewName(''); setError(null) }
             }}
             placeholder={`${kind.slice(0, -1)} name`}
-            className="flex-1 bg-surface-3 border border-white/10 rounded-md px-2 py-1 text-[12px] text-primary outline-none focus:border-agent/60 font-mono"
+            className="flex-1 bg-surface-3 border border-strong rounded-md px-2 py-1 text-[12px] text-primary outline-none focus:border-agent/60 font-mono"
           />
           <button
             onClick={() => handleCreate(kind)}
@@ -183,8 +170,8 @@ export function SettingsView({
         </div>
       )}
       {creating === kind && error && <div className="text-[12px] text-primary mt-1">{error}</div>}
-      <div className="rounded-lg bg-white/[0.02] overflow-hidden mt-2">
-        {files.length === 0 && (kind !== 'skills' || packageSkills.length === 0) ? (
+      <div className="rounded-lg bg-hover overflow-hidden mt-2">
+        {files.length === 0 ? (
           <div className="px-3 py-4 text-center text-[12px] text-muted">
             No {kind} yet.
           </div>
@@ -201,19 +188,6 @@ export function SettingsView({
                 deletable={true}
                 onOpen={() => handleOpen(f.path)}
                 onDelete={() => handleDelete(kind, f.path)}
-              />
-            ))}
-            {kind === 'skills' && packageSkills.map((c) => (
-              <SkillRow
-                key={`pkg-${c.name}-${c.path ?? ''}`}
-                name={c.name}
-                description={c.description}
-                badge="Built-in"
-                badgeClass="text-muted bg-white/5"
-                filePath={c.path}
-                deletable={false}
-                onOpen={() => handleOpen(c.path)}
-                onDelete={() => {}}
               />
             ))}
           </>
@@ -236,7 +210,7 @@ export function SettingsView({
               onClick={() => scrollTo(id)}
               className={`text-left px-2 py-1 rounded-md text-[12px] ${
                 activeSection === id
-                  ? 'text-primary bg-white/10'
+                  ? 'text-primary bg-hover-strong'
                   : 'text-muted hover:text-primary'
               }`}
             >
@@ -247,11 +221,6 @@ export function SettingsView({
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto py-4 pr-4 pl-2 min-h-0 space-y-8">
-        <div ref={(el) => { sectionRefs.current['providers'] = el }}>
-          <div className="text-[13px] font-semibold text-primary mb-3">Providers</div>
-          <ProvidersView embedded scopedProviderId={scopedProviderId} availableModels={availableModels} />
-        </div>
-
         <div ref={(el) => { sectionRefs.current['agents'] = el }}>
           <div className="text-[13px] font-semibold text-primary mb-1">Agents</div>
           {renderSkillSection('agents', agentFiles)}
@@ -262,17 +231,12 @@ export function SettingsView({
           {renderSkillSection('prompts', promptFiles)}
         </div>
 
-        <div ref={(el) => { sectionRefs.current['skills'] = el }}>
-          <div className="text-[13px] font-semibold text-primary mb-1">Skills</div>
-          {renderSkillSection('skills', skillFiles)}
-        </div>
-
         <div ref={(el) => { sectionRefs.current['extensions'] = el }}>
           <div className="flex items-center justify-between mb-3">
             <div className="text-[13px] font-semibold text-primary">Extensions</div>
             <button
               onClick={() => setRefreshNonce((n) => n + 1)}
-              className="p-1 rounded-md text-muted hover:text-primary hover:bg-white/5"
+              className="p-1 rounded-md text-muted hover:text-primary hover:bg-hover"
               title="Refresh"
             >
               <ArrowsClockwise size={12} />
@@ -425,7 +389,7 @@ function ExtensionsTab({ cwd, refreshNonce = 0 }: { cwd: string; refreshNonce?: 
   return (
     <div className="space-y-4">
       {error && (
-        <div className="rounded-md border border-rose-400/40 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-100 whitespace-pre-wrap break-words">
+        <div className="rounded-md border border-danger bg-danger-tint px-3 py-2 text-[12px] text-primary whitespace-pre-wrap break-words">
           {error}
         </div>
       )}
@@ -434,7 +398,7 @@ function ExtensionsTab({ cwd, refreshNonce = 0 }: { cwd: string; refreshNonce?: 
         <div className="flex items-center justify-between mb-1.5">
           <div className="text-[11px] uppercase tracking-wider text-muted">Installed</div>
         </div>
-        <div className="rounded-lg bg-white/[0.02] overflow-hidden">
+        <div className="rounded-lg bg-hover overflow-hidden">
           {installed.length === 0 ? (
             <div className="px-3 py-6 text-center text-[12px] text-muted">
               No extensions installed.
@@ -475,7 +439,7 @@ function ExtensionsTab({ cwd, refreshNonce = 0 }: { cwd: string; refreshNonce?: 
                 setSort(e.target.value as MarketplaceSortValue)
                 setPage(1)
               }}
-              className="bg-surface-3 border border-white/10 rounded-md px-2 py-1 text-[12px] text-primary outline-none focus:border-agent/60"
+              className="bg-surface-3 border border-strong rounded-md px-2 py-1 text-[12px] text-primary outline-none focus:border-agent/60"
             >
               <option value="downloads">Most downloads</option>
               <option value="recent">Recently published</option>
@@ -485,11 +449,11 @@ function ExtensionsTab({ cwd, refreshNonce = 0 }: { cwd: string; refreshNonce?: 
               value={queryInput}
               onChange={(e) => setQueryInput(e.target.value)}
               placeholder="Search..."
-              className="bg-surface-3 border border-white/10 rounded-md px-2 py-1 text-[12px] text-primary outline-none focus:border-agent/60 w-[180px]"
+              className="bg-surface-3 border border-strong rounded-md px-2 py-1 text-[12px] text-primary outline-none focus:border-agent/60 w-[180px]"
             />
           </div>
         </div>
-        <div className="rounded-lg bg-white/[0.02] overflow-hidden">
+        <div className="rounded-lg bg-hover overflow-hidden">
           {!loaded ? (
             <div className="px-3 py-6 text-center text-[12px] text-muted">Loading…</div>
           ) : filtered.length === 0 ? (
@@ -523,7 +487,7 @@ function ExtensionsTab({ cwd, refreshNonce = 0 }: { cwd: string; refreshNonce?: 
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={browseLoading || page <= 1}
-              className="px-2 py-1 rounded-md bg-white/5 hover:bg-agent/20 hover:text-primary disabled:opacity-40 disabled:cursor-default disabled:hover:bg-white/5 disabled:hover:text-muted"
+              className="px-2 py-1 rounded-md bg-hover hover:bg-agent/20 hover:text-primary disabled:opacity-40 disabled:cursor-default disabled:hover:bg-[var(--surface-hover)] disabled:hover:text-muted"
             >
               « Prev
             </button>
@@ -533,7 +497,7 @@ function ExtensionsTab({ cwd, refreshNonce = 0 }: { cwd: string; refreshNonce?: 
             <button
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               disabled={browseLoading || page >= totalPages}
-              className="px-2 py-1 rounded-md bg-white/5 hover:bg-agent/20 hover:text-primary disabled:opacity-40 disabled:cursor-default disabled:hover:bg-white/5 disabled:hover:text-muted"
+              className="px-2 py-1 rounded-md bg-hover hover:bg-agent/20 hover:text-primary disabled:opacity-40 disabled:cursor-default disabled:hover:bg-[var(--surface-hover)] disabled:hover:text-muted"
             >
               Next »
             </button>
@@ -571,10 +535,10 @@ function ExtensionRow({
     actionTone === 'primary'
       ? 'bg-agent hover:bg-agent-light text-white'
       : actionTone === 'danger'
-      ? 'bg-white/5 hover:bg-rose-500/30 text-rose-100'
-      : 'bg-white/5 text-muted'
+      ? 'bg-hover hover:bg-danger-tint text-danger'
+      : 'bg-hover text-muted'
   return (
-    <div className="flex items-start gap-2 px-3 py-2 border-b border-white/5 last:border-0 hover:bg-white/[0.04]">
+    <div className="flex items-start gap-2 px-3 py-2 border-b border-subtle last:border-0 hover:bg-hover">
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[12.5px] text-primary font-mono truncate">{name}</span>
@@ -637,7 +601,7 @@ function SkillRow({
     <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      className="group flex items-center gap-2 px-3 py-2 border-b border-white/5 last:border-0 hover:bg-white/[0.04]"
+      className="group flex items-center gap-2 px-3 py-2 border-b border-subtle last:border-0 hover:bg-hover"
     >
       <button
         onClick={onOpen}
@@ -657,7 +621,7 @@ function SkillRow({
       {hovered && deletable && (
         <button
           onClick={(e) => { e.stopPropagation(); onDelete() }}
-          className="p-1 rounded-md text-muted hover:text-primary hover:bg-white/10"
+          className="p-1 rounded-md text-muted hover:text-primary hover:bg-hover-strong"
           title="Delete"
         >
           <Trash size={11} />

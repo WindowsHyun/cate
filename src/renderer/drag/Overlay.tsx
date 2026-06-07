@@ -13,6 +13,7 @@ import { ghostScreenRect } from './geometry'
 export default function DragOverlay() {
   const isDragging = useDragStore((s) => s.isDragging)
   const panel = useDragStore((s) => s.panel)
+  const source = useDragStore((s) => s.source)
   const grab = useDragStore((s) => s.grab)
   const ghostSize = useDragStore((s) => s.ghostSize)
   const ghostZoom = useDragStore((s) => s.ghostZoom)
@@ -23,16 +24,31 @@ export default function DragOverlay() {
   // Native main-process ghost owns the visual when cursor is outside.
   if (!cursor.insideWindow) return null
 
-  // ghostZoom was frozen at drag-start (= the source canvas's zoom). Using it
-  // keeps the ghost size + grab offset consistent throughout the drag — both
-  // mirror the source visually regardless of which canvas/dock the cursor
-  // currently hovers over.
+  // ghostZoom was frozen at drag-start (= the source canvas's zoom). For a
+  // canvas-node source it keeps the ghost size + grab offset stable as the
+  // cursor crosses zones, mirroring the source visually.
   //
-  // The ghost free-tracks the cursor 1:1 even when snap-to-grid is active — the
-  // panel should move freely under the pointer and only snap to the grid on
-  // release. The committed origin (target.origin) is still snapped, so the drop
-  // lands on the grid; we just don't preview that snap mid-drag.
-  const rect = ghostScreenRect(cursor.client, grab, ghostSize, ghostZoom)
+  // But a source that ISN'T on a canvas (dock tab, panel window) is frozen at
+  // zoom 1, while a canvas-add drop sizes the landed node by ghostSize in
+  // canvas-space — i.e. rendered at the *target* canvas's current zoom. Freezing
+  // at 1 makes the ghost preview the wrong footprint whenever that canvas isn't
+  // at 100%. So when such a source hovers a canvas, render the ghost at the
+  // target canvas's live zoom so it previews the real landing size.
+  const renderZoom =
+    source && source.origin.kind !== 'canvas-node' && target?.kind === 'canvas-add'
+      ? (target.canvasStoreApi.getState().zoomLevel ?? ghostZoom)
+      : ghostZoom
+
+  // When snap-to-grid is active and the cursor is over a canvas, resolveDrop
+  // attaches `ghostRect` — the screen-px rect of the snapped landing cell — so
+  // the ghost previews where the panel will actually land (visibly stepping
+  // between grid cells as you drag). Otherwise the ghost free-tracks the cursor
+  // 1:1, mirroring the panel under the pointer.
+  const snappedRect =
+    target && (target.kind === 'canvas-reposition' || target.kind === 'canvas-add')
+      ? target.ghostRect
+      : undefined
+  const rect = snappedRect ?? ghostScreenRect(cursor.client, grab, ghostSize, renderZoom)
 
   return createPortal(
     <div data-drag-overlay="true" style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 10000 }}>

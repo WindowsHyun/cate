@@ -7,13 +7,20 @@ import React, { useEffect, useState, useCallback, Suspense } from 'react'
 import { X } from '@phosphor-icons/react'
 import type { PanelState, PanelTransferSnapshot } from '../../shared/types'
 import { terminalRegistry } from '../lib/terminal/terminalRegistry'
-import { terminalRestoreData } from '../lib/workspace/session'
 import { DragOverlay, setupCrossWindowDragListeners, useDragOp } from '../drag'
 import { renderPanelComponent, getPanelDef } from '../panels/registry'
-import { getOrCreateCanvasStoreForPanel } from '../stores/canvasStore'
+import { createTransferSnapshot, hydrateReceivedPanel } from '../lib/panelTransfer'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useUIStateStore } from '../stores/uiStateStore'
+import { useUIStore } from '../stores/uiStore'
+import { SettingsWindow } from '../settings/SettingsWindow'
+import WindowControls from './WindowControls'
 import { applyTheme } from '../lib/themeManager'
-import { applyCanvasChildPanels } from '../lib/canvas/applyCanvasChildPanels'
+import { applyUiScale } from '../lib/uiScale'
+import { ensurePanelsInAppStore } from '../lib/canvas/applyCanvasChildPanels'
+import { useAppStore } from '../stores/appStore'
+
+const IS_MAC = navigator.userAgent.includes('Mac')
 
 interface PanelWindowShellProps {
   panelType?: string
@@ -22,13 +29,35 @@ interface PanelWindowShellProps {
 }
 
 export default function PanelWindowShell({ panelType, panelId, workspaceId }: PanelWindowShellProps) {
-  const [panel, setPanel] = useState<PanelState | null>(null)
+  // Effective in-window workspace id for appStore. Main may launch a panel
+  // window with no workspaceId, but ensurePanelsInAppStore no-ops on '' — which
+  // would leave the panel unpopulated and the window stuck on "Loading". Fall
+  // back to a stable process-local id used consistently for the appStore stub
+  // AND the panel component (so its field writes land in the same workspace).
+  // It stays in-window: panelWindowSyncMeta still reports the real prop
+  // workspaceId, which main preserves (it keeps the creation-time id when the
+  // caller passes none).
+  const wsId = workspaceId || 'detached-panel-window'
   const [receivedSnapshot, setReceivedSnapshot] = useState<PanelTransferSnapshot | null>(null)
+  // The transferred panel's id, captured when the snapshot arrives so we can
+  // select the live panel record from appStore by id.
+  const [livePanelId, setLivePanelId] = useState<string | null>(null)
+
+  // appStore is this window's single source of truth: the transferred panel is
+  // merged into a stub workspace, and the panel component writes its live
+  // url/isDirty/filePath edits straight there. We select FROM appStore so those
+  // edits are reflected here AND read by panelWindowSyncMeta on demand.
+  const panel = useAppStore((s) =>
+    livePanelId
+      ? s.workspaces.find((w) => w.id === wsId)?.panels[livePanelId] ?? null
+      : null,
+  )
 
   // Hydrate settings + apply theme so this window mirrors the main app's
   // appearance and settings (theme, minimap, canvas grid, etc.).
   useEffect(() => {
     useSettingsStore.getState().loadSettings()
+    useUIStateStore.getState().loadUIState()
   }, [])
   const activeThemeId = useSettingsStore((s) => s.activeThemeId)
   const customThemes = useSettingsStore((s) => s.customThemes)
@@ -37,53 +66,41 @@ export default function PanelWindowShell({ panelType, panelId, workspaceId }: Pa
   useEffect(() => {
     applyTheme(activeThemeId)
   }, [activeThemeId, customThemes, systemLightThemeId, systemDarkThemeId])
+  const uiScale = useSettingsStore((s) => s.uiScale)
+  useEffect(() => {
+    applyUiScale(uiScale)
+  }, [uiScale])
 
   // Listen for incoming panel transfers from the main process
   useEffect(() => {
     const cleanup = window.electronAPI.onPanelReceive((snapshot: PanelTransferSnapshot) => {
-      // Deposit transfer data BEFORE setting state (which triggers TerminalPanel mount)
-      if (snapshot.terminalPtyId) {
-        terminalRegistry.setPendingTransfer(snapshot.panel.id, snapshot.terminalPtyId, snapshot.terminalScrollback)
-      } else if (snapshot.terminalReplayPtyId && snapshot.panel.type === 'terminal') {
-        // Session restore: no live PTY, but a previous run wrote a scrollback
-        // log under this ptyId. Seed terminalRestoreData so getOrCreate runs
-        // replayTerminalLog after spawning a fresh PTY.
-        terminalRestoreData.set(snapshot.panel.id, { replayFromId: snapshot.terminalReplayPtyId })
-      }
-
-      // Canvas panel: hydrate the per-panel canvas store + child PanelStates.
-      if (snapshot.panel.type === 'canvas' && snapshot.canvasState) {
-        const store = getOrCreateCanvasStoreForPanel(snapshot.panel.id)
-        const { nodes, regions, viewportOffset, zoomLevel, childPanels } = snapshot.canvasState
-        store.getState().loadWorkspaceCanvas(nodes, viewportOffset, zoomLevel, null, regions)
-        applyCanvasChildPanels(workspaceId ?? '', childPanels ?? {})
-      }
-
-      setPanel(snapshot.panel)
+      // Deposit PTY hand-off + hydrate canvas children BEFORE the panel mounts.
+      hydrateReceivedPanel(wsId, snapshot)
+      ensurePanelsInAppStore(wsId, { [snapshot.panel.id]: snapshot.panel }, snapshot.rootPath)
+      setLivePanelId(snapshot.panel.id)
       setReceivedSnapshot(snapshot)
     })
 
     return cleanup
   }, [])
 
-  // Editor Save-As inside this detached panel window updates appStore in the
-  // renderer, but our local `panel` state — and the main-process window
-  // registry meta the session snapshot reads from — are both independent.
-  // Mirror filePath/title/isDirty here AND push the snapshot to main so the
-  // saved scratch buffer is treated as a real file on restart.
+  // Editor Save-As inside this detached panel window already wrote the new
+  // filePath/title and cleared isDirty straight into appStore (EditorPanel
+  // calls updatePanelFilePath / setPanelDirty), which IS our source of truth.
+  // We only push the fresh panel record to main so its window-registry meta —
+  // which the session snapshot reads from — updates immediately rather than
+  // waiting for the next transfer; otherwise the saved scratch buffer would be
+  // restored as Untitled.
   useEffect(() => {
     const handler = (e: Event) => {
       const ce = e as CustomEvent<{ panelId: string; filePath: string; title: string }>
       const detail = ce.detail
       if (!detail?.panelId) return
-      setPanel((prev) => {
-        if (!prev || prev.id !== detail.panelId) return prev
-        const next = { ...prev, filePath: detail.filePath, title: detail.title, isDirty: false }
-        // Fire-and-forget — failure here only delays the meta update to
-        // the next transfer, not data loss (the file itself is on disk).
-        window.electronAPI.panelWindowSyncMeta?.({ panel: next, workspaceId }).catch(() => {})
-        return next
-      })
+      const current = useAppStore.getState().workspaces.find((w) => w.id === wsId)?.panels[detail.panelId]
+      if (!current) return
+      // Fire-and-forget — failure here only delays the meta update to the next
+      // transfer, not data loss (the file itself is on disk).
+      window.electronAPI.panelWindowSyncMeta?.({ panel: current, workspaceId }).catch(() => {})
     }
     window.addEventListener('editor:panel-saved-as', handler)
     return () => window.removeEventListener('editor:panel-saved-as', handler)
@@ -104,15 +121,9 @@ export default function PanelWindowShell({ panelType, panelId, workspaceId }: Pa
         reportedPtyId = entry.ptyId
         window.electronAPI.panelWindowSyncPty(entry.ptyId).catch(() => {})
       }
-      const buffer = entry.terminal.buffer.active
-      const lastRow = buffer.baseY + buffer.cursorY
-      const lines: string[] = []
-      for (let i = 0; i < lastRow; i++) {
-        const line = buffer.getLine(i)
-        if (line) lines.push(line.translateToString(true))
-      }
-      while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
-      const content = lines.join('\n')
+      // Exclude the cursor row: scrollback is replayed into a fresh PTY on the
+      // next launch, which re-sends the prompt line.
+      const content = terminalRegistry.captureScrollback(entry, { excludeCursorRow: true })
       if (content) {
         window.electronAPI.terminalScrollbackSave(entry.ptyId, content).catch(() => {})
       }
@@ -136,7 +147,17 @@ export default function PanelWindowShell({ panelType, panelId, workspaceId }: Pa
     return setupCrossWindowDragListeners()
   }, [])
 
-  const { handleDragStart } = useDragOp()
+  // Thread this window's effective workspace id so a drag's source-cleanup
+  // (removeDetachedPanelRecords) targets THIS window's stub workspace, not the
+  // empty '' selection a panel window's appStore would otherwise report.
+  const { handleDragStart } = useDragOp({ workspaceId: wsId })
+
+  // A detached AgentPanel routes provider sign-in to the main Cate Settings
+  // (Providers). Render the settings window here too so that button works in
+  // this window rather than being a no-op.
+  const showSettings = useUIStore((s) => s.showSettings)
+  const settingsInitialTab = useUIStore((s) => s.settingsInitialTab)
+  const closeSettings = useUIStore((s) => s.closeSettings)
 
   // If we have panel info from query params but no transfer yet, show a loading state
   const displayPanel = panel
@@ -145,10 +166,31 @@ export default function PanelWindowShell({ panelType, panelId, workspaceId }: Pa
     window.close()
   }, [])
 
-  /** Double-click title bar → dock panel back into main window */
+  /** Double-click title bar → dock panel back into the main window. Build a
+   *  full transfer snapshot from this window's LIVE panel/canvas state (the same
+   *  shape a detach produces) and hand it to main, which re-integrates it into
+   *  the main window and arms the PTY transfer home before closing this window.
+   *  Without the snapshot the main window can't reconstruct the panel (detach
+   *  already removed its record there), so it would silently vanish. */
   const handleTitleDoubleClick = useCallback(() => {
-    window.electronAPI.panelWindowDockBack()
-  }, [])
+    if (!panel) {
+      // No live panel yet — nothing to dock back. Just close.
+      window.electronAPI.panelWindowDockBack()
+      return
+    }
+    const app = useAppStore.getState()
+    const sourceWs = app.workspaces.find((w) => w.id === wsId)
+    const snapshot = createTransferSnapshot(
+      panel,
+      { type: 'detached', windowId: 0 },
+      { origin: { x: 0, y: 0 }, size: { width: window.innerWidth, height: window.innerHeight } },
+      {
+        resolveChildPanel: (childId) => sourceWs?.panels[childId],
+        workspaceRootPath: sourceWs?.rootPath || undefined,
+      },
+    )
+    window.electronAPI.panelWindowDockBack(snapshot)
+  }, [panel, wsId])
 
   /** Mousedown on the title bar starts a cross-window drag of this panel.
    *  When the cursor leaves the window, useDragOp emits cross-window-start,
@@ -199,14 +241,20 @@ export default function PanelWindowShell({ panelType, panelId, workspaceId }: Pa
           <PanelTypeIcon type={displayPanel.type} />
         </div>
         <span className="text-xs text-secondary truncate flex-1 min-w-0">{displayPanel.title}</span>
-        <button
-          className="w-5 h-5 flex items-center justify-center rounded hover:bg-hover text-muted hover:text-primary transition-colors"
-          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-          onClick={handleClose}
-          title="Close"
-        >
-          <X size={10} />
-        </button>
+        {IS_MAC ? (
+          // macOS has no native controls on this hidden-titlebar window, so keep
+          // an app-level close. Windows/Linux gets full controls below.
+          <button
+            className="w-5 h-5 flex items-center justify-center rounded hover:bg-hover text-muted hover:text-primary transition-colors"
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            onClick={handleClose}
+            title="Close"
+          >
+            <X size={10} />
+          </button>
+        ) : (
+          <WindowControls />
+        )}
       </div>
 
       <DragOverlay />
@@ -214,9 +262,11 @@ export default function PanelWindowShell({ panelType, panelId, workspaceId }: Pa
       {/* Panel content */}
       <div className="flex-1 min-h-0 min-w-0 overflow-hidden">
         <Suspense fallback={<div className="w-full h-full bg-surface-4 flex items-center justify-center text-muted text-sm">Loading...</div>}>
-          <PanelContent panel={displayPanel} workspaceId={workspaceId ?? ''} />
+          <PanelContent panel={displayPanel} workspaceId={wsId} />
         </Suspense>
       </div>
+
+      <SettingsWindow isOpen={showSettings} onClose={closeSettings} initialTab={settingsInitialTab ?? undefined} />
     </div>
   )
 }

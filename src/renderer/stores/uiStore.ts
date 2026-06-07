@@ -2,58 +2,49 @@
 // UI Store — Zustand state for transient UI overlays and visibility toggles.
 // =============================================================================
 
+import { useMemo } from 'react'
 import { create } from 'zustand'
+import type { SidebarView, SidebarLayout } from '../../shared/types'
+import { useSettingsStore } from './settingsStore'
 
 // -----------------------------------------------------------------------------
 // Store interface
 // -----------------------------------------------------------------------------
 
-export type SidebarView = 'workspaces' | 'explorer' | 'git' | 'parallelWork' | 'search'
+// SidebarView / SidebarLayout now live in shared/types (they're persisted in
+// settings.json); re-exported here so existing `from '../stores/uiStore'`
+// imports keep working.
+export type { SidebarView, SidebarLayout }
 export type SidebarSide = 'left' | 'right'
 
 /** Active canvas interaction tool (Figma-style). */
 export type CanvasTool = 'select' | 'hand'
 
-export interface SidebarLayout {
-  left: SidebarView[]
-  right: SidebarView[]
+const ALL_VIEWS: SidebarView[] = ['workspaces', 'explorer', 'git', 'search']
+
+/** Filter to known views and ensure every view appears exactly once (missing
+ *  ones appended to the right). Tolerates partial/legacy/hand-edited shapes. */
+export function normalizeSidebarLayout(raw: Partial<SidebarLayout> | null | undefined): SidebarLayout {
+  const left = (raw?.left ?? []).filter((v) => ALL_VIEWS.includes(v))
+  const right = (raw?.right ?? []).filter((v) => ALL_VIEWS.includes(v))
+  const seen = new Set<SidebarView>([...left, ...right])
+  for (const v of ALL_VIEWS) if (!seen.has(v)) right.push(v)
+  return { left, right }
 }
 
-const LAYOUT_STORAGE_KEY = 'cate.sidebarLayout.v3'
-const ALL_VIEWS: SidebarView[] = ['workspaces', 'explorer', 'git', 'parallelWork', 'search']
-const DEFAULT_LAYOUT: SidebarLayout = {
-  left: ['workspaces', 'explorer', 'search'],
-  right: ['git', 'parallelWork'],
-}
-
-function loadLayout(): SidebarLayout {
-  try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LAYOUT_STORAGE_KEY) : null
-    if (!raw) return DEFAULT_LAYOUT
-    const parsed = JSON.parse(raw) as SidebarLayout
-    const left = (parsed.left ?? []).filter((v) => ALL_VIEWS.includes(v))
-    const right = (parsed.right ?? []).filter((v) => ALL_VIEWS.includes(v))
-    // Ensure every view is present exactly once — append missing ones to the right.
-    const seen = new Set<SidebarView>([...left, ...right])
-    for (const v of ALL_VIEWS) if (!seen.has(v)) right.push(v)
-    return { left, right }
-  } catch {
-    return DEFAULT_LAYOUT
-  }
-}
-
-function saveLayout(layout: SidebarLayout) {
-  try {
-    localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layout))
-  } catch {
-    // ignore
-  }
+// The sidebar layout lives SOLELY in settingsStore (persisted in settings.json).
+// uiStore holds only the transient sidebar state (active views, drag). Read the
+// layout via `getSidebarLayout()` (or the `useSidebarLayout` selector in
+// components) so there is a single source of truth and no hand-sync.
+export function getSidebarLayout(): SidebarLayout {
+  return normalizeSidebarLayout(useSettingsStore.getState().sidebarLayout)
 }
 
 interface UIStoreState {
   showNodeSwitcher: boolean
   showCommandPalette: boolean
   showLayoutsDialog: boolean
+  showSkillsDialog: boolean
   /** Bumped whenever a saved layout is created/deleted, so open surfaces
    *  (dialog, empty-canvas overlay) can re-list. */
   layoutsVersion: number
@@ -69,20 +60,25 @@ interface UIStoreState {
   activeTool: CanvasTool
   /** True while Spacebar is held — temporarily overrides `activeTool` with Hand. */
   spacePanActive: boolean
-  /** Layout: which views live on which side and in what order */
-  sidebarLayout: SidebarLayout
   /** Active view on the left sidebar, null = collapsed */
   activeLeftSidebarView: SidebarView | null
   /** Active view on the right sidebar, null = collapsed */
   activeRightSidebarView: SidebarView | null
   /** The view currently being dragged between/within sidebars, null when idle */
   draggingView: SidebarView | null
+  /** Worktree being hovered (chip or sidebar row) — transiently highlights all
+   *  its member nodes + sludge. Null when nothing is hovered. */
+  hoveredWorktreeId: string | null
+  /** Worktree the focus lens is locked onto — dims non-members, rings members,
+   *  and (on entry) frames the camera. Null when the lens is off. */
+  focusedWorktreeId: string | null
 }
 
 interface UIStoreActions {
   setShowNodeSwitcher: (show: boolean) => void
   setShowCommandPalette: (show: boolean) => void
   setShowLayoutsDialog: (show: boolean) => void
+  setShowSkillsDialog: (show: boolean) => void
   bumpLayoutsVersion: () => void
   setMinimapOpen: (open: boolean) => void
   toggleMinimapOpen: () => void
@@ -98,6 +94,12 @@ interface UIStoreActions {
   setActiveRightSidebarView: (view: SidebarView | null) => void
   moveSidebarView: (view: SidebarView, targetSide: SidebarSide, targetIndex: number) => void
   setDraggingView: (view: SidebarView | null) => void
+  /** Highlight (hover) a worktree's member nodes; pass null to clear. */
+  setHoveredWorktree: (id: string | null) => void
+  /** Lock the focus lens onto a worktree (caller frames the camera separately). */
+  focusWorktree: (id: string | null) => void
+  /** Clear both hover highlight and the focus lens. */
+  clearWorktreeLens: () => void
 }
 
 export type UIStore = UIStoreState & UIStoreActions
@@ -111,6 +113,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   showNodeSwitcher: false,
   showCommandPalette: false,
   showLayoutsDialog: false,
+  showSkillsDialog: false,
   layoutsVersion: 0,
   minimapOpen: false,
   showSettings: false,
@@ -119,10 +122,11 @@ export const useUIStore = create<UIStore>((set, get) => ({
   marquee: null,
   activeTool: 'select',
   spacePanActive: false,
-  sidebarLayout: loadLayout(),
   activeLeftSidebarView: 'workspaces',
   activeRightSidebarView: null,
   draggingView: null,
+  hoveredWorktreeId: null,
+  focusedWorktreeId: null,
 
   // --- Actions ---
 
@@ -136,6 +140,10 @@ export const useUIStore = create<UIStore>((set, get) => ({
 
   setShowLayoutsDialog(show) {
     set({ showLayoutsDialog: show })
+  },
+
+  setShowSkillsDialog(show) {
+    set({ showSkillsDialog: show })
   },
 
   bumpLayoutsVersion() {
@@ -160,11 +168,11 @@ export const useUIStore = create<UIStore>((set, get) => ({
 
   toggleSidebar() {
     // Toggles the left sidebar between collapsed (null) and the first view on the left.
-    const { activeLeftSidebarView, sidebarLayout } = get()
+    const { activeLeftSidebarView } = get()
     if (activeLeftSidebarView !== null) {
       set({ activeLeftSidebarView: null })
     } else {
-      const first = sidebarLayout.left[0] ?? null
+      const first = getSidebarLayout().left[0] ?? null
       set({ activeLeftSidebarView: first })
     }
   },
@@ -199,9 +207,11 @@ export const useUIStore = create<UIStore>((set, get) => ({
 
   moveSidebarView(view, targetSide, targetIndex) {
     const state = get()
+    // The layout's single home is settingsStore; read + write it there.
+    const current = getSidebarLayout()
     const layout: SidebarLayout = {
-      left: state.sidebarLayout.left.slice(),
-      right: state.sidebarLayout.right.slice(),
+      left: current.left.slice(),
+      right: current.right.slice(),
     }
     // Determine source side and index
     let sourceSide: SidebarSide | null = null
@@ -219,11 +229,14 @@ export const useUIStore = create<UIStore>((set, get) => ({
     insertAt = Math.max(0, Math.min(insertAt, layout[targetSide].length))
     layout[targetSide].splice(insertAt, 0, view)
 
-    saveLayout(layout)
+    // Persist to settingsStore (the single source of truth). The broadcast funnel
+    // projects it back to every window; components read it via useSidebarLayout.
+    useSettingsStore.getState().setSetting('sidebarLayout', layout)
 
-    // Update active views: if the moved view was active on the source, clear it.
-    // Focus it on the target side so the user sees where it landed.
-    const patch: Partial<UIStoreState> = { sidebarLayout: layout }
+    // Update active views (transient, uiStore-owned): if the moved view was
+    // active on the source, clear it; focus it on the target side so the user
+    // sees where it landed.
+    const patch: Partial<UIStoreState> = {}
     if (sourceSide === 'left' && state.activeLeftSidebarView === view) {
       patch.activeLeftSidebarView = null
     }
@@ -233,14 +246,43 @@ export const useUIStore = create<UIStore>((set, get) => ({
     if (targetSide === 'left') patch.activeLeftSidebarView = view
     else patch.activeRightSidebarView = view
 
-    set(patch as UIStoreState)
+    set(patch)
   },
 
   setDraggingView(view) {
     set({ draggingView: view })
   },
 
+  setHoveredWorktree(id) {
+    if (get().hoveredWorktreeId === id) return
+    set({ hoveredWorktreeId: id })
+  },
+
+  focusWorktree(id) {
+    set({ focusedWorktreeId: id })
+  },
+
+  clearWorktreeLens() {
+    const { hoveredWorktreeId, focusedWorktreeId } = get()
+    if (hoveredWorktreeId === null && focusedWorktreeId === null) return
+    set({ hoveredWorktreeId: null, focusedWorktreeId: null })
+  },
+
 }))
+
+/**
+ * Subscribe to the sidebar layout (its single home is settingsStore). Components
+ * use this instead of reading a uiStore copy, so there's no hand-sync and no
+ * stale path when the layout changes via UI, hand-edit, or another window.
+ */
+export function useSidebarLayout(): SidebarLayout {
+  // Select the stable raw field and normalize in a memo: normalizeSidebarLayout
+  // builds a fresh {left,right} every call, so selecting it directly would return
+  // a new reference on every render and, under zustand v5's snapshot identity
+  // check, spin useSyncExternalStore into "Maximum update depth exceeded".
+  const raw = useSettingsStore((s) => s.sidebarLayout)
+  return useMemo(() => normalizeSidebarLayout(raw), [raw])
+}
 
 /**
  * Resolve the tool currently in effect. Space-hold temporarily forces Hand

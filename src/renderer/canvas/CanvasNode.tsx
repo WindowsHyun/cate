@@ -23,12 +23,13 @@ import { NodeResizeOverlay } from './NodeResizeOverlay'
 import type { DockStore } from '../stores/dockStore'
 import { DockStoreProvider } from '../stores/DockStoreContext'
 import DockTabStack from '../docking/DockTabStack'
+import { activeLeafPanelId } from '../panels/nodeDockRegistry'
+import { setActivePanel } from '../lib/activePanel'
 import DockSplitContainer from '../docking/DockSplitContainer'
 import { confirmCloseDirtyPanels } from '../lib/confirmCloseDirty'
 import { confirmCloseRunningTerminals } from '../lib/confirmCloseTerminal'
 import { ArrowsOutSimple, ArrowsInSimple, X, Lock, LockOpen } from '@phosphor-icons/react'
 import { PANEL_DEFINITIONS } from '../../shared/panels'
-import { WorktreePill } from './WorktreePill'
 
 // When the Hand tool (or Space-hold) is active, a left-press on a node must pan
 // the canvas instead of dragging/resizing the node. These handlers bail out
@@ -166,7 +167,6 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
   const focusNode = useCanvasStoreContext((s) => s.focusNode)
   const removeNode = useCanvasStoreContext((s) => s.removeNode)
   const toggleMaximize = useCanvasStoreContext((s) => s.toggleMaximize)
-  const isSelected = useCanvasStoreContext((s) => s.selectedNodeIds.has(nodeId))
   const isDockDragging = useDragStore((s) => s.isDragging)
   const { hidden: isWholeNodeDragSource } = useDragSourceVisibility(nodeId)
 
@@ -355,25 +355,39 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
   // Walk the layout to the currently active leaf panel so the worktree pill
   // reflects the visible tab when this node hosts multiple panels.
   const activePanel = useMemo(() => {
-    function activeLeafId(n: DockLayoutNode | null): string | null {
-      if (!n) return null
-      if (n.type === 'tabs') return n.panelIds[n.activeIndex] ?? n.panelIds[0] ?? null
-      for (const child of n.children) {
-        const found = activeLeafId(child)
-        if (found) return found
-      }
-      return null
-    }
-    const id = activeLeafId(layout)
+    const id = activeLeafPanelId(layout)
     if (!id) return primaryPanel
     return currentWorkspace?.panels[id] ?? primaryPanel
   }, [layout, currentWorkspace, primaryPanel])
 
+  // --- Worktree identity: follows the ACTIVE tab --------------------------
+  // The node adopts whichever tab is open. Gated on 2+ worktrees (matching the
+  // chip) so single-branch flows show no tint/sludge.
+  const worktrees = currentWorkspace?.worktrees ?? []
+  const wtEnabled = worktrees.length >= 2
+  const activeWorktreeId = wtEnabled ? activePanel?.worktreeId ?? null : null
+  const worktreeColor = activeWorktreeId
+    ? worktrees.find((w) => w.id === activeWorktreeId)?.color ?? null
+    : null
+  const hoveredWorktreeId = useUIStore((s) => s.hoveredWorktreeId)
+  const focusedWorktreeId = useUIStore((s) => s.focusedWorktreeId)
+  const worktreeHighlight =
+    !!activeWorktreeId &&
+    (hoveredWorktreeId === activeWorktreeId || focusedWorktreeId === activeWorktreeId)
+  const worktreeDim = !!focusedWorktreeId && activeWorktreeId !== focusedWorktreeId
+
+  // Publish the active-tab worktree for the global sludge/lens layers, which
+  // live outside this node's dock store and can't read its active tab directly.
+  useEffect(() => {
+    canvasApi.getState().setNodeActiveWorktree(nodeId, activeWorktreeId)
+  }, [nodeId, activeWorktreeId, canvasApi])
+  // Clear only on unmount (not on every change) so the sludge never flickers.
+  useEffect(() => {
+    return () => canvasApi.getState().setNodeActiveWorktree(nodeId, null)
+  }, [nodeId, canvasApi])
+
   const nodeControlButtons = (
     <>
-      {activePanel && wsId && (
-        <WorktreePill panel={activePanel} workspaceId={wsId} />
-      )}
       <GrabButton
         title={node?.isPinned ? 'Unlock' : 'Lock'}
         onClick={(e) => { e.stopPropagation(); handleTogglePin() }}
@@ -439,6 +453,42 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
 
   // --- Event handlers --------------------------------------------------------
 
+  // Focus this node AND point the canonical active-panel pointer at its active
+  // leaf (the visible dock tab), not the node's seed panelId. This is the bridge
+  // that makes terminal-focus detection (and Cmd+T placement) correct for a node
+  // whose mini-dock holds several panels. The subscription below re-asserts it on
+  // every tab switch while focused; this covers the initial focus.
+  const focusThisNode = useCallback(() => {
+    focusNode(nodeId)
+    const leaf = activeLeafPanelId(dockStoreApi.getState().zones.center.layout)
+    setActivePanel(leaf ?? node?.panelId ?? null)
+  }, [focusNode, nodeId, dockStoreApi, node?.panelId])
+
+  // Authoritative writer for the active panel while this node is focused: any
+  // center-layout change (tab switch, split, close) re-points activePanelId at
+  // the new active leaf. Gated on focus so a background node's tab activity never
+  // steals the pointer. This also wins the focus-race against
+  // CanvasPanel.handlePointerDown, which re-asserts the canvas-container id right
+  // after a click — that fires first (pointerdown), this fires last.
+  const isFocusedRef = useRef(isFocused)
+  isFocusedRef.current = isFocused
+  useEffect(() => {
+    // Re-assert on becoming focused (the click path already did, but a focus
+    // change via keyboard nav goes through focusNode without focusThisNode).
+    if (isFocused) {
+      const leaf = activeLeafPanelId(dockStoreApi.getState().zones.center.layout)
+      if (leaf) setActivePanel(leaf)
+    }
+    let prevLeaf = activeLeafPanelId(dockStoreApi.getState().zones.center.layout)
+    const unsub = dockStoreApi.subscribe((s) => {
+      const leaf = activeLeafPanelId(s.zones.center.layout)
+      if (leaf === prevLeaf) return
+      prevLeaf = leaf
+      if (isFocusedRef.current && leaf) setActivePanel(leaf)
+    })
+    return unsub
+  }, [dockStoreApi, isFocused])
+
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
       if (wasDragged.current) return
@@ -450,10 +500,10 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
       }
       canvasApi.getState().selectNodes([nodeId])
       if (!isFocused) {
-        focusNode(nodeId)
+        focusThisNode()
       }
     },
-    [isFocused, focusNode, nodeId, wasDragged],
+    [isFocused, focusThisNode, nodeId, wasDragged],
   )
 
   // Grab strip: double-click toggles maximize, drag moves node
@@ -517,12 +567,14 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
   const { containerStyle, glowStyle } = useCanvasNodeStyle({
     node,
     isFocused,
-    isSelected,
     activityState,
     isAnimatingLayout,
     isHovered,
     chromeTint,
     isWholeNodeDragSource,
+    worktreeColor,
+    worktreeHighlight,
+    worktreeDim,
   })
 
   if (!node) return null
@@ -610,7 +662,7 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
               return
             }
             canvasApi.getState().selectNodes([nodeId])
-            focusNode(nodeId)
+            focusThisNode()
           }}
           onDragEnter={(e) => {
             if (
@@ -641,7 +693,7 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
             style={{ position: 'relative', zIndex: 0, width: '100%', height: '100%' }}
             onMouseDownCapture={(e) => {
               if (e.button !== 0 || isFocused) return
-              focusNode(nodeId)
+              focusThisNode()
             }}
           >
             {layout ? renderLayoutNode(layout) : (
