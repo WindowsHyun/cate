@@ -215,12 +215,26 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
 
       const gap = 20
       const n = nodeList.length
-      const aspect = avW / Math.max(avH, 1)
-      const cols = Math.max(1, Math.round(Math.sqrt(n * aspect)))
+
+      // Pick cols that minimizes empty grid cells, with minor preference for
+      // panels near 16:9. The old aspect-ratio sqrt formula over-shoots on wide
+      // screens (e.g. 4 panels → 3 cols instead of 2×2).
+      let cols = 1
+      let bestScore = Infinity
+      for (let c = 1; c <= n; c++) {
+        const rows = Math.ceil(n / c)
+        const empty = c * rows - n
+        const pW = Math.max(1, (avW - gap * (c + 1)) / c)
+        const pH = Math.max(1, (avH - gap * (rows + 1)) / rows)
+        const score = empty * 50 + Math.abs(pW / pH - 16 / 9)
+        if (score < bestScore) { bestScore = score; cols = c }
+      }
       const numRows = Math.ceil(n / cols)
 
-      const panelW = Math.max(560, Math.floor((avW - gap * (cols + 1)) / cols))
-      const panelH = Math.max(400, Math.floor((avH - gap * (numRows + 1)) / numRows))
+      // Size panels to fill the viewport exactly — no MIN clamp needed because
+      // zoom is forced to 1.0 and the panels ARE the viewport content.
+      const panelW = Math.floor((avW - gap * (cols + 1)) / cols)
+      const panelH = Math.floor((avH - gap * (numRows + 1)) / numRows)
 
       get().pushHistory()
 
