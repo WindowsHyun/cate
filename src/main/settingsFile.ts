@@ -77,6 +77,7 @@ const SETTINGS_SCHEMA: Record<keyof AppSettings, string> = {
   // renderer consumers, which already tolerate partial/legacy shapes.
   agentDefaultModel: 'object',
   sidebarLayout: 'object',
+  customShortcuts: 'object',
 }
 
 const SETTINGS_KEYS = Object.keys(SETTINGS_SCHEMA) as Array<keyof AppSettings>

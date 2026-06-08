@@ -7,6 +7,7 @@ import { create } from 'zustand'
 import log from '../lib/logger'
 import type { AppSettings } from '../../shared/types'
 import { DEFAULT_SETTINGS } from '../../shared/types'
+import { useShortcutStore } from './shortcutStore'
 
 // -----------------------------------------------------------------------------
 // Electron API type (exposed via preload)
@@ -138,6 +139,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         log.info('[settings] Migrated appearanceMode "%s" → activeThemeId "%s"', legacy, merged.activeThemeId)
       }
       set({ ...merged, _loaded: true })
+      if (merged.customShortcuts && Object.keys(merged.customShortcuts).length > 0) {
+        useShortcutStore.getState().applyCustomShortcuts(merged.customShortcuts)
+      }
     } catch {
       // Fall back to defaults on error
       set({ _loaded: true })

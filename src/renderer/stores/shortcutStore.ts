@@ -7,6 +7,20 @@ import { create } from 'zustand'
 import type { ShortcutAction, StoredShortcut } from '../../shared/types'
 import { DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS } from '../../shared/types'
 
+function persistCustomShortcuts(shortcuts: Record<ShortcutAction, StoredShortcut>): void {
+  if (typeof window === 'undefined' || !window.electronAPI) return
+  const custom: Partial<Record<ShortcutAction, StoredShortcut>> = {}
+  for (const action of SHORTCUT_ACTIONS) {
+    const s = shortcuts[action]
+    const d = DEFAULT_SHORTCUTS[action]
+    if (s.key !== d.key || s.command !== d.command || s.shift !== d.shift ||
+        s.option !== d.option || s.control !== d.control) {
+      custom[action] = s
+    }
+  }
+  window.electronAPI.settingsSet('customShortcuts', custom).catch(() => {})
+}
+
 // -----------------------------------------------------------------------------
 // Modifier state
 // -----------------------------------------------------------------------------
@@ -31,6 +45,8 @@ interface ShortcutStoreActions {
   resetShortcut: (action: ShortcutAction) => void
   resetAll: () => void
   matchEvent: (e: KeyboardEvent) => ShortcutAction | null
+  /** Merge persisted custom shortcuts over defaults. Called once on settings load. */
+  applyCustomShortcuts: (custom: Partial<Record<ShortcutAction, StoredShortcut>>) => void
 }
 
 export type ShortcutStore = ShortcutStoreState & ShortcutStoreActions
@@ -79,14 +95,25 @@ export const useShortcutStore = create<ShortcutStore>((set, get) => ({
   // --- Actions ---
 
   setShortcut(action, shortcut) {
-    set((state) => ({
-      shortcuts: { ...state.shortcuts, [action]: shortcut },
-    }))
+    set((state) => {
+      const next = { ...state.shortcuts, [action]: shortcut }
+      persistCustomShortcuts(next)
+      return { shortcuts: next }
+    })
   },
 
   resetShortcut(action) {
+    set((state) => {
+      const next = { ...state.shortcuts, [action]: DEFAULT_SHORTCUTS[action] }
+      persistCustomShortcuts(next)
+      return { shortcuts: next }
+    })
+  },
+
+  applyCustomShortcuts(custom) {
+    if (!custom || Object.keys(custom).length === 0) return
     set((state) => ({
-      shortcuts: { ...state.shortcuts, [action]: DEFAULT_SHORTCUTS[action] },
+      shortcuts: { ...state.shortcuts, ...custom },
     }))
   },
 

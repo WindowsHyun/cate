@@ -1230,6 +1230,10 @@ export interface AppSettings {
   /** Which sidebar views live in the left vs. right rail. Was renderer
    *  localStorage (cate.sidebarLayout.v3) before. */
   sidebarLayout: SidebarLayout
+
+  // Keyboard shortcuts — only user-modified entries are stored here; the rest
+  // fall back to DEFAULT_SHORTCUTS at runtime.
+  customShortcuts: Partial<Record<ShortcutAction, StoredShortcut>>
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -1310,6 +1314,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
     left: ['workspaces', 'explorer', 'search'],
     right: ['git'],
   },
+
+  // Keyboard shortcuts
+  customShortcuts: {},
 }
 
 // -----------------------------------------------------------------------------
