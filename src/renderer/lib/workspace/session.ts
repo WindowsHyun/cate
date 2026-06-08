@@ -291,10 +291,11 @@ export async function saveSession(): Promise<void> {
       await Promise.all(scrollbackPromises)
     }
 
-    // Live working directory for each terminal in the SELECTED workspace, keyed
-    // by panel id, so a restored terminal respawns where it was. Batched.
+    // Live working directory for each terminal (all workspaces), keyed
+    // by panel id, so a restored terminal respawns where it was and the
+    // claude resume fallback scan has a valid cwd. Batched.
     const terminalCwds: Record<string, string> = {}
-    if (isSelected && panels) {
+    if (panels) {
       const cwdPromises: { id: string; promise: Promise<string | null> }[] = []
       for (const panel of Object.values(panels)) {
         if (panel.type !== 'terminal') continue
@@ -699,27 +700,25 @@ export async function replayTerminalLog(panelId: string): Promise<void> {
   const data = terminalRestoreData.get(panelId)
   if (!data?.replayFromId) return
 
-  const logData = await window.electronAPI.terminalLogRead(data.replayFromId)
-  if (!logData) {
-    terminalRestoreData.delete(panelId)
-    return
-  }
-
   const entry = terminalRegistry.getEntry(panelId)
   if (!entry) {
     terminalRestoreData.delete(panelId)
     return
   }
 
-  // Write scrollback content as plain text lines
-  const lines = logData.split('\n')
-  for (const line of lines) {
-    entry.terminal.write(line + '\r\n')
+  const logData = await window.electronAPI.terminalLogRead(data.replayFromId)
+  if (logData) {
+    // Write scrollback content as plain text lines
+    const lines = logData.split('\n')
+    for (const line of lines) {
+      entry.terminal.write(line + '\r\n')
+    }
+    // Dim separator between restored content and new session
+    entry.terminal.write('\x1b[90m--- restored session ---\x1b[0m\r\n')
   }
-  // Dim separator between restored content and new session
-  entry.terminal.write('\x1b[90m--- restored session ---\x1b[0m\r\n')
 
-  // Determine resume id: use quit-time capture if available, else scan filesystem
+  // Determine resume id: use quit-time capture if available, else scan filesystem.
+  // Runs even when there is no scrollback so a blank terminal still gets resumed.
   let resumeId = data.claudeResumeId
   if (!resumeId && data.cwd) {
     resumeId = await window.electronAPI.claudeFindResumeId(data.cwd).catch(() => undefined) ?? undefined
@@ -728,9 +727,8 @@ export async function replayTerminalLog(panelId: string): Promise<void> {
     }
   }
 
-  if (resumeId) {
-    const resumeCmd = `claude --resume ${resumeId}\r`
-    window.electronAPI.terminalWrite(entry.ptyId!, resumeCmd).catch(() => {})
+  if (resumeId && entry.ptyId) {
+    window.electronAPI.terminalWrite(entry.ptyId, `claude --resume ${resumeId}\r`).catch(() => {})
   }
 
   terminalRestoreData.delete(panelId)
