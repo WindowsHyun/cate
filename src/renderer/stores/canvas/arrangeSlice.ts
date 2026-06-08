@@ -12,12 +12,21 @@ type ArrangeActions = Pick<
   'autoLayout' | 'layoutColumns' | 'layoutRows' | 'fitPanelsToViewport' | 'stackSelected' | 'tidyGridSelected' | 'alignSelected'
 >
 
-function getCanvasViewportInsets(): { left: number; right: number } {
-  if (typeof document === 'undefined') return { left: 0, right: 0 }
+function getCanvasViewportInsets(): { left: number; right: number; bottom: number } {
+  if (typeof document === 'undefined') return { left: 0, right: 0, bottom: 68 }
   const style = document.documentElement.style
+  let bottom = 68
+  const toolbarEl = document.querySelector('[data-onboarding="toolbar"]') as HTMLElement | null
+  if (toolbarEl) {
+    const canvasEl = document.querySelector('[data-canvas-container]') as HTMLElement | null
+    const toolbarRect = toolbarEl.getBoundingClientRect()
+    const canvasRect = canvasEl ? canvasEl.getBoundingClientRect() : { bottom: window.innerHeight }
+    bottom = canvasRect.bottom - toolbarRect.top + 12
+  }
   return {
     left: parseInt(style.getPropertyValue('--cate-left-sidebar-width')) || 0,
     right: parseInt(style.getPropertyValue('--cate-right-sidebar-width')) || 0,
+    bottom,
   }
 }
 
@@ -202,7 +211,7 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
       const viewportInsets = getCanvasViewportInsets()
       const cs = state.containerSize
       const avW = (cs.width > 0 ? cs.width : 1440) - viewportInsets.left - viewportInsets.right
-      const avH = cs.height > 0 ? cs.height : 900
+      const avH = (cs.height > 0 ? cs.height : 900) - viewportInsets.bottom
 
       const gap = 20
       const n = nodeList.length
