@@ -44,9 +44,16 @@ const sidebarStore = createJsonStateFile<SidebarFile>({
   defaults: { session: null },
   normalize: (parsed, defaults) => {
     const o = asObject(parsed)
-    const s = o.session
-    if (!s || typeof s !== 'object' || Array.isArray(s)) return defaults
-    const sess = s as Record<string, unknown>
+    // Support both the current { session: {...} } envelope and the legacy flat
+    // { order: [...], selected: "..." } format written by older app versions.
+    let sessRaw: Record<string, unknown> | null = null
+    if (o.session && typeof o.session === 'object' && !Array.isArray(o.session)) {
+      sessRaw = o.session as Record<string, unknown>
+    } else if (Array.isArray(o.order)) {
+      sessRaw = o
+    }
+    if (!sessRaw) return defaults
+    const sess = sessRaw
     const order = Array.isArray(sess.order) ? sess.order.filter((p): p is string => typeof p === 'string') : []
     const selected = typeof sess.selected === 'string' ? sess.selected : ''
     const rawGroups = sess.groups

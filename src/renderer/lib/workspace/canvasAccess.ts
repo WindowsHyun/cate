@@ -30,7 +30,7 @@ import type { PanelPlacement } from '../../stores/appStore'
 import { ALL_ZONES, ZOOM_DEFAULT } from '../../../shared/types'
 import { useAppStore } from '../../stores/appStore'
 import { createCanvasOps } from '../canvas/canvasBridge'
-import { getOrCreateCanvasStoreForPanel } from '../../stores/canvasStore'
+import { getOrCreateCanvasStoreForPanel, getCanvasStoreForPanel } from '../../stores/canvasStore'
 import { getWorkspaceDockStore } from './dockRegistry'
 import { getActivePanelId } from '../activePanel'
 import { getLiveNodeDockLayout } from '../../panels/nodeDockRegistry'
@@ -261,15 +261,28 @@ export function getCanvasSnapshotForPanel(canvasPanelId: string): WorkspaceCanva
       viewportOffset: { ...s.viewportOffset },
     }
   }
-  // Find the workspace that owns this canvas panel to read its persisted
-  // projection. A canvas panel belongs to exactly one workspace.
+
+  // Canvas is unmounted (e.g. user switched to another workspace) but the
+  // Zustand store persists in memory and holds the latest state. Read it
+  // directly rather than falling back to the stale ws.canvases projection,
+  // which is never updated in-memory after the initial restore.
+  const inMemoryStore = getCanvasStoreForPanel(canvasPanelId)
+  if (inMemoryStore) {
+    const s = inMemoryStore.getState()
+    return {
+      nodes: { ...s.nodes },
+      zoomLevel: s.zoomLevel,
+      viewportOffset: { ...s.viewportOffset },
+    }
+  }
+
+  // No in-memory store: workspace was never activated this session.
+  // Fall back to the persisted projection from ws.canvases.
   const ws = useAppStore
     .getState()
     .workspaces.find((w) => w.panels[canvasPanelId]?.type === 'canvas')
   if (!ws) return null
 
-  // `canvases` is the single persisted projection for EVERY canvas (primary and
-  // secondary alike) of a never-mounted workspace.
   const persisted = ws.canvases?.[canvasPanelId]
   if (persisted) {
     return {

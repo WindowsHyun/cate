@@ -135,6 +135,10 @@ export function getOrCreateCanvasStoreForPanel(
   return store
 }
 
+export function getCanvasStoreForPanel(panelId: string): UseBoundStore<StoreApi<CanvasStore>> | undefined {
+  return canvasBoundStoresByPanelId.get(panelId)
+}
+
 export function releaseCanvasStoreForPanel(panelId: string): void {
   const store = canvasBoundStoresByPanelId.get(panelId)
   canvasBoundStoresByPanelId.delete(panelId)
