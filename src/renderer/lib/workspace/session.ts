@@ -45,6 +45,7 @@ import { isLocalLocator } from '../../../main/companion/locator'
 import { deriveSidebarSession, applySidebarSession } from './sidebarSession'
 import { terminalRegistry } from '../terminal/terminalRegistry'
 import { mark } from '../perfMarks'
+import { capturedResumeIds } from '../claudeSessionCapture'
 
 // ---------------------------------------------------------------------------
 // Session-aware panel chunk prefetch — kicks off dynamic imports for only the
@@ -196,6 +197,9 @@ function buildSessionFile(
     worktrees: snapshot.worktrees?.length ? snapshot.worktrees : undefined,
     // Machine-local reconnect info for a remote workspace (absent ⇒ local).
     connection: snapshot.connection,
+    claudeResumeIds: snapshot.claudeResumeIds && Object.keys(snapshot.claudeResumeIds).length
+      ? snapshot.claudeResumeIds
+      : undefined,
   }
 }
 
@@ -317,6 +321,7 @@ export async function saveSession(): Promise<void> {
       // Geometry for every canvas, keyed by canvas panel id (incl. the primary).
       canvases,
       terminalCwds: Object.keys(terminalCwds).length ? terminalCwds : undefined,
+      claudeResumeIds: Object.keys(capturedResumeIds).length ? { ...capturedResumeIds } : undefined,
       // Persist the worktree registry (colors/labels) so they're stable across
       // restarts instead of re-assigned from the palette on rediscovery.
       worktrees: workspace.worktrees?.length ? workspace.worktrees : undefined,
@@ -472,6 +477,9 @@ export function projectFilesToSnapshot(
     // ids), so it passes through verbatim.
     canvases: ws.canvases,
     terminalCwds: Object.keys(terminalCwds).length ? terminalCwds : undefined,
+    claudeResumeIds: sess?.claudeResumeIds && Object.keys(sess.claudeResumeIds).length
+      ? sess.claudeResumeIds
+      : undefined,
     // Restore the persisted worktree registry (absolute paths) so colors/labels
     // are stable and panel.worktreeId references resolve after restart.
     worktrees: sess?.worktrees,
@@ -666,6 +674,7 @@ export async function restoreSession(snapshot: SessionSnapshot, workspaceId: str
     terminalRestoreData.set(panel.id, {
       cwd: snapshot.terminalCwds?.[panel.id],
       replayFromId: panel.id,
+      claudeResumeId: snapshot.claudeResumeIds?.[panel.id],
     })
   }
 
@@ -708,6 +717,12 @@ export async function replayTerminalLog(panelId: string): Promise<void> {
   }
   // Dim separator between restored content and new session
   entry.terminal.write('\x1b[90m--- restored session ---\x1b[0m\r\n')
+
+  // If claude was running when the app quit, auto-resume the session
+  if (data.claudeResumeId) {
+    const resumeCmd = `claude --resume ${data.claudeResumeId}\r`
+    window.electronAPI.terminalWrite(entry.ptyId!, resumeCmd).catch(() => {})
+  }
 
   terminalRestoreData.delete(panelId)
 }

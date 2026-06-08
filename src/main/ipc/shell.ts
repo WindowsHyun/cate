@@ -58,6 +58,19 @@ export function getRunningTerminals(): Array<{ processName: string | null }> {
   return out
 }
 
+/** PTY ids of terminals that currently have claude running as the foreground
+ *  process. Used by the quit flow to send Ctrl+C and capture --resume UUIDs. */
+export function getClaudeTerminalIds(): string[] {
+  const out: string[] = []
+  for (const terminalId of registeredTerminals.keys()) {
+    const activity = lastActivity.get(terminalId)
+    if (activity?.type === 'running' && activity.processName?.toLowerCase().includes('claude')) {
+      out.push(terminalId)
+    }
+  }
+  return out
+}
+
 // Fast poll: process-tree scan for agent detection — drives the activity
 // indicators and the agent "needs input" / "finished" notifications. It stays
 // at 1s while a window is focused so the UI feels live, but backs off to 5s

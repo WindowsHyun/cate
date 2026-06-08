@@ -15,6 +15,8 @@ import {
   CROSS_WINDOW_DRAG_START, CROSS_WINDOW_DRAG_UPDATE, CROSS_WINDOW_DRAG_DROP, CROSS_WINDOW_DRAG_CANCEL, CROSS_WINDOW_DRAG_RESOLVE,
   SESSION_FLUSH_SAVE,
   SESSION_FLUSH_SAVE_DONE,
+  CLAUDE_CAPTURE_START,
+  CLAUDE_CAPTURE_DONE,
 } from '../shared/ipc-channels'
 import { registerHandlers as registerTerminalHandlers, flushAllLoggers, killAllTerminals } from './ipc/terminal'
 import { companions, forwardFileGrant, forwardClearFileGrantsForWindow, forwardClearScopedWriteAllowancesForWindow } from './companion/companionManager'
@@ -22,7 +24,7 @@ import { registerCompanionHandlers } from './ipc/companion'
 import { registerHandlers as registerFilesystemHandlers, stopWatchersForWindow } from './ipc/filesystem'
 import { registerHandlers as registerGitHandlers } from './ipc/git'
 import { registerHandlers as registerSearchHandlers, stopSearchesForWindow } from './ipc/search'
-import { registerHandlers as registerShellHandlers, unregisterTerminalsForWindow, getRunningTerminals } from './ipc/shell'
+import { registerHandlers as registerShellHandlers, unregisterTerminalsForWindow, getRunningTerminals, getClaudeTerminalIds } from './ipc/shell'
 import { registerHandlers as registerGitMonitorHandlers, stopMonitorsForWindow } from './ipc/git-monitor'
 import { registerHandlers as registerStoreHandlers, loadSettingsSyncFromDisk, readBootSnapshot, writeBootSnapshot, getSettingSync, setSettingsFromMain } from './store'
 import { flushPendingWritesSync as flushSettingsPendingWritesSync } from './settingsFile'
@@ -2054,7 +2056,24 @@ app.on('before-quit', (event) => {
     .catch(() => {})
     .finally(() => {
       if (sessionFlushed) return
-      mainWin.webContents.send(SESSION_FLUSH_SAVE)
+      const claudeIds = getClaudeTerminalIds()
+      if (claudeIds.length === 0) {
+        mainWin.webContents.send(SESSION_FLUSH_SAVE)
+        return
+      }
+      // Send Ctrl+C to claude-running terminals and wait for --resume UUIDs
+      // before the normal session flush so session.json captures them.
+      const CLAUDE_CAPTURE_TIMEOUT_MS = 4000
+      const captureDone = () => {
+        if (sessionFlushed) return
+        mainWin.webContents.send(SESSION_FLUSH_SAVE)
+      }
+      const captureTimer = setTimeout(captureDone, CLAUDE_CAPTURE_TIMEOUT_MS)
+      ipcMain.once(CLAUDE_CAPTURE_DONE, () => {
+        clearTimeout(captureTimer)
+        captureDone()
+      })
+      mainWin.webContents.send(CLAUDE_CAPTURE_START, claudeIds)
     })
 })
 

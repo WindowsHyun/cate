@@ -889,6 +889,10 @@ export interface SessionSnapshot {
    *  live working directory so a restored terminal respawns where it was rather
    *  than at the workspace root. Sourced from / saved to session.json. */
   terminalCwds?: Record<string, string>
+  /** Claude --resume UUIDs captured when the app quit with claude running, keyed
+   *  by panel id. On restore, replayTerminalLog writes `claude --resume <uuid>`
+   *  so the session resumes automatically. */
+  claudeResumeIds?: Record<string, string>
   /** Git worktree registry (with per-worktree color/label). Persisted so colors
    *  stay stable across restarts instead of being re-assigned round-robin from
    *  the palette, and so panel.worktreeId references still resolve. */
@@ -1007,6 +1011,9 @@ export interface ProjectSessionFile {
    *  local on purpose — a server/wsl choice is the opener's, not the repo's, so
    *  it lives here and never in the VCS-committed workspace.json. Absent ⇒ local. */
   connection?: CompanionConnection
+  /** Claude --resume UUIDs captured when the app quit with claude running, keyed
+   *  by panel id. On restore, replayTerminalLog issues `claude --resume <uuid>`. */
+  claudeResumeIds?: Record<string, string>
 }
 
 export interface ProjectSessionPanel {

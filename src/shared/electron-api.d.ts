@@ -382,6 +382,13 @@ export interface ElectronAPI {
   /** Notify the main process that the flush save completed. */
   sessionFlushSaveDone(): void
 
+  /** Subscribe to Claude capture requests (main sends ptyIds of claude-running
+   *  terminals before quit). Returns unsubscribe. */
+  onClaudeCaptureStart(callback: (ptyIds: string[]) => void): () => void
+
+  /** Send captured resume UUIDs (panelId -> uuid) back to main. */
+  claudeCaptureDone(resumeIds: Record<string, string>): void
+
   /** Save project-local workspace + session state to .cate/ directory. */
   projectStateSave(
     rootPath: string,

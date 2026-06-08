@@ -107,6 +107,10 @@ export const UI_STATE_SET = 'uiState:set'        // renderer -> main
 // Session
 export const SESSION_FLUSH_SAVE = 'session:flushSave' // main -> renderer
 export const SESSION_FLUSH_SAVE_DONE = 'session:flushSaveDone' // renderer -> main
+// Claude session capture: main tells renderer to Ctrl+C claude-running terminals and
+// collect their --resume UUIDs before the normal session flush. Payload: string[] ptyIds.
+export const CLAUDE_CAPTURE_START = 'session:claudeCaptureStart' // main -> renderer
+export const CLAUDE_CAPTURE_DONE = 'session:claudeCaptureDone' // renderer -> main
 
 // Project-local workspace persistence (.cate/)
 export const PROJECT_STATE_SAVE = 'project:stateSave'     // renderer -> main

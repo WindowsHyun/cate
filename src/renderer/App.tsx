@@ -38,6 +38,7 @@ import { WelcomeDialog } from './dialogs/WelcomeDialog'
 import { OnboardingTour } from './onboarding/OnboardingTour'
 import PerfHud from './ui/PerfHud'
 import { initPerfClient } from './lib/perf/perfClient'
+import { initClaudeSessionCapture } from './lib/claudeSessionCapture'
 import { loadSession, restoreSession, restoreMultiWorkspaceSession, restoreDetachedWindows, setupAutoSave, saveSession } from './lib/workspace/session'
 import type { MultiWorkspaceSession } from '../shared/types'
 import { useDockStore } from './stores/dockStore'
@@ -171,6 +172,12 @@ function MainApp() {
   // Resource profiler — wires up FPS/long-task observers only under CATE_PERF=1.
   useEffect(() => {
     initPerfClient()
+  }, [])
+
+  // Claude session capture — listens for pre-quit Ctrl+C signal to collect
+  // --resume UUIDs so they can be saved to session.json and replayed on restart.
+  useEffect(() => {
+    initClaudeSessionCapture()
   }, [])
 
   // Global hooks

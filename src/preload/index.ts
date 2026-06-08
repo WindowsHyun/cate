@@ -73,6 +73,8 @@ import {
   UI_STATE_SET,
   SESSION_FLUSH_SAVE,
   SESSION_FLUSH_SAVE_DONE,
+  CLAUDE_CAPTURE_START,
+  CLAUDE_CAPTURE_DONE,
   PROJECT_STATE_SAVE,
   PROJECT_STATE_LOAD,
   WORKSPACE_EXTERNAL_EDIT,
@@ -787,6 +789,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   sessionFlushSaveDone(): void {
     ipcRenderer.send(SESSION_FLUSH_SAVE_DONE)
+  },
+
+  onClaudeCaptureStart(callback: (ptyIds: string[]) => void): () => void {
+    const handler = (_e: Electron.IpcRendererEvent, ptyIds: string[]) => callback(ptyIds)
+    ipcRenderer.on(CLAUDE_CAPTURE_START, handler)
+    return () => ipcRenderer.removeListener(CLAUDE_CAPTURE_START, handler)
+  },
+
+  claudeCaptureDone(resumeIds: Record<string, string>): void {
+    ipcRenderer.send(CLAUDE_CAPTURE_DONE, resumeIds)
   },
 
   projectStateSave(rootPath: string, workspace: unknown, session: unknown): Promise<void> {
