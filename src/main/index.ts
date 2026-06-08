@@ -1,5 +1,5 @@
 import log from './logger'
-import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, screen, webContents, session, nativeTheme } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, screen, webContents, session, nativeTheme, protocol } from 'electron'
 import fs from 'fs'
 import path from 'path'
 import { SHELL_SHOW_IN_FOLDER, WEBVIEW_SCREENSHOT, BROWSER_SET_PROXY, NATIVE_FILE_DRAG, CAPTURE_PAGE, DIALOG_OPEN_FOLDER, DIALOG_OPEN_IMAGE, DIALOG_SAVE_FILE, DIALOG_CONFIRM_UNSAVED, DIALOG_CONFIRM_CLOSE_TERMINAL, DIALOG_CONFIRM_CLOSE_CANVAS, DIALOG_CONFIRM_IMPORT, DIALOG_CONFIRM_RELOAD_WORKSPACE, DIALOG_TERMINAL_LINK_OPEN, CANVAS_READ_BACKGROUND_IMAGE, APP_OPEN_PATH } from '../shared/ipc-channels'
@@ -30,6 +30,7 @@ import { flushWorkspaceStateSync } from './workspaceStateStore'
 import { registerUIStateHandlers, flushUIStateSync } from './uiStateStore'
 import { importCanvasBackgroundImage } from './canvasBackgroundStore'
 import { registerProjectStateHandlers, saveProjectStateSync } from './projectWorkspaceStore'
+import { registerFileIconProtocol } from './fileIconProtocol'
 import { registerHandlers as registerMenuHandlers } from './ipc/menu'
 import { registerHandlers as registerNotificationHandlers } from './ipc/notifications'
 import { registerAgentHandlers } from '../agent/main/ipcAgent'
@@ -1808,6 +1809,7 @@ app.whenReady().then(async () => {
   // so cold-launch traces can be reconstructed from main + renderer logs.
   log.info('[perf] app.whenReady t=%dms', Math.round(performance.now()))
   log.info('App ready, resolving shell environment...')
+  registerFileIconProtocol()
 
   // Resolve the user's real shell environment before registering handlers.
   // This ensures MCP servers, `which` lookups, etc. see the full PATH.

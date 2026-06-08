@@ -7,7 +7,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { CaretRight, CaretDown, X } from '@phosphor-icons/react'
 import type { SearchFileResult, SearchMatchRange } from '../../shared/types'
-import { getFileIcon } from './FileTreeNode'
+import { getFileIconUrl } from '../lib/fileIcons'
 import { trimLeading } from './searchDisplay'
 import { lookupNodeDecoration, type GitTree } from './gitStatusDecoration'
 import { useSearchStore, lineKey } from '../stores/searchStore'
@@ -255,7 +255,7 @@ export const SearchResultsTree: React.FC<Props> = ({ files, git }) => {
               const isCollapsed = collapsed.has(file.path)
               const dir = dirName(file.relativePath)
               const count = visibleCount.get(file.path) ?? file.matchCount
-              const fileIcon = getFileIcon(extOf(file.relativePath), false, false)
+              const fileIconUrl = getFileIconUrl(baseName(file.relativePath), false, false)
               // Tint the file name by git status, exactly like the Explorer.
               const { decoration } = lookupNodeDecoration(git, file.path, false)
               const nameColor = decoration ? decoration.colorClass : 'text-primary'
@@ -280,9 +280,13 @@ export const SearchResultsTree: React.FC<Props> = ({ files, git }) => {
                   <span className="flex-shrink-0 text-muted">
                     {isCollapsed ? <CaretRight size={12} /> : <CaretDown size={12} />}
                   </span>
-                  <span className="flex-shrink-0 flex items-center" style={{ color: fileIcon.color }}>
-                    {fileIcon.icon}
-                  </span>
+                  <img
+                    src={fileIconUrl}
+                    width={16}
+                    height={16}
+                    className="flex-shrink-0"
+                    draggable={false}
+                  />
                   <span
                     className={`truncate flex-shrink-0 max-w-[60%] ${nameColor} ${
                       decoration?.strike ? 'line-through' : ''

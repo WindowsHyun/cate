@@ -4,89 +4,14 @@
 // =============================================================================
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  CaretRight,
-  Folder,
-  FolderOpen,
-  File,
-  FileCode,
-  Code,
-  FileText,
-  BracketsCurly,
-  Globe,
-  PaintBrush,
-  Image as ImageIcon,
-} from '@phosphor-icons/react'
+import { CaretRight } from '@phosphor-icons/react'
+import { getFileIconUrl } from '../lib/fileIcons'
 import { isExternalFileDrag, importDroppedEntries } from '../lib/fs/importExternalEntries'
 import type { FileTreeNode as FileTreeNodeType } from '../../shared/types'
 import { folderColorClass, lookupNodeDecoration, type GitTree } from './gitStatusDecoration'
 import { getClipboard, hasClipboard, setClipboard } from './fileClipboard'
 import { parseLocator } from '../../main/companion/locator'
 
-// -----------------------------------------------------------------------------
-// Icon mapping — extension to inline SVG icons with colors
-// Mirrors the Swift sfSymbolName mapping from FileTreeNode.swift
-// -----------------------------------------------------------------------------
-
-export interface IconDef {
-  icon: React.ReactNode
-  color: string
-}
-
-export function getFileIcon(extension: string, isDirectory: boolean, isExpanded: boolean): IconDef {
-  if (isDirectory) {
-    return isExpanded ? ICON_FOLDER_OPEN : ICON_FOLDER
-  }
-
-  switch (extension.toLowerCase()) {
-    case 'swift':
-      return ICON_SWIFT
-    case 'js':
-    case 'jsx':
-    case 'ts':
-    case 'tsx':
-      return ICON_JS
-    case 'py':
-      return ICON_PY
-    case 'json':
-      return ICON_JSON
-    case 'md':
-    case 'markdown':
-      return ICON_MD
-    case 'html':
-    case 'htm':
-      return ICON_HTML
-    case 'css':
-    case 'scss':
-      return ICON_CSS
-    case 'png':
-    case 'jpg':
-    case 'jpeg':
-    case 'gif':
-    case 'svg':
-      return ICON_IMAGE
-    default:
-      return ICON_DEFAULT
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Pre-created phosphor icon elements (sized 14)
-// -----------------------------------------------------------------------------
-
-const ICON_PROPS = { size: 14 } as const
-
-const ICON_FOLDER_OPEN: IconDef = { icon: <FolderOpen {...ICON_PROPS} />, color: '#E2B855' }
-const ICON_FOLDER: IconDef = { icon: <Folder {...ICON_PROPS} />, color: '#E2B855' }
-const ICON_SWIFT: IconDef = { icon: <Code {...ICON_PROPS} />, color: '#F97316' }
-const ICON_JS: IconDef = { icon: <FileCode {...ICON_PROPS} />, color: '#EAB308' }
-const ICON_PY: IconDef = { icon: <FileCode {...ICON_PROPS} />, color: '#3B82F6' }
-const ICON_JSON: IconDef = { icon: <BracketsCurly {...ICON_PROPS} />, color: '#A78BFA' }
-const ICON_MD: IconDef = { icon: <FileText {...ICON_PROPS} />, color: '#9CA3AF' }
-const ICON_HTML: IconDef = { icon: <Globe {...ICON_PROPS} />, color: '#3B82F6' }
-const ICON_CSS: IconDef = { icon: <PaintBrush {...ICON_PROPS} />, color: '#A855F7' }
-const ICON_IMAGE: IconDef = { icon: <ImageIcon {...ICON_PROPS} />, color: '#14B8A6' }
-const ICON_DEFAULT: IconDef = { icon: <File {...ICON_PROPS} />, color: '#9CA3AF' }
 
 // -----------------------------------------------------------------------------
 // FileTreeNode component
@@ -176,7 +101,7 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
       : ''
 
   const isSelected = selectedPaths.has(node.path)
-  const iconDef = getFileIcon(node.fileExtension, node.isDirectory, isExpanded)
+  const iconUrl = getFileIconUrl(node.name, node.isDirectory, isExpanded)
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -487,7 +412,7 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
         onDragLeave={node.isDirectory ? handleDragLeave : undefined}
         onDrop={node.isDirectory ? handleDrop : undefined}
       >
-        {/* Chevron for directories */}
+        {/* Chevron for directories / spacer for files */}
         {node.isDirectory ? (
           <span
             className="flex-shrink-0 text-muted transition-transform duration-150"
@@ -499,12 +424,14 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
           <span className="flex-shrink-0 w-3" />
         )}
 
-        {/* File icon (folders show only the chevron) */}
-        {!node.isDirectory && (
-          <span className="flex-shrink-0" style={{ color: iconDef.color }}>
-            {iconDef.icon}
-          </span>
-        )}
+        {/* Material file/folder icon */}
+        <img
+          src={iconUrl}
+          width={16}
+          height={16}
+          className="flex-shrink-0"
+          draggable={false}
+        />
 
         {/* Name or rename input */}
         {isRenaming ? (
@@ -550,9 +477,13 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
           style={{ paddingLeft: `${(node.isDirectory ? depth + 1 : depth) * 16 + 8}px` }}
         >
           <span className="flex-shrink-0 w-3" />
-          <span className="flex-shrink-0" style={{ color: isCreating === 'folder' ? '#E2B855' : '#9CA3AF' }}>
-            {isCreating === 'folder' ? <Folder {...ICON_PROPS} /> : <File {...ICON_PROPS} />}
-          </span>
+          <img
+            src={isCreating === 'folder' ? 'maticon://folder.svg' : 'maticon://file.svg'}
+            width={16}
+            height={16}
+            className="flex-shrink-0"
+            draggable={false}
+          />
           <input
             ref={createInputRef}
             className="flex-1 min-w-0 bg-surface-5 text-primary text-sm px-1 rounded border border-blue-500/50 outline-none"
