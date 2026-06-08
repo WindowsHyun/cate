@@ -389,6 +389,11 @@ export interface ElectronAPI {
   /** Send captured resume UUIDs (panelId -> uuid) back to main. */
   claudeCaptureDone(resumeIds: Record<string, string>): void
 
+  /** Scan ~/.claude/projects/<encoded-cwd>/ for the most-recently-modified
+   *  session UUID, which can be passed to `claude --resume`. Returns null when
+   *  no session is found or the path does not exist. */
+  claudeFindResumeId(cwd: string): Promise<string | null>
+
   /** Save project-local workspace + session state to .cate/ directory. */
   projectStateSave(
     rootPath: string,

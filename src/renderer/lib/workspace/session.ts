@@ -719,9 +719,17 @@ export async function replayTerminalLog(panelId: string): Promise<void> {
   // Dim separator between restored content and new session
   entry.terminal.write('\x1b[90m--- restored session ---\x1b[0m\r\n')
 
-  // If claude was running when the app quit, auto-resume the session
-  if (data.claudeResumeId) {
-    const resumeCmd = `claude --resume ${data.claudeResumeId}\r`
+  // Determine resume id: use quit-time capture if available, else scan filesystem
+  let resumeId = data.claudeResumeId
+  if (!resumeId && data.cwd) {
+    resumeId = await window.electronAPI.claudeFindResumeId(data.cwd).catch(() => undefined) ?? undefined
+    if (resumeId) {
+      log.info(`[session] filesystem fallback resume for panel ${panelId}: ${resumeId}`)
+    }
+  }
+
+  if (resumeId) {
+    const resumeCmd = `claude --resume ${resumeId}\r`
     window.electronAPI.terminalWrite(entry.ptyId!, resumeCmd).catch(() => {})
   }
 

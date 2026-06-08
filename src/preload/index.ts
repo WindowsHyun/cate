@@ -75,6 +75,7 @@ import {
   SESSION_FLUSH_SAVE_DONE,
   CLAUDE_CAPTURE_START,
   CLAUDE_CAPTURE_DONE,
+  CLAUDE_FIND_RESUME_ID,
   PROJECT_STATE_SAVE,
   PROJECT_STATE_LOAD,
   WORKSPACE_EXTERNAL_EDIT,
@@ -799,6 +800,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   claudeCaptureDone(resumeIds: Record<string, string>): void {
     ipcRenderer.send(CLAUDE_CAPTURE_DONE, resumeIds)
+  },
+
+  claudeFindResumeId(cwd: string): Promise<string | null> {
+    return ipcRenderer.invoke(CLAUDE_FIND_RESUME_ID, cwd)
   },
 
   projectStateSave(rootPath: string, workspace: unknown, session: unknown): Promise<void> {

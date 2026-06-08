@@ -111,6 +111,8 @@ export const SESSION_FLUSH_SAVE_DONE = 'session:flushSaveDone' // renderer -> ma
 // collect their --resume UUIDs before the normal session flush. Payload: string[] ptyIds.
 export const CLAUDE_CAPTURE_START = 'session:claudeCaptureStart' // main -> renderer
 export const CLAUDE_CAPTURE_DONE = 'session:claudeCaptureDone' // renderer -> main
+// Filesystem scan for a Claude --resume UUID given a terminal's cwd (renderer -> main).
+export const CLAUDE_FIND_RESUME_ID = 'claude:findResumeId'
 
 // Project-local workspace persistence (.cate/)
 export const PROJECT_STATE_SAVE = 'project:stateSave'     // renderer -> main
