@@ -44,6 +44,10 @@ const previousStates: Map<string, PreviousState> = new Map()
 // when a foreground process (dev server, editor, agent, …) is still running.
 const lastActivity: Map<string, TerminalActivity> = new Map()
 
+// Last agentPresent flag per terminal — used by getClaudeTerminalIds() to
+// prefer the dedicated agent-detection field over a brittle processName check.
+const lastAgentPresent: Map<string, boolean> = new Map()
+
 /**
  * Terminals that currently have a running foreground process, per the most
  * recent activity scan. Drives the "still running" confirmation shown before
@@ -64,7 +68,8 @@ export function getClaudeTerminalIds(): string[] {
   const out: string[] = []
   for (const terminalId of registeredTerminals.keys()) {
     const activity = lastActivity.get(terminalId)
-    if (activity?.type === 'running' && activity.processName?.toLowerCase().includes('claude')) {
+    if (activity?.type !== 'running') continue
+    if (lastAgentPresent.get(terminalId) || activity.processName?.toLowerCase().includes('claude')) {
       out.push(terminalId)
     }
   }
@@ -189,6 +194,7 @@ async function runActivityScan(): Promise<void> {
 
           previousStates.set(terminalId, { previousAgentName: agentName })
           lastActivity.set(terminalId, activity)
+          lastAgentPresent.set(terminalId, agentPresent)
           sendToWindow(info.ownerWindowId, SHELL_ACTIVITY_UPDATE, terminalId, activity, agentName, agentPresent)
         }
       }),
@@ -291,6 +297,7 @@ export function unregisterTerminalsForWindow(windowId: number): void {
       registeredTerminals.delete(terminalId)
       previousStates.delete(terminalId)
       lastActivity.delete(terminalId)
+      lastAgentPresent.delete(terminalId)
     }
   }
   if (registeredTerminals.size === 0) {
@@ -337,6 +344,7 @@ export function registerHandlers(): void {
     registeredTerminals.delete(terminalId)
     previousStates.delete(terminalId)
     lastActivity.delete(terminalId)
+    lastAgentPresent.delete(terminalId)
     if (registeredTerminals.size === 0) {
       stopPolling()
     }

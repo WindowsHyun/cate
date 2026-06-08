@@ -1,4 +1,4 @@
-import type { SessionSnapshot, SidebarSession } from '../../../shared/types'
+import type { SessionSnapshot, SidebarSession, WorkspaceGroup } from '../../../shared/types'
 
 // Persisted sidebar arrangement, keyed by workspace root paths (IDs are runtime
 // UUIDs, useless across restarts). `deriveSidebarSession` snapshots the current
@@ -10,10 +10,11 @@ import type { SessionSnapshot, SidebarSession } from '../../../shared/types'
 export function deriveSidebarSession(
   workspaces: ReadonlyArray<{ id: string; rootPath: string }>,
   selectedId: string,
+  groups?: WorkspaceGroup[],
 ): SidebarSession {
   const order = workspaces.filter((w) => w.rootPath).map((w) => w.rootPath)
   const selected = workspaces.find((w) => w.id === selectedId)?.rootPath ?? ''
-  return { order, selected }
+  return { order, selected, groups: groups && groups.length > 0 ? groups : undefined }
 }
 
 /**
@@ -25,7 +26,7 @@ export function deriveSidebarSession(
 export function applySidebarSession(
   snapshots: SessionSnapshot[],
   sidebarSession: SidebarSession | null | undefined,
-): { workspaces: SessionSnapshot[]; selectedWorkspaceIndex: number } {
+): { workspaces: SessionSnapshot[]; selectedWorkspaceIndex: number; groups: WorkspaceGroup[] } {
   // Be defensive about the persisted shape: this value comes straight from
   // sidebar.json (untyped JSON) and may be partial or corrupted (crash mid
   // write, a hand-edit, a future schema change). A bad shape must fall back to
@@ -33,8 +34,14 @@ export function applySidebarSession(
   // would abort the whole restore, including the default-workspace fallback.
   const rawOrder = sidebarSession?.order
   const order = Array.isArray(rawOrder) ? rawOrder : []
+
+  const rawGroups = sidebarSession?.groups
+  const groups = Array.isArray(rawGroups) ? rawGroups.filter(
+    (g) => g && typeof g === 'object' && typeof g.id === 'string' && typeof g.name === 'string'
+  ) as WorkspaceGroup[] : []
+
   if (order.length === 0) {
-    return { workspaces: snapshots, selectedWorkspaceIndex: 0 }
+    return { workspaces: snapshots, selectedWorkspaceIndex: 0, groups }
   }
   const rawSelected = sidebarSession?.selected
   const selected = typeof rawSelected === 'string' ? rawSelected : ''
@@ -62,5 +69,5 @@ export function applySidebarSession(
     if (idx >= 0) selectedWorkspaceIndex = idx
   }
 
-  return { workspaces, selectedWorkspaceIndex }
+  return { workspaces, selectedWorkspaceIndex, groups }
 }

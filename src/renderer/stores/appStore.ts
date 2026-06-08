@@ -13,6 +13,7 @@ import type {
   WorkspaceState,
   WorkspaceInfo,
   WorkspaceMutationResult,
+  WorkspaceGroup,
   PanelState,
   PanelType,
   Point,
@@ -77,6 +78,32 @@ import { workspaceDisplayName } from '../lib/fs/displayPath'
 /** Workspace accent colors — re-exported from the shared accent palette. */
 export const WORKSPACE_COLORS = ACCENT_COLORS
 
+export const GROUP_COLORS = [
+  { label: 'Cyan', value: 'cyan' },
+  { label: 'Teal', value: 'teal' },
+  { label: 'Blue', value: 'blue' },
+  { label: 'Purple', value: 'purple' },
+  { label: 'Pink', value: 'pink' },
+  { label: 'Red', value: 'red' },
+  { label: 'Orange', value: 'orange' },
+  { label: 'Yellow', value: 'yellow' },
+  { label: 'Green', value: 'green' },
+  { label: 'Gray', value: 'gray' },
+] as const
+
+export const GROUP_COLOR_MAP: Record<string, string> = {
+  cyan:   'bg-cyan-500',
+  teal:   'bg-teal-500',
+  blue:   'bg-blue-500',
+  purple: 'bg-purple-500',
+  pink:   'bg-pink-500',
+  red:    'bg-red-500',
+  orange: 'bg-orange-500',
+  yellow: 'bg-yellow-400',
+  green:  'bg-green-500',
+  gray:   'bg-zinc-500',
+}
+
 function createDefaultWorkspace(
   name?: string,
   rootPath?: string,
@@ -130,6 +157,7 @@ function applyWorkspaceInfo(ws: WorkspaceState, info: WorkspaceInfo): WorkspaceS
     color: info.color,
     rootPath: info.rootPath,
     connection: info.connection ?? ws.connection,
+    groupId: info.groupId ?? ws.groupId,
     rootPathError: null,
     isRootPathPending: false,
   }
@@ -296,6 +324,7 @@ interface AppStoreState {
    *  it's global rather than per-workspace). Drives the local loading blocker.
    *  `null` until seeded at init. */
   localCompanionPhase: CompanionPhase | null
+  workspaceGroups: WorkspaceGroup[]
 }
 
 interface AppStoreActions {
@@ -374,6 +403,12 @@ interface AppStoreActions {
    *  workspace. Used by layout restore to replace a single canvas's contents. */
   clearCanvas: (wsId: string, canvasPanelId: string) => void
   reorderWorkspaces: (fromIndex: number, toIndex: number) => void
+  addWorkspaceGroup: (name?: string, color?: string) => string
+  removeWorkspaceGroup: (groupId: string) => void
+  updateWorkspaceGroup: (groupId: string, changes: Partial<Pick<WorkspaceGroup, 'name' | 'color'>>) => void
+  toggleGroupCollapsed: (groupId: string) => void
+  moveWorkspaceToGroup: (workspaceId: string, groupId: string | null) => void
+  setWorkspaceGroups: (groups: WorkspaceGroup[]) => void
   addAdditionalRoot: (wsId: string, rootPath: string) => void
   removeAdditionalRoot: (wsId: string, rootPath: string) => void
 
@@ -526,12 +561,26 @@ function setPanelField(
   }))
 }
 
+/** Persist group list to sidebar.json immediately after any group mutation that
+ *  isn't covered by the session autosave (add/remove/update/toggle). */
+function persistGroupsToSidebar(state: AppStore): void {
+  if (typeof window === 'undefined' || !window.electronAPI) return
+  const order = state.workspaces.filter((w) => w.rootPath).map((w) => w.rootPath)
+  const selected = state.workspaces.find((w) => w.id === state.selectedWorkspaceId)?.rootPath ?? ''
+  window.electronAPI.sidebarSessionSet({
+    order,
+    selected,
+    groups: state.workspaceGroups.length > 0 ? state.workspaceGroups : undefined,
+  }).catch(() => {})
+}
+
 export const useAppStore = create<AppStore>((set, get) => ({
   // --- State ---
   // Start empty — a default workspace is created during init only if no session is restored.
   workspaces: [],
   selectedWorkspaceId: '',
   localCompanionPhase: null,
+  workspaceGroups: [],
 
   // --- Workspace management ---
 
@@ -1224,6 +1273,64 @@ export const useAppStore = create<AppStore>((set, get) => ({
       workspaces.splice(insertAt, 0, moved)
       return { workspaces }
     })
+  },
+
+  addWorkspaceGroup(name, color) {
+    const id = crypto.randomUUID()
+    const group: WorkspaceGroup = {
+      id,
+      name: name ?? 'Group',
+      color: color ?? GROUP_COLORS[0].value,
+      collapsed: false,
+    }
+    set((state) => ({ workspaceGroups: [...state.workspaceGroups, group] }))
+    persistGroupsToSidebar(get())
+    return id
+  },
+
+  removeWorkspaceGroup(groupId) {
+    set((state) => ({
+      workspaceGroups: state.workspaceGroups.filter((g) => g.id !== groupId),
+      workspaces: state.workspaces.map((w) =>
+        w.groupId === groupId ? { ...w, groupId: undefined } : w,
+      ),
+    }))
+    persistGroupsToSidebar(get())
+  },
+
+  updateWorkspaceGroup(groupId, changes) {
+    set((state) => ({
+      workspaceGroups: state.workspaceGroups.map((g) =>
+        g.id === groupId ? { ...g, ...changes } : g,
+      ),
+    }))
+    persistGroupsToSidebar(get())
+  },
+
+  toggleGroupCollapsed(groupId) {
+    set((state) => ({
+      workspaceGroups: state.workspaceGroups.map((g) =>
+        g.id === groupId ? { ...g, collapsed: !g.collapsed } : g,
+      ),
+    }))
+    persistGroupsToSidebar(get())
+  },
+
+  moveWorkspaceToGroup(workspaceId, groupId) {
+    const ws = get().workspaces.find((w) => w.id === workspaceId)
+    if (!ws) return
+    set((state) => ({
+      workspaces: state.workspaces.map((w) =>
+        w.id === workspaceId ? { ...w, groupId: groupId ?? undefined } : w,
+      ),
+    }))
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      window.electronAPI.workspaceUpdate(workspaceId, { groupId: groupId ?? '' }).catch(() => {})
+    }
+  },
+
+  setWorkspaceGroups(groups) {
+    set({ workspaceGroups: groups })
   },
 
   addAdditionalRoot(wsId, rootPath) {

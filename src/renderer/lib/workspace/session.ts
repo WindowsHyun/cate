@@ -413,7 +413,7 @@ export async function saveSession(): Promise<void> {
   // path) so a manual reorder and the active tab survive a restart. Triggered by
   // the same autosave that runs on reorder/select. recentProjects is left
   // recency-ordered for the Welcome page.
-  const sidebarSession = deriveSidebarSession(updatedState.workspaces, updatedState.selectedWorkspaceId)
+  const sidebarSession = deriveSidebarSession(updatedState.workspaces, updatedState.selectedWorkspaceId, updatedState.workspaceGroups)
   const sidebarSerialized = JSON.stringify(sidebarSession)
   if (sidebarSerialized !== lastSidebarSessionSerialized) {
     await window.electronAPI.sidebarSessionSet(sidebarSession)
@@ -554,12 +554,13 @@ async function loadFromProjectFiles(): Promise<MultiWorkspaceSession | null> {
   // the active workspace. Falls back to recentProjects order / index 0 when no
   // arrangement is stored yet (first run after upgrade).
   const sidebarSession = await window.electronAPI.sidebarSessionGet().catch(() => null)
-  const { workspaces, selectedWorkspaceIndex } = applySidebarSession(snapshots, sidebarSession)
+  const { workspaces, selectedWorkspaceIndex, groups } = applySidebarSession(snapshots, sidebarSession)
 
   return {
     version: 2,
     selectedWorkspaceIndex,
     workspaces,
+    groups: groups.length > 0 ? groups : undefined,
     panelWindows: panelWindows.length > 0 ? panelWindows : undefined,
     dockWindows: dockWindows.length > 0 ? dockWindows : undefined,
   }
@@ -749,6 +750,9 @@ export async function restoreMultiWorkspaceSession(session: MultiWorkspaceSessio
   for (const id of existingIds) {
     appStore.removeWorkspace(id)
   }
+
+  // Restore workspace tab groups from the session
+  appStore.setWorkspaceGroups(session.groups ?? [])
 
   const selectedIdx = session.selectedWorkspaceIndex ?? 0
 

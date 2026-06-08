@@ -1,7 +1,8 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react'
-import { Plus } from '@phosphor-icons/react'
+import { Plus, FolderPlus } from '@phosphor-icons/react'
 import { useAppStore, useWorkspaceList } from '../stores/appStore'
 import { WorkspaceTab } from './WorkspaceTab'
+import { WorkspaceGroupRow } from './WorkspaceGroupRow'
 import { SidebarSectionHeader, SidebarHeaderButton } from './SidebarSectionHeader'
 import type { NativeContextMenuItem } from '../../shared/electron-api.d'
 
@@ -11,6 +12,9 @@ export const ProjectList: React.FC = () => {
   const addWorkspace = useAppStore((s) => s.addWorkspace)
   const selectWorkspace = useAppStore((s) => s.selectWorkspace)
   const removeWorkspace = useAppStore((s) => s.removeWorkspace)
+  const workspaceGroups = useAppStore((s) => s.workspaceGroups)
+  const addWorkspaceGroup = useAppStore((s) => s.addWorkspaceGroup)
+  const moveWorkspaceToGroup = useAppStore((s) => s.moveWorkspaceToGroup)
 
   const [multiSelected, setMultiSelected] = useState<Set<string>>(new Set())
   const lastClickedIndexRef = useRef<number | null>(null)
@@ -106,7 +110,17 @@ export const ProjectList: React.FC = () => {
   // slot (below the last workspace) is reachable.
   const [insertIndex, setInsertIndex] = useState<number | null>(null)
 
-  const displayWorkspaces = workspaces
+  // Separate grouped and ungrouped workspaces
+  const ungrouped = workspaces.filter(
+    (ws) => !ws.groupId || !workspaceGroups.find((g) => g.id === ws.groupId),
+  )
+  const groupedWsMap = new Map<string, typeof workspaces>()
+  for (const ws of workspaces) {
+    if (ws.groupId && workspaceGroups.find((g) => g.id === ws.groupId)) {
+      if (!groupedWsMap.has(ws.groupId)) groupedWsMap.set(ws.groupId, [])
+      groupedWsMap.get(ws.groupId)!.push(ws)
+    }
+  }
 
   return (
     <div
@@ -119,9 +133,16 @@ export const ProjectList: React.FC = () => {
       <SidebarSectionHeader
         title="Workspace"
         actions={
-          <SidebarHeaderButton onClick={handleNewWorkspace} title="New Workspace">
-            <Plus size={14} weight="bold" />
-          </SidebarHeaderButton>
+          <>
+            {workspaceGroups.length > 0 || workspaces.length > 1 ? (
+              <SidebarHeaderButton onClick={() => addWorkspaceGroup()} title="New Group">
+                <FolderPlus size={14} weight="bold" />
+              </SidebarHeaderButton>
+            ) : null}
+            <SidebarHeaderButton onClick={handleNewWorkspace} title="New Workspace">
+              <Plus size={14} weight="bold" />
+            </SidebarHeaderButton>
+          </>
         }
       />
 
@@ -131,8 +152,69 @@ export const ProjectList: React.FC = () => {
           as taller than the canvas header. */}
       <div className="flex-1 overflow-y-auto pb-1">
         <div className="flex flex-col">
-          {displayWorkspaces.map((ws, index) => {
-            const isLast = index === displayWorkspaces.length - 1
+
+          {/* Groups with their workspaces */}
+          {workspaceGroups.map((group, gIdx) => {
+            const groupWs = groupedWsMap.get(group.id) ?? []
+            return (
+              <React.Fragment key={group.id}>
+                <WorkspaceGroupRow
+                  group={group}
+                  workspaceCount={groupWs.length}
+                  groupIndex={gIdx}
+                  insertIndex={insertIndex}
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData('group-id', group.id)
+                    e.dataTransfer.effectAllowed = 'move'
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault()
+                    // A workspace dragged onto a group header → assign to group
+                    const wsIndex = e.dataTransfer.getData('text/plain')
+                    if (wsIndex !== '') {
+                      e.dataTransfer.dropEffect = 'move'
+                    }
+                    setInsertIndex(gIdx)
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    const wsIndexStr = e.dataTransfer.getData('text/plain')
+                    setInsertIndex(null)
+                    if (wsIndexStr !== '') {
+                      const fromIndex = parseInt(wsIndexStr, 10)
+                      if (!isNaN(fromIndex)) {
+                        const ws = workspaces[fromIndex]
+                        if (ws) moveWorkspaceToGroup(ws.id, group.id)
+                      }
+                    }
+                  }}
+                  onDragEnd={() => setInsertIndex(null)}
+                />
+                {!group.collapsed && groupWs.map((ws) => {
+                  const flatIndex = workspaces.indexOf(ws)
+                  return (
+                    <div key={ws.id} className="relative pl-3">
+                      <WorkspaceTab
+                        workspace={ws}
+                        isSelected={ws.id === selectedWorkspaceId}
+                        isMultiSelected={multiSelected.has(ws.id)}
+                        onClick={(e) => handleWorkspaceClick(flatIndex, ws.id, e)}
+                        onClose={() => removeWorkspace(ws.id, true)}
+                        onBulkContextMenu={(e) => handleBulkContextMenu(e, ws.id)}
+                        onRemoveFromGroup={() => moveWorkspaceToGroup(ws.id, null)}
+                      />
+                    </div>
+                  )
+                })}
+              </React.Fragment>
+            )
+          })}
+
+          {/* Ungrouped workspaces */}
+          {ungrouped.map((ws) => {
+            const index = workspaces.indexOf(ws)
+            const ungroupedIndex = ungrouped.indexOf(ws)
+            const isLast = ungroupedIndex === ungrouped.length - 1
             return (
               <div
                 key={ws.id}

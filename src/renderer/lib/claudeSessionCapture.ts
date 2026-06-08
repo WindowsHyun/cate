@@ -67,15 +67,23 @@ async function captureClaudeSessions(ptyIds: string[]): Promise<void> {
       }
     })
 
-    // Send Ctrl+C to each claude-running terminal
+    // Send Ctrl+C twice to each claude-running terminal (first may just cancel
+    // the current task; second exits claude and shows --resume UUID).
+    log.info(`[claudeCapture] starting capture for ${ptyIds.length} terminal(s)`)
     for (const ptyId of ptyIds) {
       try {
         window.electronAPI.terminalWrite(ptyId, '\x03')
       } catch (err) {
-        log.warn(`[claudeCapture] failed to write Ctrl+C to pty ${ptyId}:`, err)
+        log.warn(`[claudeCapture] failed to write first Ctrl+C to pty ${ptyId}:`, err)
         remaining.delete(ptyId)
       }
     }
+    // Second Ctrl+C after 300ms — exits claude even if it was mid-task
+    setTimeout(() => {
+      for (const ptyId of [...remaining]) {
+        window.electronAPI.terminalWrite(ptyId, '\x03').catch(() => {})
+      }
+    }, 300)
 
     if (remaining.size === 0) {
       finish()

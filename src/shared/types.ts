@@ -168,6 +168,14 @@ export type CompanionConnection =
       distroPath: string
     }
 
+export interface WorkspaceGroup {
+  id: string
+  name: string
+  /** One of GROUP_COLOR_VALUES keys */
+  color: string
+  collapsed: boolean
+}
+
 export interface WorkspaceInfo {
   id: string
   name: string
@@ -177,6 +185,8 @@ export interface WorkspaceInfo {
   rootPath: string
   /** Defaults to { kind: 'local' } when absent (migration rule). */
   connection?: CompanionConnection
+  /** Tab group this workspace belongs to, if any. */
+  groupId?: string
 }
 
 /** What the connect UI sends to main to establish a remote companion. SSH auth
@@ -449,6 +459,8 @@ export interface WorkspaceState {
   name: string
   color: string
   rootPath: string
+  /** Tab group this workspace belongs to, if any. */
+  groupId?: string
   /** Companion connection for a remote/WSL workspace (absent ⇒ local). Mirrors
    *  WorkspaceInfo.connection; drives reconnect-on-restore. */
   connection?: CompanionConnection
@@ -926,6 +938,7 @@ export interface SidebarSession {
   order: string[]
   /** Root path of the active workspace, or '' when none applies. */
   selected: string
+  groups?: WorkspaceGroup[]
 }
 
 /** Serialized dock zone state for session persistence. */
@@ -947,6 +960,8 @@ export interface MultiWorkspaceSession {
   version: 2
   selectedWorkspaceIndex: number | null
   workspaces: SessionSnapshot[]
+  /** Workspace tab groups to restore. */
+  groups?: WorkspaceGroup[]
   /** Detached panel windows — added in Phase 5. Missing = no panel windows (migration). */
   panelWindows?: PanelWindowSnapshot[]
   /** Detached dock windows with full dock layout. Missing = no dock windows (migration). */

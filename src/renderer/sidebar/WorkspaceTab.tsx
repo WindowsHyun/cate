@@ -196,6 +196,8 @@ interface WorkspaceTabProps {
   onClick: (e?: React.MouseEvent) => void
   onClose: () => void
   onBulkContextMenu?: (e: React.MouseEvent) => Promise<boolean>
+  /** Called when the user picks "Remove from Group" in the context menu. */
+  onRemoveFromGroup?: () => void
 }
 
 export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
@@ -205,6 +207,7 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
   onClick,
   onClose,
   onBulkContextMenu,
+  onRemoveFromGroup,
 }) => {
   // Single store read for all workspace status data
   const wsStatus = useStatusStore(useShallow((s) => {
@@ -289,6 +292,7 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
       { type: 'separator' },
       { id: 'duplicate', label: 'Duplicate Workspace' },
       { id: 'close-panels', label: 'Close All Panels', enabled: Object.keys(workspace.panels).length > 0 },
+      ...(onRemoveFromGroup ? [{ type: 'separator' as const }, { id: 'remove-from-group', label: 'Remove from Group' }] : []),
       { type: 'separator' },
       { id: 'remove', label: 'Close Workspace' },
     ]
@@ -325,9 +329,10 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
       }
       case 'duplicate': app.duplicateWorkspace(workspace.id); break
       case 'close-panels': app.closeAllPanels(workspace.id); break
+      case 'remove-from-group': onRemoveFromGroup?.(); break
       case 'remove': app.removeWorkspace(workspace.id, true); break
     }
-  }, [workspace.id, workspace.name, workspace.rootPath, workspace.color, workspace.panels, isSelected, onBulkContextMenu])
+  }, [workspace.id, workspace.name, workspace.rootPath, workspace.color, workspace.panels, isSelected, onBulkContextMenu, onRemoveFromGroup])
 
   useEffect(() => {
     if (isRenaming && renameInputRef.current) {
