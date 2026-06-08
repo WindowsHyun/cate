@@ -160,7 +160,8 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
         a.size.height === b.size.height &&
         a.zOrder === b.zOrder &&
         a.isPinned === b.isPinned &&
-        a.animationState === b.animationState
+        a.animationState === b.animationState &&
+        a.opacity === b.opacity
       )
     },
   )

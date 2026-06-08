@@ -213,7 +213,7 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
       const avW = (cs.width > 0 ? cs.width : 1440) - viewportInsets.left - viewportInsets.right
       const avH = (cs.height > 0 ? cs.height : 900) - viewportInsets.bottom
 
-      const gap = 20
+      const gap = 6
       const n = nodeList.length
 
       // Pick cols that minimizes empty grid cells, with minor preference for
