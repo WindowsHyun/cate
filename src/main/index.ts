@@ -1804,6 +1804,12 @@ process.on('SIGINT', () => {
   process.exit(0)
 })
 
+// maticon:// must be registered as privileged BEFORE app.whenReady() so the
+// renderer can use it as an image src without CSP/security violations.
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'maticon', privileges: { standard: true, supportFetchAPI: true, corsEnabled: true } },
+])
+
 app.whenReady().then(async () => {
   // Phase 0 perf marker — log a high-resolution timestamp at app.whenReady
   // so cold-launch traces can be reconstructed from main + renderer logs.
