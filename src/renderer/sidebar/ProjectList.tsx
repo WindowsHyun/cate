@@ -201,7 +201,6 @@ export const ProjectList: React.FC = () => {
                         onClick={(e) => handleWorkspaceClick(flatIndex, ws.id, e)}
                         onClose={() => removeWorkspace(ws.id, true)}
                         onBulkContextMenu={(e) => handleBulkContextMenu(e, ws.id)}
-                        onRemoveFromGroup={() => moveWorkspaceToGroup(ws.id, null)}
                       />
                     </div>
                   )

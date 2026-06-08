@@ -196,8 +196,6 @@ interface WorkspaceTabProps {
   onClick: (e?: React.MouseEvent) => void
   onClose: () => void
   onBulkContextMenu?: (e: React.MouseEvent) => Promise<boolean>
-  /** Called when the user picks "Remove from Group" in the context menu. */
-  onRemoveFromGroup?: () => void
 }
 
 export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
@@ -207,7 +205,6 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
   onClick,
   onClose,
   onBulkContextMenu,
-  onRemoveFromGroup,
 }) => {
   // Single store read for all workspace status data
   const wsStatus = useStatusStore(useShallow((s) => {
@@ -270,6 +267,8 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
     e.stopPropagation()
     if (!window.electronAPI) return
     setIsContextActive(true)
+    const app = useAppStore.getState()
+    const groups = app.workspaceGroups
     const colorSubmenu: NativeContextMenuItem[] = [
       {
         id: 'color:',
@@ -282,26 +281,47 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
         enabled: color !== workspace.color,
       })),
     ]
+    const groupSubmenu: NativeContextMenuItem[] = [
+      { id: 'group:new', label: 'New Group' },
+      ...(groups.length > 0 ? [{ type: 'separator' as const }] : []),
+      ...groups.map((g) => ({
+        id: `group:${g.id}`,
+        label: g.name,
+        enabled: workspace.groupId !== g.id,
+      })),
+      ...(workspace.groupId ? [{ type: 'separator' as const }, { id: 'group:none', label: 'Remove from Group' }] : []),
+    ]
     const items: NativeContextMenuItem[] = [
       { id: 'select', label: 'Select Workspace', enabled: !isSelected },
       { id: 'rename', label: 'Rename Workspace' },
       { label: 'Change Color', submenu: colorSubmenu },
+      { label: 'Group', submenu: groupSubmenu },
       { type: 'separator' },
       { id: 'select-folder', label: 'Select Project Folder' },
       { id: 'copy-cwd', label: 'Copy Working Directory' },
       { type: 'separator' },
       { id: 'duplicate', label: 'Duplicate Workspace' },
       { id: 'close-panels', label: 'Close All Panels', enabled: Object.keys(workspace.panels).length > 0 },
-      ...(onRemoveFromGroup ? [{ type: 'separator' as const }, { id: 'remove-from-group', label: 'Remove from Group' }] : []),
       { type: 'separator' },
       { id: 'remove', label: 'Close Workspace' },
     ]
     const id = await window.electronAPI.showContextMenu(items)
     setIsContextActive(false)
     if (!id) return
-    const app = useAppStore.getState()
     if (id.startsWith('color:')) {
       app.setWorkspaceColor(workspace.id, id.slice(6))
+      return
+    }
+    if (id.startsWith('group:')) {
+      const groupTarget = id.slice(6)
+      if (groupTarget === 'new') {
+        const newGroupId = app.addWorkspaceGroup()
+        app.moveWorkspaceToGroup(workspace.id, newGroupId)
+      } else if (groupTarget === 'none') {
+        app.moveWorkspaceToGroup(workspace.id, null)
+      } else {
+        app.moveWorkspaceToGroup(workspace.id, groupTarget)
+      }
       return
     }
     switch (id) {
@@ -329,10 +349,9 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
       }
       case 'duplicate': app.duplicateWorkspace(workspace.id); break
       case 'close-panels': app.closeAllPanels(workspace.id); break
-      case 'remove-from-group': onRemoveFromGroup?.(); break
       case 'remove': app.removeWorkspace(workspace.id, true); break
     }
-  }, [workspace.id, workspace.name, workspace.rootPath, workspace.color, workspace.panels, isSelected, onBulkContextMenu, onRemoveFromGroup])
+  }, [workspace.id, workspace.name, workspace.rootPath, workspace.color, workspace.panels, workspace.groupId, isSelected, onBulkContextMenu])
 
   useEffect(() => {
     if (isRenaming && renameInputRef.current) {
