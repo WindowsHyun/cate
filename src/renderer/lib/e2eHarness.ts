@@ -14,6 +14,7 @@ import { getLastReveal } from './editor/editorReveal'
 import { applyTheme } from './themeManager'
 import { BUILT_IN_THEMES } from '../../shared/themes'
 import { terminalRegistry } from './terminal/terminalRegistry'
+import { saveSession } from './workspace/session'
 import type { Point } from '../../shared/types'
 
 /** Serializable snapshot of the search store for e2e assertions. */
@@ -51,6 +52,16 @@ declare global {
       resetViewport(): void
       addWorkspace(name?: string, rootPath?: string, id?: string): string
       selectWorkspace(id: string): Promise<void>
+      /** Serializable list of all workspaces (id, name, rootPath, groupId). */
+      workspaces(): { id: string; name: string; rootPath: string | null; groupId?: string }[]
+      /** Serializable list of all workspace groups. */
+      groups(): { id: string; name: string; color: string; collapsed: boolean }[]
+      /** Create a workspace group and return its id. */
+      addWorkspaceGroup(name: string, color?: string): string
+      /** Assign (or unassign with null) a workspace to a group. */
+      moveWorkspaceToGroup(workspaceId: string, groupId: string | null): void
+      /** Force-save the full session to disk (bypasses autosave debounce). */
+      flushSave(): Promise<void>
       /** Resolve the PTY id backing a terminal node (null until the PTY spawns). */
       terminalPtyId(nodeId: string): string | null
       /** Write raw data to a terminal node's PTY (e.g. a flooding command). */
@@ -250,6 +261,30 @@ export function installE2EHarness(): void {
     }
   }
 
+  const workspaces = () =>
+    useAppStore.getState().workspaces.map((w) => ({
+      id: w.id,
+      name: w.name,
+      rootPath: w.rootPath ?? null,
+      ...(w.groupId ? { groupId: w.groupId } : {}),
+    }))
+
+  const groups = () =>
+    useAppStore.getState().workspaceGroups.map((g) => ({
+      id: g.id,
+      name: g.name,
+      color: g.color,
+      collapsed: g.collapsed,
+    }))
+
+  const addWorkspaceGroup = (name: string, color?: string): string =>
+    useAppStore.getState().addWorkspaceGroup(name, color)
+
+  const moveWorkspaceToGroup = (workspaceId: string, groupId: string | null): void =>
+    useAppStore.getState().moveWorkspaceToGroup(workspaceId, groupId)
+
+  const flushSave = (): Promise<void> => saveSession()
+
   window.__cateE2E = {
     ready: true,
     activeCanvasPanelId,
@@ -262,6 +297,11 @@ export function installE2EHarness(): void {
     resetViewport,
     addWorkspace,
     selectWorkspace,
+    workspaces,
+    groups,
+    addWorkspaceGroup,
+    moveWorkspaceToGroup,
+    flushSave,
     terminalPtyId,
     writeTerminal,
     setWorkspaceRoot,

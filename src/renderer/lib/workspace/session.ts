@@ -490,30 +490,42 @@ export function projectFilesToSnapshot(
 }
 
 async function loadFromProjectFiles(): Promise<MultiWorkspaceSession | null> {
-  let recentProjects: string[] = []
-  try {
-    recentProjects = (await window.electronAPI.recentProjectsGet()) ?? []
-  } catch {
-    recentProjects = []
+  // Fetch all three sources in parallel: recentProjects, remoteProjects, and the
+  // sidebar arrangement. We need sidebarSession early so we can supplement the
+  // project list — sidebar.json is the authoritative record of which workspaces
+  // the user had open, while recentProjects.json can fall out of sync (e.g. a
+  // crash mid-write, or removeRecentProject called without a matching sidebar
+  // update). Any path in sidebar order but absent from recentProjects would
+  // silently vanish on restart without this union.
+  const [recentProjectsResult, remoteEntriesResult, sidebarSessionResult] = await Promise.allSettled([
+    window.electronAPI.recentProjectsGet(),
+    window.electronAPI.remoteProjectsGet(),
+    window.electronAPI.sidebarSessionGet(),
+  ])
+  const recentProjects: string[] = recentProjectsResult.status === 'fulfilled' ? (recentProjectsResult.value ?? []) : []
+  const remoteEntries: RemoteProjectEntry[] = remoteEntriesResult.status === 'fulfilled' ? (remoteEntriesResult.value ?? []) : []
+  const sidebarSession = sidebarSessionResult.status === 'fulfilled' ? sidebarSessionResult.value : null
+
+  // Build the union of local paths: recentProjects first (preserves existing
+  // order for projects not yet in sidebar.json), then any extra paths from
+  // sidebar.json that recentProjects.json is missing.
+  const sidebarOrder: string[] = Array.isArray(sidebarSession?.order) ? (sidebarSession!.order as string[]) : []
+  const seenPaths = new Set(recentProjects)
+  const projectPaths = [...recentProjects]
+  for (const p of sidebarOrder) {
+    if (typeof p === 'string' && !seenPaths.has(p)) {
+      projectPaths.push(p)
+      seenPaths.add(p)
+    }
   }
 
-  // Remote (cate-companion://) workspaces never appear in recentProjects — they
-  // live in the parallel remoteProjects store with their full restore snapshot
-  // and reconnect info (Finding 3). Load them up front so they round-trip too.
-  let remoteEntries: RemoteProjectEntry[] = []
-  try {
-    remoteEntries = (await window.electronAPI.remoteProjectsGet()) ?? []
-  } catch {
-    remoteEntries = []
-  }
-
-  if (recentProjects.length === 0 && remoteEntries.length === 0) return null
+  if (projectPaths.length === 0 && remoteEntries.length === 0) return null
 
   const snapshots: SessionSnapshot[] = []
   const panelWindows: PanelWindowSnapshot[] = []
   const dockWindows: DetachedDockWindowSnapshot[] = []
 
-  for (const rootPath of recentProjects) {
+  for (const rootPath of projectPaths) {
     // Defensive: a remote locator must never reach projectStateLoad (it would
     // mangle into a junk local path). Remote workspaces are loaded below.
     if (!isLocalLocator(rootPath)) continue
@@ -552,7 +564,6 @@ async function loadFromProjectFiles(): Promise<MultiWorkspaceSession | null> {
   // Apply the persisted sidebar arrangement: reorder to the saved order and pick
   // the active workspace. Falls back to recentProjects order / index 0 when no
   // arrangement is stored yet (first run after upgrade).
-  const sidebarSession = await window.electronAPI.sidebarSessionGet().catch(() => null)
   const { workspaces, selectedWorkspaceIndex, groups, workspaceGroupMap } = applySidebarSession(snapshots, sidebarSession)
 
   return {

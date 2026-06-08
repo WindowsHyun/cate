@@ -14,7 +14,7 @@ export interface LaunchResult {
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..')
 
-export async function launchApp(opts: { perf?: boolean } = {}): Promise<LaunchResult> {
+export async function launchApp(opts: { perf?: boolean; userDataDir?: string } = {}): Promise<LaunchResult> {
   const electronApp = await electron.launch({
     args: ['.'],
     cwd: REPO_ROOT,
@@ -22,6 +22,8 @@ export async function launchApp(opts: { perf?: boolean } = {}): Promise<LaunchRe
       ...process.env,
       CATE_E2E: '1',
       NODE_ENV: 'production',
+      // Pin userData across launches so persistence tests can close+reopen the same dir.
+      ...(opts.userDataDir ? { CATE_E2E_USERDATA: opts.userDataDir } : {}),
       // Activate the resource profiler (main getAppMetrics sampler + counters,
       // renderer FPS/long-task/render counters, window.__catePerf) for the
       // perf-stress spec. Harmless no-op for other specs that don't set it.

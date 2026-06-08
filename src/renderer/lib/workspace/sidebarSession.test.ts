@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import type { SessionSnapshot, SidebarSession } from '../../../shared/types'
+import type { SessionSnapshot, SidebarSession, WorkspaceGroup } from '../../../shared/types'
 import { deriveSidebarSession, applySidebarSession } from './sidebarSession'
 
 // Minimal snapshot — only rootPath matters to the ordering logic.
@@ -39,6 +39,32 @@ describe('deriveSidebarSession', () => {
   it('selected is empty when the selected workspace has no rootPath', () => {
     const res = deriveSidebarSession([ws('a', '')], 'a')
     expect(res.selected).toBe('')
+  })
+
+  it('includes groups when provided', () => {
+    const groups: WorkspaceGroup[] = [{ id: 'g1', name: 'Dev', color: 'blue', collapsed: false }]
+    const res = deriveSidebarSession([ws('a', '/p/a')], 'a', groups)
+    expect(res.groups).toEqual(groups)
+  })
+
+  it('omits groups field when groups is empty', () => {
+    const res = deriveSidebarSession([ws('a', '/p/a')], 'a', [])
+    expect(res.groups).toBeUndefined()
+  })
+
+  it('builds workspaceGroupMap from workspace groupIds', () => {
+    const workspaces = [
+      { id: 'a', rootPath: '/p/a', groupId: 'g1' },
+      { id: 'b', rootPath: '/p/b', groupId: 'g2' },
+      { id: 'c', rootPath: '/p/c' },
+    ]
+    const res = deriveSidebarSession(workspaces, 'a')
+    expect(res.workspaceGroupMap).toEqual({ '/p/a': 'g1', '/p/b': 'g2' })
+  })
+
+  it('omits workspaceGroupMap when no workspace has a groupId', () => {
+    const res = deriveSidebarSession([ws('a', '/p/a'), ws('b', '/p/b')], 'a')
+    expect(res.workspaceGroupMap).toBeUndefined()
   })
 })
 
@@ -121,5 +147,50 @@ describe('applySidebarSession', () => {
     const res = applySidebarSession(snaps, { order: ['/p/b', '/p/a'], selected: 123 } as unknown as SidebarSession)
     expect(res.workspaces.map((s) => s.rootPath)).toEqual(['/p/b', '/p/a'])
     expect(res.selectedWorkspaceIndex).toBe(0)
+  })
+
+  // Groups and workspaceGroupMap — these cover the e6142e6 / 191fa84 fixes where
+  // group assignments silently vanished on restart because (a) sidebarStore.normalize
+  // dropped the fields and (b) applySidebarSession never returned them.
+  it('returns groups from the sidebar session', () => {
+    const groups: WorkspaceGroup[] = [{ id: 'g1', name: 'Dev', color: 'blue', collapsed: false }]
+    const snaps = [snap('/p/a')]
+    const res = applySidebarSession(snaps, { order: ['/p/a'], selected: '/p/a', groups })
+    expect(res.groups).toEqual(groups)
+  })
+
+  it('returns workspaceGroupMap from the sidebar session', () => {
+    const snaps = [snap('/p/a'), snap('/p/b')]
+    const workspaceGroupMap = { '/p/a': 'g1', '/p/b': 'g2' }
+    const res = applySidebarSession(snaps, { order: ['/p/a', '/p/b'], selected: '', workspaceGroupMap })
+    expect(res.workspaceGroupMap).toEqual(workspaceGroupMap)
+  })
+
+  it('filters out malformed group entries', () => {
+    const groups = [
+      { id: 'g1', name: 'Good', color: 'red', collapsed: false },
+      { id: 42 } as unknown as WorkspaceGroup,
+      null as unknown as WorkspaceGroup,
+      { name: 'no-id' } as unknown as WorkspaceGroup,
+    ]
+    const snaps = [snap('/p/a')]
+    const res = applySidebarSession(snaps, { order: ['/p/a'], selected: '', groups })
+    expect(res.groups).toEqual([{ id: 'g1', name: 'Good', color: 'red', collapsed: false }])
+  })
+
+  it('returns empty groups and map when sidebar session has none', () => {
+    const snaps = [snap('/p/a')]
+    const res = applySidebarSession(snaps, { order: ['/p/a'], selected: '' })
+    expect(res.groups).toEqual([])
+    expect(res.workspaceGroupMap).toEqual({})
+  })
+
+  it('returns empty workspaceGroupMap when the field is an array (malformed)', () => {
+    const snaps = [snap('/p/a')]
+    const res = applySidebarSession(snaps, {
+      order: ['/p/a'], selected: '',
+      workspaceGroupMap: [] as unknown as Record<string, string>,
+    })
+    expect(res.workspaceGroupMap).toEqual({})
   })
 })

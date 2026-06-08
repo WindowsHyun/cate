@@ -1641,7 +1641,9 @@ if (process.env.CATE_E2E === '1') {
 
   const fs = require('fs') as typeof import('fs')
   const os = require('os') as typeof import('os')
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cate-e2e-'))
+  // CATE_E2E_USERDATA lets persistence tests reuse the same dir across launches.
+  const tmp =
+    process.env.CATE_E2E_USERDATA || fs.mkdtempSync(path.join(os.tmpdir(), 'cate-e2e-'))
   app.setPath('userData', tmp)
   // Keep the e2e app out of the macOS dock / app-switcher so launching it never
   // foregrounds the shared Electron bundle (and a running `npm run dev`).
