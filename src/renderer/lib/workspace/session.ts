@@ -226,8 +226,6 @@ export async function saveSession(): Promise<void> {
       continue
     }
 
-    const isSelected = workspace.id === updatedState.selectedWorkspaceId
-
     // Dock layout from the workspace's OWN dock store if activated, else its
     // last-saved snapshot. The center-zone canvas panel is the primary canvas.
     const dockSnapshot = getWorkspaceDockSnapshot(workspace.id)
