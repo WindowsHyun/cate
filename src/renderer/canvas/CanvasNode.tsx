@@ -386,8 +386,31 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
     return () => canvasApi.getState().setNodeActiveWorktree(nodeId, null)
   }, [nodeId, canvasApi])
 
+  const nodeOpacityPct = Math.round((node?.opacity ?? 1) * 100)
   const nodeControlButtons = (
     <>
+      {/* Opacity slider — drag-safe: stopPropagation on mousedown */}
+      <div
+        data-grab-button
+        title={`Opacity: ${nodeOpacityPct}%`}
+        style={{ display: 'flex', alignItems: 'center', gap: 3, paddingRight: 2 }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <input
+          type="range"
+          min={10}
+          max={100}
+          step={5}
+          value={nodeOpacityPct}
+          onChange={(e) => canvasApi.getState().setNodeOpacity(nodeId, Number(e.target.value) / 100)}
+          style={{ width: 64, height: 3, accentColor: 'var(--focus-blue)', cursor: 'pointer' }}
+          title={`Opacity: ${nodeOpacityPct}%`}
+        />
+        <span style={{ fontSize: 9, color: 'var(--text-secondary)', minWidth: 22, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+          {nodeOpacityPct}%
+        </span>
+      </div>
+      <div style={{ width: 1, height: 12, background: 'var(--border-subtle)', flexShrink: 0 }} />
       <GrabButton
         title={node?.isPinned ? 'Unlock' : 'Lock'}
         onClick={(e) => { e.stopPropagation(); handleTogglePin() }}

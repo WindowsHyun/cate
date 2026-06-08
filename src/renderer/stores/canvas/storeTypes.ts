@@ -167,6 +167,7 @@ export interface CanvasStoreActions {
   moveToBack: (nodeId: CanvasNodeId) => void
 
   togglePin: (id: CanvasNodeId) => void
+  setNodeOpacity: (nodeId: CanvasNodeId, opacity: number) => void
 
   setSnapGuides: (guides: {
     lines: Array<{

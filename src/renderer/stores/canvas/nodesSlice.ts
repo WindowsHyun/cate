@@ -24,6 +24,7 @@ type NodesActions = Pick<
   | 'moveToFront'
   | 'moveToBack'
   | 'togglePin'
+  | 'setNodeOpacity'
   | 'setNodeActiveWorktree'
   | 'setNodeDockLayout'
   | 'nodeForPanel'
@@ -310,6 +311,14 @@ export function createNodesSlice(set: CanvasSet, get: CanvasGet): NodesActions {
         return {
           nodes: { ...state.nodes, [id]: { ...node, isPinned: !node.isPinned } },
         }
+      })
+    },
+
+    setNodeOpacity(id, opacity) {
+      set((state) => {
+        const node = state.nodes[id]
+        if (!node) return state
+        return { nodes: { ...state.nodes, [id]: { ...node, opacity: Math.min(1, Math.max(0.1, opacity)) } } }
       })
     },
 

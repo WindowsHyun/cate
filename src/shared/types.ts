@@ -51,6 +51,8 @@ export interface CanvasNodeState {
   preMaximizeOrigin?: Point
   preMaximizeSize?: Size
   isPinned?: boolean
+  /** User-set transparency (0.1–1.0). Default 1.0 (fully opaque). */
+  opacity?: number
   /** Per-node dock layout tree — what's actually rendered inside the node.
    *  Each canvas node owns a private DockStore whose `center` zone holds this
    *  layout. Splits, stacks and drag-and-drop all use the same primitives as

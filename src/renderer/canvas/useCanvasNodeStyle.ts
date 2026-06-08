@@ -76,7 +76,8 @@ export function useCanvasNodeStyle(args: StyleArgs) {
       ? ', left 250ms cubic-bezier(0.16, 1, 0.3, 1), top 250ms cubic-bezier(0.16, 1, 0.3, 1), width 250ms cubic-bezier(0.16, 1, 0.3, 1), height 250ms cubic-bezier(0.16, 1, 0.3, 1)'
       : ''
 
-    const baseOpacity = isEntering ? 0 : isExiting ? 0 : isWholeNodeDragSource ? 0 : 1
+    const nodeOpacity = node.opacity ?? 1
+    const baseOpacity = isEntering ? 0 : isExiting ? 0 : isWholeNodeDragSource ? 0 : nodeOpacity
     // Focus lens: nodes outside the focused worktree recede.
     const opacity = worktreeDim ? baseOpacity * 0.5 : baseOpacity
 
@@ -107,7 +108,7 @@ export function useCanvasNodeStyle(args: StyleArgs) {
       pointerEvents: isExiting || isWholeNodeDragSource ? 'none' : undefined,
       userSelect: 'none',
     }
-  }, [node, isFocused, activityState, isAnimatingLayout, isHovered, chromeTint, isWholeNodeDragSource, worktreeDim])
+  }, [node, isFocused, activityState, isAnimatingLayout, isHovered, chromeTint, isWholeNodeDragSource, worktreeDim, node?.opacity])
 
   const glowStyle = useMemo<React.CSSProperties | null>(() => {
     if (!node) return null
