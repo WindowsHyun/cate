@@ -939,6 +939,8 @@ export interface SidebarSession {
   /** Root path of the active workspace, or '' when none applies. */
   selected: string
   groups?: WorkspaceGroup[]
+  /** Map of workspace root path → group ID. Saved separately from workspace files. */
+  workspaceGroupMap?: Record<string, string>
 }
 
 /** Serialized dock zone state for session persistence. */
@@ -962,6 +964,8 @@ export interface MultiWorkspaceSession {
   workspaces: SessionSnapshot[]
   /** Workspace tab groups to restore. */
   groups?: WorkspaceGroup[]
+  /** Map of workspace root path → group ID. */
+  workspaceGroupMap?: Record<string, string>
   /** Detached panel windows — added in Phase 5. Missing = no panel windows (migration). */
   panelWindows?: PanelWindowSnapshot[]
   /** Detached dock windows with full dock layout. Missing = no dock windows (migration). */

@@ -93,13 +93,13 @@ export const WorkspaceGroupRow: React.FC<WorkspaceGroupRowProps> = ({
       {insertIndex === groupIndex && (
         <div className="absolute left-0 right-0 top-0 h-0.5 bg-blue-400/60 z-10 pointer-events-none" />
       )}
+      {/* Colored left bar */}
+      <div className={`absolute left-0 top-0 h-full w-1 ${colorClass}`} />
       <div
-        className="flex items-center gap-1.5 px-2 py-1 cursor-pointer select-none hover:bg-white/5 group/group-row"
+        className="flex items-center gap-1.5 pl-3 pr-2 py-1 cursor-pointer select-none hover:bg-white/5 group/group-row"
         onClick={() => toggleGroupCollapsed(group.id)}
         onContextMenu={handleContextMenu}
       >
-        {/* Color swatch */}
-        <div className={`w-2.5 h-2.5 rounded-sm flex-shrink-0 ${colorClass}`} />
 
         {/* Name / edit field */}
         {editing ? (

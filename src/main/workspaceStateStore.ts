@@ -49,7 +49,13 @@ const sidebarStore = createJsonStateFile<SidebarFile>({
     const sess = s as Record<string, unknown>
     const order = Array.isArray(sess.order) ? sess.order.filter((p): p is string => typeof p === 'string') : []
     const selected = typeof sess.selected === 'string' ? sess.selected : ''
-    return { session: { order, selected } }
+    const rawGroups = sess.groups
+    const groups = Array.isArray(rawGroups) ? rawGroups : undefined
+    const rawMap = sess.workspaceGroupMap
+    const workspaceGroupMap = rawMap && typeof rawMap === 'object' && !Array.isArray(rawMap)
+      ? rawMap as Record<string, string>
+      : undefined
+    return { session: { order, selected, groups, workspaceGroupMap } }
   },
 })
 

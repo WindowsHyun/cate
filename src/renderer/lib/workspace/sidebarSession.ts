@@ -26,7 +26,7 @@ export function deriveSidebarSession(
 export function applySidebarSession(
   snapshots: SessionSnapshot[],
   sidebarSession: SidebarSession | null | undefined,
-): { workspaces: SessionSnapshot[]; selectedWorkspaceIndex: number; groups: WorkspaceGroup[] } {
+): { workspaces: SessionSnapshot[]; selectedWorkspaceIndex: number; groups: WorkspaceGroup[]; workspaceGroupMap: Record<string, string> } {
   // Be defensive about the persisted shape: this value comes straight from
   // sidebar.json (untyped JSON) and may be partial or corrupted (crash mid
   // write, a hand-edit, a future schema change). A bad shape must fall back to
@@ -40,8 +40,13 @@ export function applySidebarSession(
     (g) => g && typeof g === 'object' && typeof g.id === 'string' && typeof g.name === 'string'
   ) as WorkspaceGroup[] : []
 
+  const rawMap = sidebarSession?.workspaceGroupMap
+  const workspaceGroupMap = rawMap && typeof rawMap === 'object' && !Array.isArray(rawMap)
+    ? rawMap as Record<string, string>
+    : {}
+
   if (order.length === 0) {
-    return { workspaces: snapshots, selectedWorkspaceIndex: 0, groups }
+    return { workspaces: snapshots, selectedWorkspaceIndex: 0, groups, workspaceGroupMap }
   }
   const rawSelected = sidebarSession?.selected
   const selected = typeof rawSelected === 'string' ? rawSelected : ''
@@ -69,5 +74,5 @@ export function applySidebarSession(
     if (idx >= 0) selectedWorkspaceIndex = idx
   }
 
-  return { workspaces, selectedWorkspaceIndex, groups }
+  return { workspaces, selectedWorkspaceIndex, groups, workspaceGroupMap }
 }

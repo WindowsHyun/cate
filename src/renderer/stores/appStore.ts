@@ -567,10 +567,15 @@ function persistGroupsToSidebar(state: AppStore): void {
   if (typeof window === 'undefined' || !window.electronAPI) return
   const order = state.workspaces.filter((w) => w.rootPath).map((w) => w.rootPath)
   const selected = state.workspaces.find((w) => w.id === state.selectedWorkspaceId)?.rootPath ?? ''
+  const workspaceGroupMap: Record<string, string> = {}
+  for (const ws of state.workspaces) {
+    if (ws.rootPath && ws.groupId) workspaceGroupMap[ws.rootPath] = ws.groupId
+  }
   window.electronAPI.sidebarSessionSet({
     order,
     selected,
     groups: state.workspaceGroups.length > 0 ? state.workspaceGroups : undefined,
+    workspaceGroupMap: Object.keys(workspaceGroupMap).length > 0 ? workspaceGroupMap : undefined,
   }).catch(() => {})
 }
 
@@ -1324,6 +1329,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         w.id === workspaceId ? { ...w, groupId: groupId ?? undefined } : w,
       ),
     }))
+    persistGroupsToSidebar(get())
     if (typeof window !== 'undefined' && window.electronAPI) {
       window.electronAPI.workspaceUpdate(workspaceId, { groupId: groupId ?? '' }).catch(() => {})
     }
@@ -1669,7 +1675,8 @@ export function useWorkspaceList(): WorkspaceState[] {
           a[i].rootPathError !== b[i].rootPathError ||
           a[i].isRootPathPending !== b[i].isRootPathPending ||
           a[i].companion?.phase !== b[i].companion?.phase ||
-          a[i].companion?.error !== b[i].companion?.error
+          a[i].companion?.error !== b[i].companion?.error ||
+          a[i].groupId !== b[i].groupId
         ) return false
       }
       return true

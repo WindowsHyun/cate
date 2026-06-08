@@ -553,13 +553,14 @@ async function loadFromProjectFiles(): Promise<MultiWorkspaceSession | null> {
   // the active workspace. Falls back to recentProjects order / index 0 when no
   // arrangement is stored yet (first run after upgrade).
   const sidebarSession = await window.electronAPI.sidebarSessionGet().catch(() => null)
-  const { workspaces, selectedWorkspaceIndex, groups } = applySidebarSession(snapshots, sidebarSession)
+  const { workspaces, selectedWorkspaceIndex, groups, workspaceGroupMap } = applySidebarSession(snapshots, sidebarSession)
 
   return {
     version: 2,
     selectedWorkspaceIndex,
     workspaces,
     groups: groups.length > 0 ? groups : undefined,
+    workspaceGroupMap: Object.keys(workspaceGroupMap).length > 0 ? workspaceGroupMap : undefined,
     panelWindows: panelWindows.length > 0 ? panelWindows : undefined,
     dockWindows: dockWindows.length > 0 ? dockWindows : undefined,
   }
@@ -772,6 +773,15 @@ export async function restoreMultiWorkspaceSession(session: MultiWorkspaceSessio
       snapshot.connection,
     )
     wsIds.push(wsId)
+
+    // Restore group assignment
+    if (snapshot.rootPath && session.workspaceGroupMap?.[snapshot.rootPath]) {
+      useAppStore.setState((state) => ({
+        workspaces: state.workspaces.map((w) =>
+          w.id === wsId ? { ...w, groupId: session.workspaceGroupMap![snapshot.rootPath!] } : w
+        ),
+      }))
+    }
 
     if (i === selectedIdx) {
       const isRemote = !!snapshot.connection && snapshot.connection.kind !== 'local'
