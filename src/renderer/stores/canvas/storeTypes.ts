@@ -180,6 +180,7 @@ export interface CanvasStoreActions {
   autoLayout: () => void
   layoutColumns: () => void
   layoutRows: () => void
+  fitPanelsToViewport: () => void
 
   // Selection
   selectNodes: (ids: string[], additive?: boolean) => void

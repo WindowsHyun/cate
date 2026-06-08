@@ -9,7 +9,7 @@ import { useSettingsStore } from '../settingsStore'
 
 type ArrangeActions = Pick<
   CanvasStoreActions,
-  'autoLayout' | 'layoutColumns' | 'layoutRows' | 'stackSelected' | 'tidyGridSelected' | 'alignSelected'
+  'autoLayout' | 'layoutColumns' | 'layoutRows' | 'fitPanelsToViewport' | 'stackSelected' | 'tidyGridSelected' | 'alignSelected'
 >
 
 function getCanvasViewportInsets(): { left: number; right: number } {
@@ -192,6 +192,45 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
       const avH = cs.height > 0 ? cs.height : 900
       const zoom = Math.min(1.0, Math.max(ZOOM_MIN, Math.min(avW / totalW, avH / totalH)))
       set({ zoomLevel: zoom, viewportOffset: { x: viewportInsets.left + (avW - totalW * zoom) / 2, y: (avH - totalH * zoom) / 2 } })
+    },
+
+    fitPanelsToViewport() {
+      const state = get()
+      const nodeList = Object.values(state.nodes).sort((a, b) => a.creationIndex - b.creationIndex)
+      if (nodeList.length === 0) return
+
+      const viewportInsets = getCanvasViewportInsets()
+      const cs = state.containerSize
+      const avW = (cs.width > 0 ? cs.width : 1440) - viewportInsets.left - viewportInsets.right
+      const avH = cs.height > 0 ? cs.height : 900
+
+      const gap = 20
+      const n = nodeList.length
+      const aspect = avW / Math.max(avH, 1)
+      const cols = Math.max(1, Math.round(Math.sqrt(n * aspect)))
+      const numRows = Math.ceil(n / cols)
+
+      const panelW = Math.max(560, Math.floor((avW - gap * (cols + 1)) / cols))
+      const panelH = Math.max(400, Math.floor((avH - gap * (numRows + 1)) / numRows))
+
+      get().pushHistory()
+
+      const updatedNodes = { ...state.nodes }
+      nodeList.forEach((node, i) => {
+        const col = i % cols
+        const row = Math.floor(i / cols)
+        updatedNodes[node.id] = {
+          ...updatedNodes[node.id],
+          origin: { x: gap + col * (panelW + gap), y: gap + row * (panelH + gap) },
+          size: { width: panelW, height: panelH },
+        }
+      })
+
+      set({
+        nodes: updatedNodes,
+        zoomLevel: 1.0,
+        viewportOffset: { x: viewportInsets.left, y: 0 },
+      })
     },
 
     stackSelected(axis, gap = 16) {

@@ -163,6 +163,7 @@ export const CommandPalette: React.FC = () => {
       { id: 'zoomToFit', title: 'Zoom to Fit', icon: <ZoomToFitIcon />, action: run('zoomToFit') },
       { id: 'zoomToSelection', title: 'Zoom to Selection', icon: <ZoomSelectionIcon />, action: run('zoomToSelection') },
       { id: 'autoLayout', title: 'Auto-Layout Canvas', icon: <LayersIcon />, action: run('autoLayout') },
+      { id: 'fitPanelsToViewport', title: 'Fit Panels to Screen (100%)', icon: <LayersIcon />, action: run('fitPanelsToViewport') },
       { id: 'undo', title: 'Undo', icon: <UndoIcon />, action: run('undo') },
       { id: 'redo', title: 'Redo', icon: <RedoIcon />, action: run('redo') },
       { id: 'manageLayouts', title: 'Saved Layouts…', icon: <SaveIcon />, action: run('manageLayouts') },

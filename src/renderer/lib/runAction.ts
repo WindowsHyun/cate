@@ -206,6 +206,9 @@ export async function runAction(
     case 'autoLayout':
       canvasStore().autoLayout()
       break
+    case 'fitPanelsToViewport':
+      canvasStore().fitPanelsToViewport()
+      break
     case 'undo':
       canvasStore().undo()
       break

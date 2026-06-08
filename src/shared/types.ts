@@ -575,6 +575,7 @@ export type ShortcutAction =
   | 'autoLayout'
   | 'layoutColumns'
   | 'layoutRows'
+  | 'fitPanelsToViewport'
   | 'undo'
   | 'redo'
   | 'deleteNode'
@@ -632,6 +633,7 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   'autoLayout',
   'layoutColumns',
   'layoutRows',
+  'fitPanelsToViewport',
   'undo',
   'redo',
   'deleteNode',
@@ -672,6 +674,7 @@ export const SHORTCUT_DISPLAY_NAMES: Record<ShortcutAction, string> = {
   autoLayout: 'Auto Layout Canvas',
   layoutColumns: 'Layout: 2 Columns',
   layoutRows: 'Layout: 2 Rows',
+  fitPanelsToViewport: 'Fit Panels to Screen (100%)',
   undo: 'Undo',
   redo: 'Redo',
   deleteNode: 'Delete Focused Panel',
@@ -712,6 +715,7 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, StoredShortcut> = {
   autoLayout: storedShortcut('l', { command: true, shift: true }),
   layoutColumns: storedShortcut('3', { command: true }),
   layoutRows: storedShortcut('4', { command: true }),
+  fitPanelsToViewport: storedShortcut('5', { command: true }),
   undo: storedShortcut('z', { command: true }),
   redo: storedShortcut('z', { command: true, shift: true }),
   deleteNode: storedShortcut('Backspace', { command: true }),

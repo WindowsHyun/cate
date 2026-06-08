@@ -515,6 +515,7 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
             { id: 'layout-rows', label: '2 Rows' },
             { type: 'separator' as const },
             { id: 'zoom-to-fit', label: 'Zoom to Fit' },
+            { id: 'fit-panels-to-screen', label: 'Fit Panels to Screen (100%)', accelerator: 'CmdOrCtrl+5' },
           ],
         },
       )
@@ -566,6 +567,7 @@ const Canvas: React.FC<CanvasProps> = ({ children, onCreateAtPoint, panelId }) =
         case 'layout-columns': canvasApi.getState().layoutColumns(); break
         case 'layout-rows': canvasApi.getState().layoutRows(); break
         case 'zoom-to-fit': canvasApi.getState().zoomToFit(); break
+        case 'fit-panels-to-screen': canvasApi.getState().fitPanelsToViewport(); break
         case 'align-left': canvasApi.getState().alignSelected('left'); break
         case 'align-right': canvasApi.getState().alignSelected('right'); break
         case 'align-top': canvasApi.getState().alignSelected('top'); break
