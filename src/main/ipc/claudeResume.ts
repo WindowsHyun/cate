@@ -5,58 +5,58 @@ import os from 'os'
 import { CLAUDE_FIND_RESUME_ID } from '../../shared/ipc-channels'
 import log from '../logger'
 
-function encodeClaudeProjectDir(cwdPath: string): string {
-  return cwdPath.replace(/\//g, '-').replace(/\./g, '-')
+interface HistoryEntry {
+  project?: string
+  sessionId?: string
+  timestamp?: number
 }
 
-async function findMostRecentSession(projectDir: string): Promise<string | null> {
-  let entries: string[]
+/** Read ~/.claude/history.jsonl and find the most recent sessionId for a CWD. */
+async function findResumeIdFromHistory(cwd: string): Promise<string | null> {
+  const historyPath = path.join(os.homedir(), '.claude', 'history.jsonl')
+  let content: string
   try {
-    entries = await fs.readdir(projectDir)
+    content = await fs.readFile(historyPath, 'utf-8')
   } catch {
     return null
   }
-  const jsonlFiles = entries.filter((e) => e.endsWith('.jsonl') && !e.startsWith('.'))
-  if (jsonlFiles.length === 0) return null
 
-  const withStats = await Promise.all(
-    jsonlFiles.map(async (f) => {
-      try {
-        const stat = await fs.stat(path.join(projectDir, f))
-        return { name: f, mtime: stat.mtimeMs }
-      } catch {
-        return null
-      }
-    }),
-  )
-  const valid = withStats.filter(Boolean) as { name: string; mtime: number }[]
-  if (valid.length === 0) return null
-  valid.sort((a, b) => b.mtime - a.mtime)
-  const sessionId = valid[0].name.replace(/\.jsonl$/, '')
-  if (!/^[0-9a-f]{32,}$/i.test(sessionId.replace(/-/g, ''))) return null
-  return sessionId
+  let best: { timestamp: number; sessionId: string } | null = null
+
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue
+    let entry: HistoryEntry
+    try {
+      entry = JSON.parse(line) as HistoryEntry
+    } catch {
+      continue
+    }
+    const { project, sessionId, timestamp } = entry
+    if (!project || !sessionId || typeof timestamp !== 'number') continue
+
+    // Match when the terminal CWD is at or below the recorded project path,
+    // or when the project path is at or below the terminal CWD.
+    const match =
+      cwd === project ||
+      cwd.startsWith(project + '/') ||
+      project.startsWith(cwd + '/')
+
+    if (match && (!best || timestamp > best.timestamp)) {
+      best = { timestamp, sessionId }
+    }
+  }
+
+  return best?.sessionId ?? null
 }
 
 export function registerClaudeResumeHandlers(): void {
   ipcMain.handle(CLAUDE_FIND_RESUME_ID, async (_event, cwd: string): Promise<string | null> => {
     if (!cwd || typeof cwd !== 'string') return null
-    const projectsRoot = path.join(os.homedir(), '.claude', 'projects')
     try {
-      // Walk from the given cwd upward, trying each ancestor as the project root.
-      // Handles the case where the terminal CWD is a subdirectory of the actual
-      // claude project root (e.g. user ran `cd src && claude`).
-      let candidate: string | null = cwd
-      while (candidate) {
-        const encoded = encodeClaudeProjectDir(candidate)
-        const projectDir = path.join(projectsRoot, encoded)
-        const sessionId = await findMostRecentSession(projectDir)
-        if (sessionId) {
-          log.info('[claudeResume] found session %s for cwd %s (matched dir %s)', sessionId, cwd, candidate)
-          return sessionId
-        }
-        const parent = path.dirname(candidate)
-        if (parent === candidate) break // reached filesystem root
-        candidate = parent
+      const sessionId = await findResumeIdFromHistory(cwd)
+      if (sessionId) {
+        log.info('[claudeResume] found session %s for cwd %s (via history.jsonl)', sessionId, cwd)
+        return sessionId
       }
       log.warn('[claudeResume] no session found for cwd %s', cwd)
       return null

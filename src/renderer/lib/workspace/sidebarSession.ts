@@ -8,13 +8,22 @@ import type { SessionSnapshot, SidebarSession, WorkspaceGroup } from '../../../s
 
 /** Snapshot the current sidebar order + active workspace as root paths. */
 export function deriveSidebarSession(
-  workspaces: ReadonlyArray<{ id: string; rootPath: string }>,
+  workspaces: ReadonlyArray<{ id: string; rootPath: string; groupId?: string }>,
   selectedId: string,
   groups?: WorkspaceGroup[],
 ): SidebarSession {
   const order = workspaces.filter((w) => w.rootPath).map((w) => w.rootPath)
   const selected = workspaces.find((w) => w.id === selectedId)?.rootPath ?? ''
-  return { order, selected, groups: groups && groups.length > 0 ? groups : undefined }
+  const workspaceGroupMap: Record<string, string> = {}
+  for (const w of workspaces) {
+    if (w.rootPath && w.groupId) workspaceGroupMap[w.rootPath] = w.groupId
+  }
+  return {
+    order,
+    selected,
+    groups: groups && groups.length > 0 ? groups : undefined,
+    workspaceGroupMap: Object.keys(workspaceGroupMap).length > 0 ? workspaceGroupMap : undefined,
+  }
 }
 
 /**
