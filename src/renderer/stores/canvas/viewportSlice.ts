@@ -191,10 +191,14 @@ export function createViewportSlice(set: CanvasSet, get: CanvasGet, ctx: CanvasS
 
     zoomToFit() {
       const state = get()
-      const nodeList = Object.values(state.nodes)
-      if (nodeList.length === 0) return
+      const all = Object.values(state.nodes)
+      if (all.length === 0) return
       const cs = state.containerSize
       if (cs.width === 0 || cs.height === 0) return
+      // Exclude pinned nodes from the bounding box so they don't influence the
+      // fit. Fall back to all nodes if every node is pinned.
+      const unpinned = all.filter(n => !n.isPinned)
+      const nodeList = unpinned.length > 0 ? unpinned : all
 
       const minX = Math.min(...nodeList.map(n => n.origin.x))
       const minY = Math.min(...nodeList.map(n => n.origin.y))

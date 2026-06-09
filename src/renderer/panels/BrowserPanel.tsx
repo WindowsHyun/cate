@@ -73,6 +73,9 @@ interface WebviewElement extends HTMLElement {
   removeEventListener(type: string, listener: (event: any) => void): void
 }
 
+// Survives viewport-cull unmount/remount cycles. Keyed by panelId (stable UUID).
+const lastUrlByPanel = new Map<string, string>()
+
 // -----------------------------------------------------------------------------
 // Component
 // -----------------------------------------------------------------------------
@@ -109,18 +112,20 @@ export default function BrowserPanel({
   // src for the <webview> element. Frozen across normal re-renders (changing it
   // would re-navigate), but intentionally re-seeded to the current page when the
   // partition changes so the remounted webview reopens where the user was.
-  const [webviewSrc, setWebviewSrc] = useState(() => initialUrl)
+  // Also seeded from lastUrlByPanel on remount so viewport-cull cycles don't
+  // reset the page back to the original URL.
+  const [webviewSrc, setWebviewSrc] = useState(() => lastUrlByPanel.get(panelId) ?? initialUrl)
 
   const webviewRef = useRef<WebviewElement | null>(null)
   const urlInputRef = useRef<HTMLInputElement | null>(null)
   // Mirror isFocused into a ref so the long-lived browser-shortcut subscription
   // reads the current value without re-subscribing on every focus change.
   const isFocusedRef = useRef(isFocused)
-  const [currentUrl, setCurrentUrl] = useState(initialUrl)
+  const [currentUrl, setCurrentUrl] = useState(() => lastUrlByPanel.get(panelId) ?? initialUrl)
   // Latest URL, read by the partition-change effect to re-seed the remounted
   // webview without making it a dependency (which would remount on every nav).
-  const currentUrlRef = useRef(initialUrl)
-  const [inputUrl, setInputUrl] = useState(initialUrl)
+  const currentUrlRef = useRef(lastUrlByPanel.get(panelId) ?? initialUrl)
+  const [inputUrl, setInputUrl] = useState(() => lastUrlByPanel.get(panelId) ?? initialUrl)
   const [canGoBack, setCanGoBack] = useState(false)
   const [canGoForward, setCanGoForward] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -239,9 +244,11 @@ export default function BrowserPanel({
   // -------------------------------------------------------------------------
 
   // Keep currentUrlRef in step with currentUrl for the partition-change effect.
+  // Also write to lastUrlByPanel so this URL survives viewport-cull remounts.
   useEffect(() => {
     currentUrlRef.current = currentUrl
-  }, [currentUrl])
+    lastUrlByPanel.set(panelId, currentUrl)
+  }, [currentUrl, panelId])
 
   // Configure the proxy on this panel's session before the webview attaches.
   // Re-runs whenever the proxy (and therefore the partition) changes. No-proxy
