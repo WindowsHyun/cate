@@ -648,6 +648,30 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
           </div>
         </div>
       )}
+      {/* Control buttons overlay for tab-layout nodes — floats over the right
+          side of the DockTabStack tab bar (height 26px). */}
+      {rootIsTabs && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 0,
+            height: 26,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 2,
+            paddingRight: 4,
+            opacity: isFocused ? 1 : 0,
+            pointerEvents: isFocused ? undefined : 'none',
+            transition: 'opacity 150ms ease',
+            zIndex: 20,
+          }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={handleGrabStripContextMenu}
+        >
+          {nodeControlButtons}
+        </div>
+      )}
 
       {/* Dock layout area */}
       <div
