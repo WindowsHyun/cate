@@ -2,7 +2,7 @@ import log from './logger'
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, screen, webContents, session, nativeTheme, protocol } from 'electron'
 import fs from 'fs'
 import path from 'path'
-import { SHELL_SHOW_IN_FOLDER, WEBVIEW_SCREENSHOT, BROWSER_SET_PROXY, NATIVE_FILE_DRAG, CAPTURE_PAGE, DIALOG_OPEN_FOLDER, DIALOG_OPEN_IMAGE, DIALOG_SAVE_FILE, DIALOG_CONFIRM_UNSAVED, DIALOG_CONFIRM_CLOSE_TERMINAL, DIALOG_CONFIRM_CLOSE_CANVAS, DIALOG_CONFIRM_IMPORT, DIALOG_CONFIRM_RELOAD_WORKSPACE, DIALOG_TERMINAL_LINK_OPEN, CANVAS_READ_BACKGROUND_IMAGE, APP_OPEN_PATH } from '../shared/ipc-channels'
+import { SHELL_SHOW_IN_FOLDER, WEBVIEW_SCREENSHOT, BROWSER_SET_PROXY, NATIVE_FILE_DRAG, CAPTURE_PAGE, DIALOG_OPEN_FOLDER, DIALOG_OPEN_FILE, DIALOG_OPEN_IMAGE, DIALOG_SAVE_FILE, DIALOG_CONFIRM_UNSAVED, DIALOG_CONFIRM_CLOSE_TERMINAL, DIALOG_CONFIRM_CLOSE_CANVAS, DIALOG_CONFIRM_IMPORT, DIALOG_CONFIRM_RELOAD_WORKSPACE, DIALOG_TERMINAL_LINK_OPEN, CANVAS_READ_BACKGROUND_IMAGE, APP_OPEN_PATH } from '../shared/ipc-channels'
 import {
   WINDOW_SET_TITLE,
   WINDOW_MINIMIZE, WINDOW_TOGGLE_MAXIMIZE, WINDOW_CLOSE, WINDOW_IS_MAXIMIZED, WINDOW_MAXIMIZE_STATE,
@@ -671,6 +671,17 @@ function registerWindowAndDialogHandlers(): void {
   })
 
   // Dialog handlers
+  ipcMain.handle(DIALOG_OPEN_FILE, async (event, opts: { title?: string; filters?: { name: string; extensions: string[] }[] } = {}) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined
+    const result = await dialog.showOpenDialog(win!, {
+      title: opts.title ?? 'Open File',
+      properties: ['openFile'],
+      filters: opts.filters,
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+
   ipcMain.handle(DIALOG_OPEN_FOLDER, async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],

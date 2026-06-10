@@ -190,6 +190,7 @@ export const MENU_SHOW_CONTEXT = 'menu:showContext'
 
 // Dialog
 export const DIALOG_OPEN_FOLDER = 'dialog:openFolder'
+export const DIALOG_OPEN_FILE = 'dialog:openFile'
 export const DIALOG_OPEN_IMAGE = 'dialog:openImage'
 export const DIALOG_SAVE_FILE = 'dialog:saveFile'
 export const DIALOG_CONFIRM_UNSAVED = 'dialog:confirmUnsaved'

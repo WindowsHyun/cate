@@ -423,6 +423,9 @@ export interface ElectronAPI {
   /** Open a native folder picker. Returns the selected path or null if canceled. */
   openFolderDialog(): Promise<string | null>
 
+  /** Open a native file picker. Returns the selected path or null if canceled. */
+  openFileDialog(opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }): Promise<string | null>
+
   /** Open a native image picker for the canvas wallpaper. Returns the selected
    *  absolute path or null if canceled. */
   openImageDialog(): Promise<string | null>

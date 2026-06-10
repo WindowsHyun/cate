@@ -29,6 +29,15 @@ export function getDocumentType(filePath: string): DocumentType | null {
 const HTML_EXTENSIONS = new Set(['.html', '.htm'])
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.mdx', '.markdown'])
 
+export function openFileAsText(
+  workspaceId: string,
+  filePath: string,
+  position?: Point,
+  placement?: PanelPlacement,
+): string {
+  return useAppStore.getState().createEditor(workspaceId, filePath, position, placement)
+}
+
 export function openFileAsPanel(
   workspaceId: string,
   filePath: string,

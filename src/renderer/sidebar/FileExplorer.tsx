@@ -14,7 +14,7 @@ import { useGitTreeFor } from '../stores/gitStatusStore'
 import { getClipboard, hasClipboard } from './fileClipboard'
 import { useAppStore } from '../stores/appStore'
 import { useSettingsStore } from '../stores/settingsStore'
-import { openFileAsPanel } from '../lib/fs/fileRouting'
+import { openFileAsPanel, openFileAsText } from '../lib/fs/fileRouting'
 import { workspaceDisplayName } from '../lib/fs/displayPath'
 import { isExternalFileDrag, importDroppedEntries } from '../lib/fs/importExternalEntries'
 import { SidebarSectionHeader, SidebarHeaderButton } from './SidebarSectionHeader'
@@ -451,6 +451,18 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ rootPath }) => {
     [selectedWorkspaceId, fileOpenMode],
   )
 
+  const handleFileOpenAsText = useCallback(
+    (filePaths: string[]) => {
+      const placement = fileOpenMode === 'canvas'
+        ? undefined
+        : { target: 'dock' as const, zone: 'center' as const }
+      for (const filePath of filePaths) {
+        openFileAsText(selectedWorkspaceId, filePath, undefined, placement)
+      }
+    },
+    [selectedWorkspaceId, fileOpenMode],
+  )
+
   const handleReload = useCallback(() => {
     if (rootPath) loadTree(rootPath)
   }, [rootPath, loadTree])
@@ -773,6 +785,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ rootPath }) => {
                 loadingPaths={loadingPaths}
                 onSelect={handleSelect}
                 onFileOpen={handleFileOpen}
+                onFileOpenAsText={handleFileOpenAsText}
                 onToggleExpand={toggleExpand}
                 onExpand={expand}
                 onDeletePaths={deletePaths}

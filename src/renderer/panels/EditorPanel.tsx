@@ -826,8 +826,28 @@ export default function EditorPanel({
   const showPreview = isMarkdown && (markdownViewMode === 'preview' || markdownViewMode === 'split')
   const isSplit = isMarkdown && markdownViewMode === 'split'
 
+  const handleOpenFile = useCallback(async () => {
+    if (!window.electronAPI) return
+    const picked = await window.electronAPI.openFileDialog()
+    if (!picked) return
+    const fileName = picked.split('/').pop() ?? picked
+    useAppStore.getState().updatePanelFilePath(workspaceId, panelId, picked)
+    useAppStore.getState().updatePanelTitle(workspaceId, panelId, fileName)
+  }, [workspaceId, panelId])
+
   return (
     <div className="w-full h-full relative flex flex-col">
+      {!filePath && !diffMode && (
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--surface-1)]">
+          <p className="text-sm text-[var(--text-secondary)]">No file open</p>
+          <button
+            onClick={handleOpenFile}
+            className="px-3 py-1.5 rounded text-sm bg-[var(--surface-3)] text-[var(--text-primary)] hover:bg-[var(--surface-4)] cursor-pointer"
+          >
+            Open File…
+          </button>
+        </div>
+      )}
       {isMarkdown && !diffMode && (
         <div className="absolute top-2 right-5 z-10 flex items-center gap-0.5 bg-surface-3 rounded p-0.5">
           <button
