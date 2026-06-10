@@ -412,7 +412,14 @@ export async function saveSession(): Promise<void> {
   // path) so a manual reorder and the active tab survive a restart. Triggered by
   // the same autosave that runs on reorder/select. recentProjects is left
   // recency-ordered for the Welcome page.
-  const sidebarSession = deriveSidebarSession(updatedState.workspaces, updatedState.selectedWorkspaceId, updatedState.workspaceGroups)
+  // Read FRESH state here, not the `updatedState` snapshot captured at the top of
+  // saveSession: several awaits (scrollback, cwd, panel/dock window lists) run in
+  // between, and a group move / reorder / selection change during that window
+  // would otherwise be clobbered by writing the stale arrangement over the fresh
+  // one persistGroupsToSidebar just wrote. The sidebar derivation is independent
+  // of the rest of the snapshot, so a fresh read is safe.
+  const freshState = useAppStore.getState()
+  const sidebarSession = deriveSidebarSession(freshState.workspaces, freshState.selectedWorkspaceId, freshState.workspaceGroups)
   const sidebarSerialized = JSON.stringify(sidebarSession)
   if (sidebarSerialized !== lastSidebarSessionSerialized) {
     await window.electronAPI.sidebarSessionSet(sidebarSession)
