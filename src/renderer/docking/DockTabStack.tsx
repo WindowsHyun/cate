@@ -96,6 +96,32 @@ export default function DockTabStack({ stack, zone: zoneProp, renderPanel, getPa
 
   const activePanel = activePanelId ? resolvePanel(activePanelId) : undefined
 
+  // Keep-alive for browser panels: track panels that have been mounted at least
+  // once so they stay in the DOM (visibility:hidden) when not active, preventing
+  // webview reload on tab switch.
+  const [everMountedPanels, setEverMountedPanels] = useState<Set<string>>(
+    () => new Set(activePanelId ? [activePanelId] : []),
+  )
+
+  useEffect(() => {
+    if (activePanelId) {
+      setEverMountedPanels((prev) => {
+        if (prev.has(activePanelId)) return prev
+        const next = new Set(prev)
+        next.add(activePanelId)
+        return next
+      })
+    }
+  }, [activePanelId])
+
+  useEffect(() => {
+    const currentIds = new Set(stack.panelIds)
+    setEverMountedPanels((prev) => {
+      const next = new Set([...prev].filter((id) => currentIds.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [stack.panelIds])
+
   // Tab interaction actions (rename, click, context menus, add/split helpers).
   const actions = useDockTabActions({
     stack,
@@ -325,7 +351,22 @@ export default function DockTabStack({ stack, zone: zoneProp, renderPanel, getPa
       </div>
 
       {/* Active panel content */}
-      <div className="flex-1 min-h-0 overflow-hidden">
+      <div className="flex-1 min-h-0 overflow-hidden relative">
+        {/* Browser panels that were previously active stay mounted but hidden so
+            their webview doesn't reload on tab switch. */}
+        {Array.from(everMountedPanels).map((pid) => {
+          if (pid === activePanelId) return null
+          const panel = resolvePanel(pid)
+          if (panel?.type !== 'browser') return null
+          return (
+            <div
+              key={pid}
+              style={{ position: 'absolute', inset: 0, visibility: 'hidden', pointerEvents: 'none' }}
+            >
+              {renderPanel(pid)}
+            </div>
+          )
+        })}
         {activePanelId ? renderPanel(activePanelId) : (
           <div className="flex items-center justify-center h-full text-muted text-sm">
             No panel
