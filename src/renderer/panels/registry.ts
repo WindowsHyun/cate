@@ -19,6 +19,7 @@ import {
   FileText,
   SquaresFour,
   FileDoc,
+  Database,
   type Icon as PhosphorIcon,
 } from '@phosphor-icons/react'
 import { CateLogo } from '../ui/CateLogo'
@@ -41,6 +42,7 @@ const BrowserPanel = React.lazy(() => import('./BrowserPanel'))
 const CanvasPanel = React.lazy(() => import('./CanvasPanel'))
 const AgentPanel = React.lazy(() => import('../../agent/renderer/AgentPanel'))
 const DocumentPanel = React.lazy(() => import('./DocumentPanel'))
+const DatabasePanel = React.lazy(() => import('./DatabasePanel'))
 
 // -----------------------------------------------------------------------------
 // Renderer definition
@@ -121,6 +123,13 @@ export const PANEL_REGISTRY: Record<PanelType, RendererPanelDefinition> = {
     create: ({ workspaceId, canvasPoint, placement, filePath, documentType }) =>
       trackCreated('document', useAppStore.getState().createDocument(workspaceId, filePath, documentType, canvasPoint, placement) || null),
   },
+  database: {
+    ...PANEL_DEFINITIONS.database,
+    icon: Database,
+    Component: DatabasePanel,
+    create: ({ workspaceId, canvasPoint, placement, filePath }) =>
+      trackCreated('database', useAppStore.getState().createDatabase(workspaceId, filePath, canvasPoint, placement) || null),
+  },
 }
 
 /** Wrap a create() result with an anonymous usage signal. Lives on the registry
@@ -159,6 +168,7 @@ export function renderPanelComponent(
   // simply ignore the extra props.
   const extras: Record<string, unknown> = {}
   if (panel.type === 'editor') extras.filePath = panel.filePath
+  if (panel.type === 'database') extras.filePath = panel.filePath
   if (panel.type === 'browser') {
     extras.url = panel.url
     extras.proxyUrl = panel.proxyUrl

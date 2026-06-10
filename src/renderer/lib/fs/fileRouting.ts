@@ -28,6 +28,7 @@ export function getDocumentType(filePath: string): DocumentType | null {
 
 const HTML_EXTENSIONS = new Set(['.html', '.htm'])
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.mdx', '.markdown'])
+const SQLITE_EXTENSIONS = new Set(['.db', '.sqlite', '.sqlite3', '.db3'])
 
 export function openFileAsText(
   workspaceId: string,
@@ -50,6 +51,9 @@ export function openFileAsPanel(
   const docType = getDocumentType(filePath)
   if (docType) {
     return store.createDocument(workspaceId, filePath, docType, position, placement)
+  }
+  if (SQLITE_EXTENSIONS.has(ext)) {
+    return store.createDatabase(workspaceId, filePath, position, placement)
   }
   if (HTML_EXTENSIONS.has(ext)) {
     return store.createBrowser(workspaceId, `file://${filePath}`, position, placement)

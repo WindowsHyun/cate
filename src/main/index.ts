@@ -19,6 +19,7 @@ import {
   CLAUDE_CAPTURE_DONE,
 } from '../shared/ipc-channels'
 import { registerHandlers as registerTerminalHandlers, flushAllLoggers, killAllTerminals } from './ipc/terminal'
+import { registerSqliteHandlers } from './sqlite'
 import { registerClaudeResumeHandlers } from './ipc/claudeResume'
 import { companions, forwardFileGrant, forwardClearFileGrantsForWindow, forwardClearScopedWriteAllowancesForWindow } from './companion/companionManager'
 import { registerCompanionHandlers } from './ipc/companion'
@@ -627,6 +628,7 @@ function registerCriticalHandlers(): void {
   registerMenuHandlers()
   registerWindowAndDialogHandlers()
   registerClaudeResumeHandlers()
+  registerSqliteHandlers()
   // Resource profiler — no-op unless CATE_PERF=1.
   startPerfMonitor()
   ipcMain.handle(PERF_GET, () => getLatestSnapshot())

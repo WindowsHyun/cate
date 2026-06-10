@@ -204,6 +204,10 @@ export const DIALOG_TERMINAL_LINK_OPEN = 'dialog:terminalLinkOpen'
 // usually outside the workspace allowed roots, so it bypasses the fs IPC).
 export const CANVAS_READ_BACKGROUND_IMAGE = 'canvas:readBackgroundImage'
 
+// SQLite viewer
+export const SQLITE_OPEN = 'sqlite:open'
+export const SQLITE_EXEC = 'sqlite:exec'
+
 // Panel window: renderer pushes an updated PanelState snapshot to main so
 // the windowRegistry's panel meta (used by session persistence and the
 // panel-window list) stays current — needed after Save-As turns an

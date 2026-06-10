@@ -91,6 +91,8 @@ import {
   DIALOG_OPEN_FOLDER,
   DIALOG_OPEN_FILE,
   DIALOG_OPEN_IMAGE,
+  SQLITE_OPEN,
+  SQLITE_EXEC,
   CANVAS_READ_BACKGROUND_IMAGE,
   DIALOG_SAVE_FILE,
   DIALOG_CONFIRM_UNSAVED,
@@ -844,6 +846,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   openFileDialog(opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }): Promise<string | null> {
     return ipcRenderer.invoke(DIALOG_OPEN_FILE, opts ?? {})
+  },
+
+  sqliteOpen(filePath: string) {
+    return ipcRenderer.invoke(SQLITE_OPEN, filePath)
+  },
+
+  sqliteExec(filePath: string, sql: string) {
+    return ipcRenderer.invoke(SQLITE_EXEC, filePath, sql)
   },
 
   openImageDialog(): Promise<string | null> {

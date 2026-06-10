@@ -347,6 +347,7 @@ interface AppStoreActions {
   createCanvas: (workspaceId: string, position?: Point, placement?: PanelPlacement) => string
   createAgent: (workspaceId: string, position?: Point, placement?: PanelPlacement) => string
   createDocument: (workspaceId: string, filePath?: string, documentType?: 'pdf' | 'docx' | 'image', position?: Point, placement?: PanelPlacement) => string
+  createDatabase: (workspaceId: string, filePath?: string, position?: Point, placement?: PanelPlacement) => string
 
   // Ensure the center dock zone contains a canvas panel for the given workspace.
   // Covers session-restore and new-workspace paths where the center layout may
@@ -928,6 +929,20 @@ export const useAppStore = create<AppStore>((set, get) => ({
       isDirty: false,
       filePath,
       documentType,
+    }
+    return addAndPlacePanel(set, get, workspaceId, panel, placement, position)
+  },
+
+  createDatabase(workspaceId, filePath?, position?, placement?) {
+    const panelId = generateId()
+    if (filePath) recordRecentFile(workspaceId, filePath)
+    const fileName = filePath ? filePath.split('/').pop() ?? 'Database' : 'Database'
+    const panel: PanelState = {
+      id: panelId,
+      type: 'database',
+      title: fileName,
+      isDirty: false,
+      filePath,
     }
     return addAndPlacePanel(set, get, workspaceId, panel, placement, position)
   },

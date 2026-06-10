@@ -426,6 +426,12 @@ export interface ElectronAPI {
   /** Open a native file picker. Returns the selected path or null if canceled. */
   openFileDialog(opts?: { title?: string; filters?: { name: string; extensions: string[] }[] }): Promise<string | null>
 
+  // SQLite viewer
+  /** Open a SQLite database and return its table list with column schemas and row counts. */
+  sqliteOpen(filePath: string): Promise<{ tables: { name: string; rowCount: number; columns: { name: string; type: string }[] }[] } | { error: string }>
+  /** Execute a SQL statement and return columns + rows (read-only: only SELECT is allowed). */
+  sqliteExec(filePath: string, sql: string): Promise<{ columns: string[]; rows: unknown[][] } | { error: string }>
+
   /** Open a native image picker for the canvas wallpaper. Returns the selected
    *  absolute path or null if canceled. */
   openImageDialog(): Promise<string | null>
