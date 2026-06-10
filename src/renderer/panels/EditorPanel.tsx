@@ -826,6 +826,16 @@ export default function EditorPanel({
   const showPreview = isMarkdown && (markdownViewMode === 'preview' || markdownViewMode === 'split')
   const isSplit = isMarkdown && markdownViewMode === 'split'
 
+  const [overlayDismissed, setOverlayDismissed] = useState(false)
+  // Re-show overlay if filePath transitions from defined → undefined (panel cleared)
+  const prevFilePathRef = useRef(filePath)
+  useEffect(() => {
+    if (prevFilePathRef.current !== undefined && filePath === undefined) {
+      setOverlayDismissed(false)
+    }
+    prevFilePathRef.current = filePath
+  }, [filePath])
+
   const handleOpenFile = useCallback(async () => {
     if (!window.electronAPI) return
     const picked = await window.electronAPI.openFileDialog()
@@ -837,15 +847,23 @@ export default function EditorPanel({
 
   return (
     <div className="w-full h-full relative flex flex-col">
-      {!filePath && !diffMode && (
+      {!filePath && !diffMode && !overlayDismissed && (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--surface-1)]">
           <p className="text-sm text-[var(--text-secondary)]">No file open</p>
-          <button
-            onClick={handleOpenFile}
-            className="px-3 py-1.5 rounded text-sm bg-[var(--surface-3)] text-[var(--text-primary)] hover:bg-[var(--surface-4)] cursor-pointer"
-          >
-            Open File…
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setOverlayDismissed(true)}
+              className="px-3 py-1.5 rounded text-sm bg-[var(--surface-3)] text-[var(--text-primary)] hover:bg-[var(--surface-4)] cursor-pointer"
+            >
+              New File
+            </button>
+            <button
+              onClick={handleOpenFile}
+              className="px-3 py-1.5 rounded text-sm bg-[var(--surface-3)] text-[var(--text-primary)] hover:bg-[var(--surface-4)] cursor-pointer"
+            >
+              Open File…
+            </button>
+          </div>
         </div>
       )}
       {isMarkdown && !diffMode && (
