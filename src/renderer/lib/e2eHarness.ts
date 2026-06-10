@@ -74,6 +74,13 @@ declare global {
       /** Point the selected workspace at a real directory (registers it as an
        *  allowed root) so content search has files to scan. */
       setWorkspaceRoot(rootPath: string): Promise<boolean>
+      /** Create a browser panel on the active canvas, returns its node id. */
+      createBrowserPanel(point: Point, url?: string): string
+      /** Focus a canvas node by id (simulates clicking it). */
+      focusCanvasNode(nodeId: string): void
+      /** Return the cumulative did-start-loading count for a browser panel node.
+       *  Returns -1 if the node or its browser panel element is not found. */
+      getBrowserPanelLoadCount(nodeId: string): number
       /** Activate a sidebar view (e.g. 'search') on the left activity bar. */
       openSidebarView(view: SidebarView): void
       /** Set (or clear, with null) the active left sidebar view. Passing null
@@ -158,6 +165,30 @@ export function installE2EHarness(): void {
     if (!cs) return ''
     const nodes = Object.values(cs.getState().nodes)
     return nodes.length ? nodes[nodes.length - 1].id : ''
+  }
+
+  const createBrowserPanel = (point: Point, url?: string): string => {
+    const wsId = useAppStore.getState().selectedWorkspaceId
+    const panelId = useAppStore.getState().createBrowser(wsId, url, point)
+    const cs = activeCanvasStore()
+    if (!cs) return panelId
+    for (const n of Object.values(cs.getState().nodes)) {
+      if (n.panelId === panelId) return n.id
+    }
+    return panelId
+  }
+
+  const focusCanvasNode = (nodeId: string): void => {
+    const cs = activeCanvasStore()
+    cs?.getState().focusNode(nodeId)
+  }
+
+  const getBrowserPanelLoadCount = (nodeId: string): number => {
+    const nodeEl = document.querySelector(`[data-node-id="${nodeId}"]`)
+    if (!nodeEl) return -1
+    const panelEl = nodeEl.querySelector('[data-browser-panel-id]')
+    if (!panelEl) return -1
+    return parseInt(panelEl.getAttribute('data-start-loading-count') ?? '0', 10)
   }
 
   const nodes = () => {
@@ -298,6 +329,9 @@ export function installE2EHarness(): void {
     createTerminal,
     createEditor,
     createCanvasPanel,
+    createBrowserPanel,
+    focusCanvasNode,
+    getBrowserPanelLoadCount,
     nodes,
     zoom,
     setZoom,

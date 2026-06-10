@@ -128,6 +128,8 @@ export default function BrowserPanel({
   const [canGoBack, setCanGoBack] = useState(false)
   const [canGoForward, setCanGoForward] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
+  // Counts every did-start-loading event — used by E2E tests to detect reloads.
+  const [startLoadingCount, setStartLoadingCount] = useState(0)
   // Briefly true after loading stops so the progress bar can animate to 100% and fade.
   const [loadingComplete, setLoadingComplete] = useState(false)
   const loadingCompleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -488,6 +490,7 @@ export default function BrowserPanel({
       setIsLoading(true)
       setLoadError(null)
       setCrashed(false)
+      setStartLoadingCount((c) => c + 1)
     }
 
     // The guest renderer process died. Newer Electron fires `render-process-gone`
@@ -628,7 +631,12 @@ export default function BrowserPanel({
   // -------------------------------------------------------------------------
 
   return (
-    <div className="flex flex-col w-full h-full relative" onKeyDown={handleChromeKeyDown}>
+    <div
+      className="flex flex-col w-full h-full relative"
+      onKeyDown={handleChromeKeyDown}
+      data-browser-panel-id={panelId}
+      data-start-loading-count={startLoadingCount}
+    >
       {/* Loading progress bar — absolutely positioned at the very top of the panel */}
       {(isLoading || loadingComplete) && (
         <div className="absolute top-0 left-0 right-0 z-50 h-0.5 overflow-hidden">
