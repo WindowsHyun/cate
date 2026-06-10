@@ -38,9 +38,11 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
       if (mode === 'rows') { get().layoutRows(); return }
 
       const state = get()
-      const nodeList = Object.values(state.nodes).sort(
-        (a, b) => a.creationIndex - b.creationIndex,
-      )
+      // Exclude pinned (position-locked) nodes: they keep their geometry and
+      // are not swept up by whole-canvas auto-arrangement. Mirrors zoomToFit.
+      const nodeList = Object.values(state.nodes)
+        .filter((n) => !n.isPinned)
+        .sort((a, b) => a.creationIndex - b.creationIndex)
       if (nodeList.length === 0) return
 
       const containerWidth = state.containerSize.width > 0
@@ -109,9 +111,11 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
 
     layoutColumns() {
       const state = get()
-      const nodeList = Object.values(state.nodes).sort(
-        (a, b) => a.creationIndex - b.creationIndex,
-      )
+      // Exclude pinned (position-locked) nodes: they keep their geometry and
+      // are not swept up by whole-canvas auto-arrangement. Mirrors zoomToFit.
+      const nodeList = Object.values(state.nodes)
+        .filter((n) => !n.isPinned)
+        .sort((a, b) => a.creationIndex - b.creationIndex)
       if (nodeList.length === 0) return
       const cols = 2
       const rows = Math.ceil(nodeList.length / cols)
@@ -157,9 +161,11 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
 
     layoutRows() {
       const state = get()
-      const nodeList = Object.values(state.nodes).sort(
-        (a, b) => a.creationIndex - b.creationIndex,
-      )
+      // Exclude pinned (position-locked) nodes: they keep their geometry and
+      // are not swept up by whole-canvas auto-arrangement. Mirrors zoomToFit.
+      const nodeList = Object.values(state.nodes)
+        .filter((n) => !n.isPinned)
+        .sort((a, b) => a.creationIndex - b.creationIndex)
       if (nodeList.length === 0) return
       const rows = 2
       const cols = Math.ceil(nodeList.length / rows)
@@ -205,7 +211,10 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
 
     fitPanelsToViewport() {
       const state = get()
-      const nodeList = Object.values(state.nodes).sort((a, b) => a.creationIndex - b.creationIndex)
+      // Exclude pinned (position-locked) nodes from the fit layout.
+      const nodeList = Object.values(state.nodes)
+        .filter((n) => !n.isPinned)
+        .sort((a, b) => a.creationIndex - b.creationIndex)
       if (nodeList.length === 0) return
 
       const viewportInsets = getCanvasViewportInsets()

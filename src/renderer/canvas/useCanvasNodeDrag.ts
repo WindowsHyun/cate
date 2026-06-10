@@ -55,6 +55,10 @@ export function useCanvasNodeDrag(
   const handleDragStart = useCallback((e: React.MouseEvent) => {
     const panel = primaryPanel
     if (!panel) return
+    // Pinned = position-locked. Mirror the resize guard (useNodeResize.ts) so a
+    // pinned node can't be moved by any whole-node drag entry point (tab bar,
+    // grab strip, unfocused overlay all funnel through here).
+    if (canvasApi.getState().nodes[nodeId]?.isPinned) return
     rawHandleDragStart(e, {
       kind: 'canvas-node',
       canvasStoreApi: canvasApi,
