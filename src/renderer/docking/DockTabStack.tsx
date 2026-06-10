@@ -122,6 +122,15 @@ export default function DockTabStack({ stack, zone: zoneProp, renderPanel, getPa
     })
   }, [stack.panelIds])
 
+  // Derived render set: always includes the current activePanelId even before the
+  // effect above fires (one render gap), so the active panel is never missing.
+  const renderPanelIds = useMemo(() => {
+    if (!activePanelId || everMountedPanels.has(activePanelId)) return everMountedPanels
+    const next = new Set(everMountedPanels)
+    next.add(activePanelId)
+    return next
+  }, [everMountedPanels, activePanelId])
+
   // Tab interaction actions (rename, click, context menus, add/split helpers).
   const actions = useDockTabActions({
     stack,
@@ -352,22 +361,29 @@ export default function DockTabStack({ stack, zone: zoneProp, renderPanel, getPa
 
       {/* Active panel content */}
       <div className="flex-1 min-h-0 overflow-hidden relative">
-        {/* Browser panels that were previously active stay mounted but hidden so
-            their webview doesn't reload on tab switch. */}
-        {Array.from(everMountedPanels).map((pid) => {
-          if (pid === activePanelId) return null
-          const panel = resolvePanel(pid)
-          if (panel?.type !== 'browser') return null
+        {/* Every panel renders inside a keyed absolute wrapper so it stays at the
+            same virtual-DOM position across tab switches. Active panel is visible;
+            inactive browser panels stay mounted (hidden) so their webview doesn't
+            reload; inactive non-browser panels return null (normal unmount). */}
+        {Array.from(renderPanelIds).map((pid) => {
+          const isActive = pid === activePanelId
+          if (!isActive && resolvePanel(pid)?.type !== 'browser') return null
           return (
             <div
               key={pid}
-              style={{ position: 'absolute', inset: 0, visibility: 'hidden', pointerEvents: 'none' }}
+              style={{
+                position: 'absolute',
+                inset: 0,
+                visibility: isActive ? 'visible' : 'hidden',
+                pointerEvents: isActive ? undefined : 'none',
+                zIndex: isActive ? 1 : 0,
+              }}
             >
               {renderPanel(pid)}
             </div>
           )
         })}
-        {activePanelId ? renderPanel(activePanelId) : (
+        {!activePanelId && (
           <div className="flex items-center justify-center h-full text-muted text-sm">
             No panel
           </div>
