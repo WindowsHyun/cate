@@ -15,6 +15,7 @@ import type { BrowserShortcutAction } from '../../shared/types'
 import type { NativeContextMenuItem } from '../../shared/electron-api'
 import { portalRegistry } from '../lib/portalRegistry'
 import { isUrl, normalizeUrl } from './browserUrl'
+import { getBrowserPanelUrl, setBrowserPanelUrl, getBrowserPanelScroll, setBrowserPanelScroll } from './browserUrlCache'
 
 // -----------------------------------------------------------------------------
 // Type declarations for Electron's <webview> element
@@ -67,14 +68,12 @@ interface WebviewElement extends HTMLElement {
   getURL(): string
   getTitle(): string
   getWebContentsId(): number
+  executeJavaScript(code: string): Promise<unknown>
   findInPage(text: string, options?: { forward?: boolean; findNext?: boolean }): number
   stopFindInPage(action: 'clearSelection' | 'keepSelection' | 'activateSelection'): void
   addEventListener(type: string, listener: (event: any) => void): void
   removeEventListener(type: string, listener: (event: any) => void): void
 }
-
-// Survives viewport-cull unmount/remount cycles. Keyed by panelId (stable UUID).
-const lastUrlByPanel = new Map<string, string>()
 
 // -----------------------------------------------------------------------------
 // Component
@@ -112,20 +111,20 @@ export default function BrowserPanel({
   // src for the <webview> element. Frozen across normal re-renders (changing it
   // would re-navigate), but intentionally re-seeded to the current page when the
   // partition changes so the remounted webview reopens where the user was.
-  // Also seeded from lastUrlByPanel on remount so viewport-cull cycles don't
-  // reset the page back to the original URL.
-  const [webviewSrc, setWebviewSrc] = useState(() => lastUrlByPanel.get(panelId) ?? initialUrl)
+  // Also seeded from the browser-url cache on remount so viewport-cull cycles
+  // don't reset the page back to the original URL.
+  const [webviewSrc, setWebviewSrc] = useState(() => getBrowserPanelUrl(panelId) ?? initialUrl)
 
   const webviewRef = useRef<WebviewElement | null>(null)
   const urlInputRef = useRef<HTMLInputElement | null>(null)
   // Mirror isFocused into a ref so the long-lived browser-shortcut subscription
   // reads the current value without re-subscribing on every focus change.
   const isFocusedRef = useRef(isFocused)
-  const [currentUrl, setCurrentUrl] = useState(() => lastUrlByPanel.get(panelId) ?? initialUrl)
+  const [currentUrl, setCurrentUrl] = useState(() => getBrowserPanelUrl(panelId) ?? initialUrl)
   // Latest URL, read by the partition-change effect to re-seed the remounted
   // webview without making it a dependency (which would remount on every nav).
-  const currentUrlRef = useRef(lastUrlByPanel.get(panelId) ?? initialUrl)
-  const [inputUrl, setInputUrl] = useState(() => lastUrlByPanel.get(panelId) ?? initialUrl)
+  const currentUrlRef = useRef(getBrowserPanelUrl(panelId) ?? initialUrl)
+  const [inputUrl, setInputUrl] = useState(() => getBrowserPanelUrl(panelId) ?? initialUrl)
   const [canGoBack, setCanGoBack] = useState(false)
   const [canGoForward, setCanGoForward] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -244,10 +243,10 @@ export default function BrowserPanel({
   // -------------------------------------------------------------------------
 
   // Keep currentUrlRef in step with currentUrl for the partition-change effect.
-  // Also write to lastUrlByPanel so this URL survives viewport-cull remounts.
+  // Also write to the browser-url cache so this URL survives viewport-cull remounts.
   useEffect(() => {
     currentUrlRef.current = currentUrl
-    lastUrlByPanel.set(panelId, currentUrl)
+    setBrowserPanelUrl(panelId, currentUrl)
   }, [currentUrl, panelId])
 
   // Configure the proxy on this panel's session before the webview attaches.
@@ -551,6 +550,45 @@ export default function BrowserPanel({
     }
     webview.addEventListener('dom-ready', onDomReady)
 
+    // Restore scroll ONCE for this webview element, after the first full load —
+    // not on dom-ready (fires before layout settles, so scrollTo clamps on a
+    // not-yet-full-height page) and not on later loads (an in-page link click
+    // re-fires did-finish-load; restoring there would jump to the PREVIOUS
+    // page's offset). `scrollRestored` is per-effect-run, i.e. per webview
+    // element: a genuine remount (cull/tab/workspace switch) re-runs this effect
+    // with a fresh flag and restores once; in-page navs don't.
+    let scrollRestored = false
+    const onDidFinishLoadRestore = (): void => {
+      if (scrollRestored) return
+      scrollRestored = true
+      const saved = getBrowserPanelScroll(panelId)
+      if (saved && (saved.x !== 0 || saved.y !== 0)) {
+        try {
+          void webview.executeJavaScript(`window.scrollTo(${saved.x}, ${saved.y})`)
+        } catch { /* ignore */ }
+      }
+    }
+    webview.addEventListener('did-finish-load', onDidFinishLoadRestore)
+
+    // Capture scroll so the NEXT remount (dock-tab / workspace switch) can
+    // restore it. Gated on `scrollRestored` so an early poll can't clobber the
+    // saved offset with 0 before the restore above runs. Polled because the
+    // <webview> emits no host-visible scroll event and the guest has no preload;
+    // cost is one tiny executeJavaScript per tick (browser panels are few).
+    const scrollPollId = setInterval(() => {
+      if (!scrollRestored) return
+      try {
+        void webview
+          .executeJavaScript('[window.scrollX, window.scrollY]')
+          .then((r) => {
+            if (Array.isArray(r) && typeof r[0] === 'number' && typeof r[1] === 'number') {
+              setBrowserPanelScroll(panelId, r[0], r[1])
+            }
+          })
+          .catch(() => {})
+      } catch { /* ignore */ }
+    }, 600)
+
     webview.addEventListener('did-navigate', onDidNavigate)
     webview.addEventListener('did-navigate-in-page', onDidNavigateInPage)
     webview.addEventListener('page-title-updated', onPageTitleUpdated)
@@ -565,7 +603,9 @@ export default function BrowserPanel({
 
     return () => {
       try { portalRegistry.unregister(panelId) } catch { /* ignore */ }
+      clearInterval(scrollPollId)
       webview.removeEventListener('dom-ready', onDomReady)
+      webview.removeEventListener('did-finish-load', onDidFinishLoadRestore)
       webview.removeEventListener('did-navigate', onDidNavigate)
       webview.removeEventListener('did-navigate-in-page', onDidNavigateInPage)
       webview.removeEventListener('page-title-updated', onPageTitleUpdated)

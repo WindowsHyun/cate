@@ -35,6 +35,7 @@ import { terminalRegistry } from '../lib/terminal/terminalRegistry'
 import { useSettingsStore } from './settingsStore'
 import type { CanvasOperations } from '../lib/canvas/canvasBridge'
 import { releaseCanvasStoreForPanel } from './canvasStore'
+import { forgetBrowserPanelUrl } from '../panels/browserUrlCache'
 import { generateId } from './canvas/helpers'
 import {
   getOrCreateWorkspaceDockStore,
@@ -951,6 +952,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
     if (panel?.type === 'canvas') {
       releaseCanvasStoreForPanel(panelId)
+    }
+    if (panel?.type === 'browser') {
+      // Evict the cached last-URL for this panel — only safe here, on permanent
+      // close (NOT on component unmount, which the cache exists to survive).
+      forgetBrowserPanelUrl(panelId)
     }
 
     // Remove from dock/canvas first (less critical — log errors but continue).

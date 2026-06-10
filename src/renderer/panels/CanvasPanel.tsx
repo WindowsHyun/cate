@@ -62,6 +62,36 @@ function collectLocationsFromLayout(
   return locations
 }
 
+// Stable empty array so the keep-mounted union memo doesn't churn when there
+// are no browser nodes.
+const EMPTY_IDS: string[] = []
+
+/** Does this canvas node host a browser panel (as its primary panel or anywhere
+ *  in its dock layout)? Browser nodes are exempt from viewport-culling so their
+ *  <webview> stays mounted — otherwise a cull unmount reloads the page and loses
+ *  scroll + in-page state. */
+function nodeHostsBrowser(
+  node: { panelId: string; dockLayout?: DockLayoutNode | null },
+  panels: Record<string, { type: PanelType }>,
+): boolean {
+  if (panels[node.panelId]?.type === 'browser') return true
+  const layout = node.dockLayout
+  if (!layout) return false
+  let found = false
+  const walk = (n: DockLayoutNode): void => {
+    if (found) return
+    if (n.type === 'tabs') {
+      for (const pid of n.panelIds) {
+        if (panels[pid]?.type === 'browser') { found = true; return }
+      }
+    } else {
+      for (const c of n.children) walk(c)
+    }
+  }
+  walk(layout)
+  return found
+}
+
 interface CanvasPanelProps {
   panelId: string
   workspaceId: string
@@ -238,6 +268,27 @@ export default function CanvasPanel({ panelId, workspaceId, nodeId, renderPanelC
   // so off-screen terminals/editors don't hold live xterm/Monaco instances.
   const nodeIds = useNodeIds(store)
   const visibleNodeIds = useVisibleNodeIds(store)
+  // Keep-mounted: browser-hosting nodes must never be culled, or their <webview>
+  // unmounts → reloads → loses scroll/DOM state on scroll-back. Union them into
+  // the rendered set. (Stable object refs from both stores keep this cheap.)
+  const nodesForCull = useStore(store, (s) => s.nodes)
+  const workspacePanels = useAppStore(
+    (s) => s.workspaces.find((w) => w.id === workspaceId)?.panels,
+  )
+  const keepMountedNodeIds = useMemo(() => {
+    if (!workspacePanels) return EMPTY_IDS
+    const ids: string[] = []
+    for (const node of Object.values(nodesForCull)) {
+      if (nodeHostsBrowser(node, workspacePanels)) ids.push(node.id)
+    }
+    return ids.length ? ids : EMPTY_IDS
+  }, [nodesForCull, workspacePanels])
+  const renderedNodeIds = useMemo(() => {
+    if (keepMountedNodeIds.length === 0) return visibleNodeIds
+    const seen = new Set(visibleNodeIds)
+    const extra = keepMountedNodeIds.filter((id) => !seen.has(id))
+    return extra.length ? [...visibleNodeIds, ...extra] : visibleNodeIds
+  }, [visibleNodeIds, keepMountedNodeIds])
   // Welcome page only shows on a brand-new workspace (no rootPath chosen yet).
   // After a folder is picked, deleting all panels leaves a blank canvas.
   const workspaceRootPath = useAppStore(
@@ -314,7 +365,7 @@ export default function CanvasPanel({ panelId, workspaceId, nodeId, renderPanelC
         )}
 
         <Canvas onCreateAtPoint={onCreateAtPoint} panelId={panelId}>
-          {visibleNodeIds.map((nId) => (
+          {renderedNodeIds.map((nId) => (
             <CanvasNodeWrapper
               key={nId}
               nodeId={nId}
