@@ -9,6 +9,7 @@ import {
   ensureCanvasOpsForPanel,
   getWorkspaceCanvasStore,
   getWorkspaceCanvasPanelId,
+  seedRememberedGroups,
 } from '../../stores/appStore'
 import { setActivePanel } from '../activePanel'
 import { getOrCreateWorkspaceDockStore } from './dockRegistry'
@@ -541,7 +542,24 @@ async function loadFromProjectFiles(): Promise<MultiWorkspaceSession | null> {
         workspace: ProjectWorkspaceFile
         session: ProjectSessionFile | null
       } | null
-      if (!projectState?.workspace) continue
+      if (!projectState?.workspace) {
+        // workspace.json missing or unreadable, but this path is in the user's
+        // sidebar order — KEEP the workspace (its folder + group assignment
+        // survive) rather than silently dropping it, which used to lose rows and
+        // unset groups for any project whose .cate/workspace.json went missing.
+        // Recreate a minimal snapshot from the path alone (empty panels/canvas,
+        // name from the folder); group assignment is applied later from
+        // workspaceGroupMap keyed by this same rootPath.
+        const folderName = rootPath.split(/[\\/]/).filter(Boolean).pop() || rootPath
+        snapshots.push(
+          projectFilesToSnapshot(
+            { name: folderName } as ProjectWorkspaceFile,
+            projectState?.session ?? null,
+            rootPath,
+          ),
+        )
+        continue
+      }
 
       const ws = projectState.workspace
       const sess = projectState.session
@@ -776,6 +794,9 @@ export async function restoreMultiWorkspaceSession(session: MultiWorkspaceSessio
 
   // Restore workspace tab groups from the session
   appStore.setWorkspaceGroups(session.groups ?? [])
+  // Seed the renderer-owned group memory so the cross-window merge can re-apply
+  // each workspace's group if main's lagging broadcast churns the list mid-restore.
+  seedRememberedGroups(session.workspaceGroupMap)
 
   const selectedIdx = session.selectedWorkspaceIndex ?? 0
 

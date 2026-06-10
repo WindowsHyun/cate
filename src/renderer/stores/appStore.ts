@@ -158,7 +158,12 @@ function applyWorkspaceInfo(ws: WorkspaceState, info: WorkspaceInfo): WorkspaceS
     color: info.color,
     rootPath: info.rootPath,
     connection: info.connection ?? ws.connection,
-    groupId: info.groupId ?? ws.groupId,
+    // groupId is RENDERER-owned — main doesn't track it and echoes back an empty
+    // string in WorkspaceInfo. `??` only guards null/undefined, so an empty-string
+    // echo would WIPE a just-assigned/just-restored group (the async create-sync
+    // response landing after restore set groupId from workspaceGroupMap). Use `||`
+    // so any falsy echo (''/undefined) preserves the renderer's groupId.
+    groupId: info.groupId || ws.groupId,
     rootPathError: null,
     isRootPathPending: false,
   }
@@ -560,6 +565,27 @@ function setPanelField(
       return { ...ws, panels: { ...ws.panels, [panelId]: next } }
     }),
   }))
+}
+
+// Renderer-owned group assignments, remembered by rootPath. main does NOT track
+// groupId, so its cross-window workspace broadcast (onWorkspaceChanged →
+// mergeWorkspaceInfos) carries none. During restore the renderer optimistically
+// creates N workspaces before main acknowledges them; main's lagging partial
+// broadcast then removes the not-yet-known rows and re-adds them as "new"
+// (groupId-less), silently unsetting groups on every multi-workspace restart.
+// This map lets the merge re-apply the correct group. Seeded from the restored
+// workspaceGroupMap and kept current by every group mutation.
+const rememberedGroupIds = new Map<string, string>()
+export function rememberWorkspaceGroup(rootPath: string | null | undefined, groupId: string | null | undefined): void {
+  if (!rootPath) return
+  if (groupId) rememberedGroupIds.set(rootPath, groupId)
+  else rememberedGroupIds.delete(rootPath)
+}
+export function seedRememberedGroups(map: Record<string, string> | undefined): void {
+  if (!map) return
+  for (const [rootPath, groupId] of Object.entries(map)) {
+    if (typeof rootPath === 'string' && typeof groupId === 'string') rememberedGroupIds.set(rootPath, groupId)
+  }
 }
 
 /** Persist group list to sidebar.json immediately after any group mutation that
@@ -1300,6 +1326,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   removeWorkspaceGroup(groupId) {
+    // Forget the remembered assignment for every member so the merge can't
+    // re-apply a now-deleted group.
+    for (const w of get().workspaces) {
+      if (w.groupId === groupId) rememberWorkspaceGroup(w.rootPath, undefined)
+    }
     set((state) => ({
       workspaceGroups: state.workspaceGroups.filter((g) => g.id !== groupId),
       workspaces: state.workspaces.map((w) =>
@@ -1330,6 +1361,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   moveWorkspaceToGroup(workspaceId, groupId) {
     const ws = get().workspaces.find((w) => w.id === workspaceId)
     if (!ws) return
+    rememberWorkspaceGroup(ws.rootPath, groupId ?? undefined)
     set((state) => ({
       workspaces: state.workspaces.map((w) =>
         w.id === workspaceId ? { ...w, groupId: groupId ?? undefined } : w,
@@ -1561,18 +1593,24 @@ export const useAppStore = create<AppStore>((set, get) => ({
             color: info.color,
             rootPath: info.rootPath,
             connection: info.connection ?? existing.connection,
+            // groupId is renderer-owned (main sends none) — keep the existing
+            // assignment, falling back to the remembered one by rootPath.
+            groupId: existing.groupId || rememberedGroupIds.get(info.rootPath),
             rootPathError: null,
             isRootPathPending: false,
           })
           }
         } else {
-          // New workspace from another window — create empty local state
+          // New workspace from another window — create empty local state. Re-apply
+          // any remembered group assignment for this rootPath so a partial main
+          // broadcast that churned this row during restore doesn't drop its group.
           existingMap.set(info.id, {
             id: info.id,
             name: info.name,
             color: info.color,
             rootPath: info.rootPath,
             connection: info.connection,
+            groupId: rememberedGroupIds.get(info.rootPath),
             rootPathError: null,
             isRootPathPending: false,
             panels: {},

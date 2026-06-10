@@ -5,7 +5,7 @@
 // positions, known zoom) and assertions against canvas-space state. Driving
 // the UI for setup is brittle; reaching into stores is reliable.
 
-import { useAppStore } from '../stores/appStore'
+import { useAppStore, awaitWorkspaceSync } from '../stores/appStore'
 import { useUIStore, type SidebarView } from '../stores/uiStore'
 import { getOrCreateCanvasStoreForPanel } from '../stores/canvasStore'
 import { useDragStore } from '../drag/store'
@@ -62,6 +62,11 @@ declare global {
       moveWorkspaceToGroup(workspaceId: string, groupId: string | null): void
       /** Force-save the full session to disk (bypasses autosave debounce). */
       flushSave(): Promise<void>
+      /** Await the serial workspace-sync queue so all pending workspace:create /
+       *  update IPCs have settled (mirrors the app's own awaitWorkspaceSync used
+       *  before rootPath-dependent IPC). Lets tests assign groups only after the
+       *  create round-trip lands, instead of racing it. */
+      awaitWorkspaceSync(): Promise<void>
       /** Resolve the PTY id backing a terminal node (null until the PTY spawns). */
       terminalPtyId(nodeId: string): string | null
       /** Write raw data to a terminal node's PTY (e.g. a flooding command). */
@@ -285,6 +290,8 @@ export function installE2EHarness(): void {
 
   const flushSave = (): Promise<void> => saveSession()
 
+  const awaitWorkspaceSyncFn = (): Promise<void> => awaitWorkspaceSync()
+
   window.__cateE2E = {
     ready: true,
     activeCanvasPanelId,
@@ -302,6 +309,7 @@ export function installE2EHarness(): void {
     addWorkspaceGroup,
     moveWorkspaceToGroup,
     flushSave,
+    awaitWorkspaceSync: awaitWorkspaceSyncFn,
     terminalPtyId,
     writeTerminal,
     setWorkspaceRoot,
