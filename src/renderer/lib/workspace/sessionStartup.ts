@@ -4,7 +4,7 @@
 // =============================================================================
 
 import log from '../logger'
-import { useAppStore } from '../../stores/appStore'
+import { useAppStore, seedRememberedGroups } from '../../stores/appStore'
 import { deferredSnapshots } from './deferredRestore'
 import { collectPanelIdsFromDockState } from './sessionSerialize'
 import { createDefaultDockState } from '../../stores/dockStore'
@@ -100,6 +100,19 @@ export async function restoreMultiWorkspaceSession(session: MultiWorkspaceSessio
   // Re-select the originally selected workspace (may be a no-op if already selected)
   if (selectedIdx < wsIds.length) {
     appStore.selectWorkspace(wsIds[selectedIdx])
+  }
+
+  // Restore workspace groups and per-workspace group assignments in one batch
+  if (session.groups || session.workspaceGroupMap) {
+    if (session.workspaceGroupMap) seedRememberedGroups(session.workspaceGroupMap)
+    useAppStore.setState((state) => ({
+      workspaceGroups: session.groups ?? state.workspaceGroups,
+      workspaces: state.workspaces.map((ws) => {
+        if (!ws.rootPath || !session.workspaceGroupMap) return ws
+        const groupId = session.workspaceGroupMap[ws.rootPath]
+        return groupId ? { ...ws, groupId } : ws
+      }),
+    }))
   }
 
   log.debug(`[session] core session restored in ${(performance.now() - tTotal).toFixed(1)}ms`)

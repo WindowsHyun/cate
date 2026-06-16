@@ -116,12 +116,14 @@ async function loadFromProjectFiles(): Promise<MultiWorkspaceSession | null> {
   // the active workspace. Falls back to recentProjects order / index 0 when no
   // arrangement is stored yet (first run after upgrade).
   const sidebarSession = await window.electronAPI.sidebarSessionGet().catch(() => null)
-  const { workspaces, selectedWorkspaceIndex } = applySidebarSession(snapshots, sidebarSession)
+  const { workspaces, selectedWorkspaceIndex, groups, workspaceGroupMap } = applySidebarSession(snapshots, sidebarSession)
 
   return {
     version: 2,
     selectedWorkspaceIndex,
     workspaces,
+    groups: groups.length > 0 ? groups : undefined,
+    workspaceGroupMap: Object.keys(workspaceGroupMap).length > 0 ? workspaceGroupMap : undefined,
     dockWindows: dockWindows.length > 0 ? dockWindows : undefined,
   }
 }
