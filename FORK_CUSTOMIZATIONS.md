@@ -165,6 +165,8 @@ Use this checklist every time you merge upstream changes:
 - [ ] Check `src/renderer/lib/workspace/sessionLoad.ts` — `groups`/`workspaceGroupMap` forwarded from `applySidebarSession` into returned object
 - [ ] Check `src/renderer/lib/workspace/sessionStartup.ts` — groups applied after workspace restore
 - [ ] Check `src/renderer/stores/shortcutStore.ts` — module-level `useSettingsStore` calls wrapped in `queueMicrotask()`
+- [ ] Check `src/main/workspaceStateStore.ts` — `MAX_RECENT_PROJECTS` is **50** (upstream default is 10; restoring 17 workspaces requires ≥17)
+- [ ] Check `src/renderer/stores/canvasStore.ts` — `useVisibleNodeIds` uses `primitiveSetEqual` (NOT `primitiveArrayEqual`); upstream may restore order-sensitive equality which causes webview reload on focus switch
 
 ### Testing
 - [ ] `CATE_SMOKE_TEST=1 ELECTRON_ENABLE_LOGGING=1 ./node_modules/.bin/electron .` — no errors, exits 0
@@ -195,6 +197,46 @@ The entire `companion` subsystem was renamed to `runtime`. If your fork has any 
 | App hangs on splash — `useSettingsStore` TDZ crash | `queueMicrotask()` wrap in `shortcutStore.ts` module-level calls | `29553a9` |
 | Workspace groups disappear on restart | Forward groups through `sessionLoad` → `sessionStartup` | `6567f04` |
 | `releaseAllProjectLocks` not defined | Added missing import in `main/index.ts` | `7df5d2e` |
+| Only 10 workspaces restored (groups assigned to missing workspaces lost) | `MAX_RECENT_PROJECTS` 10→50 in `workspaceStateStore.ts` | `8da6e84` |
+| Canvas browser panel scroll resets on focus switch | `useVisibleNodeIds` → `primitiveSetEqual` in `canvasStore.ts` | `(latest)` |
+
+---
+
+## userData & Session Data Notes
+
+### Dev build vs packaged app
+Dev build (`./node_modules/.bin/electron .`) uses **separate** userData path:
+- Dev: `~/Library/Application Support/Cate/Dev/`
+- Packaged DMG: `~/Library/Application Support/Cate/`
+
+Workspaces/groups appear empty in dev build — this is **intentional** (set in `src/main/index.ts` line ~552).
+
+### Manual data recovery
+If `sidebar.json` or `recent-projects.json` gets corrupted/cleared by running an old build:
+
+**`~/Library/Application Support/Cate/recent-projects.json`** format:
+```json
+{ "projects": ["/path/to/project1", "/path/to/project2", ...] }
+```
+
+**`~/Library/Application Support/Cate/sidebar.json`** format:
+```json
+{
+  "session": {
+    "order": ["/path/to/project1", ...],
+    "selected": "/path/to/selected",
+    "groups": [
+      { "id": "uuid", "name": "GroupName", "color": "cyan", "collapsed": false }
+    ],
+    "workspaceGroupMap": {
+      "/path/to/project": "group-uuid"
+    }
+  }
+}
+```
+Available colors: `cyan`, `purple`, `red`, `blue`, `green`, `yellow`, `orange`, `pink`
+
+**Important:** Always install + run the **new DMG** first. Never run an old DMG after upgrading — it will overwrite sidebar.json with empty groups on quit.
 
 ---
 
