@@ -123,8 +123,6 @@ function registerCriticalHandlers(): void {
   registerShellHandlers()
   registerMenuHandlers()
   registerWindowAndDialogHandlers()
-  registerDialogHandlers()
-  registerCaptureHandlers()
   registerWindowControlHandlers()
   registerPanelWindowHandlers()
   registerDockWindowHandlers({ createWindow })
