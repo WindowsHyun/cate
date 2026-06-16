@@ -14,7 +14,7 @@ import type { StoreApi } from 'zustand'
 import type { CanvasNodeId, CanvasNodeState } from '../../shared/types'
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_DEFAULT } from '../../shared/types'
 import { perfCount } from '../lib/perf/perfClient'
-import { primitiveArrayEqual } from './selectorUtils'
+import { primitiveArrayEqual, primitiveSetEqual } from './selectorUtils'
 
 import type { CanvasStore } from './canvas/storeTypes'
 import { createCanvasStoreCtx } from './canvas/storeCtx'
@@ -244,6 +244,6 @@ export function useVisibleNodeIds(store?: UseBoundStore<StoreApi<CanvasStore>>):
       }
       return result
     },
-    primitiveArrayEqual,
+    primitiveSetEqual,
   )
 }
