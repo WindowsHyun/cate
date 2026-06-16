@@ -21,9 +21,7 @@ import {
 import { registerHandlers as registerTerminalHandlers, flushAllLoggers, killAllTerminals } from './ipc/terminal'
 import { registerSqliteHandlers } from './sqlite'
 import { registerClaudeResumeHandlers } from './ipc/claudeResume'
-import { companions, forwardFileGrant, forwardClearFileGrantsForWindow, forwardClearScopedWriteAllowancesForWindow } from './companion/companionManager'
-import { registerCompanionHandlers } from './ipc/companion'
-import { runtimes } from './runtime/runtimeManager'
+import { runtimes, forwardFileGrant, forwardClearFileGrantsForWindow, forwardClearScopedWriteAllowancesForWindow } from './runtime/runtimeManager'
 import { registerRuntimeHandlers } from './ipc/runtime'
 import { registerHandlers as registerFilesystemHandlers, stopWatchersForWindow } from './ipc/filesystem'
 import { registerHandlers as registerGitHandlers } from './ipc/git'
@@ -140,7 +138,6 @@ function registerDeferredHandlers(): void {
   registerAuthHandlers(authManager)
   registerAgentHandlers(authManager, agentManager)
   registerSkillHandlers()
-  registerCompanionHandlers()
   registerRuntimeHandlers()
 }
 
@@ -1492,7 +1489,7 @@ app.on('will-quit', () => {
   killAllTerminals()
   // Tear down any remote/WSL companion connections (kills their daemons /
   // closes SSH). Fire-and-forget — quit must not block on a remote socket.
-  void companions.disposeAll()
+  void runtimes.disposeAll()
   // An update has been downloaded and is queued to install on quit. DO NOT
   // reallyExit — electron-updater's install-on-quit hook runs on the 'quit'
   // event (which fires AFTER will-quit), so reallyExit (libc exit()) would kill

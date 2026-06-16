@@ -30,7 +30,7 @@ import type { PanelPlacement } from '../../stores/appStore'
 import { ALL_ZONES, ZOOM_DEFAULT } from '../../../shared/types'
 import { useAppStore } from '../../stores/appStore'
 import { createCanvasOps } from '../canvas/canvasBridge'
-import { getOrCreateCanvasStoreForPanel, getCanvasStoreForPanel } from '../../stores/canvasStore'
+import { getOrCreateCanvasStoreForPanel, peekCanvasStoreForPanel } from '../../stores/canvasStore'
 import { getWorkspaceDockStore } from './dockRegistry'
 import { getActivePanelId } from '../activePanel'
 import { getLiveNodeDockLayout } from '../../panels/nodeDockRegistry'
@@ -269,7 +269,7 @@ export function getCanvasSnapshotForPanel(canvasPanelId: string): WorkspaceCanva
   // Zustand store persists in memory and holds the latest state. Read it
   // directly rather than falling back to the stale ws.canvases projection,
   // which is never updated in-memory after the initial restore.
-  const inMemoryStore = getCanvasStoreForPanel(canvasPanelId)
+  const inMemoryStore = peekCanvasStoreForPanel(canvasPanelId)
   if (inMemoryStore) {
     const s = inMemoryStore.getState()
     return {

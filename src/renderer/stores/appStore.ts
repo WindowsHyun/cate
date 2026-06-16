@@ -52,7 +52,7 @@ import {
 } from '../lib/workspace/canvasAccess'
 import { setActivePanel, clearActivePanelIfMatches } from '../lib/activePanel'
 import { recordRecentFile } from '../lib/fs/recentFiles'
-import { LOCAL_COMPANION_ID } from '../../main/companion/locator'
+import { LOCAL_RUNTIME_ID } from '../../main/runtime/locator'
 
 export type { CanvasOperations }
 export {
@@ -1662,10 +1662,10 @@ export function setupWorkspaceSync(): () => void {
   // (companionId); the connect/ensure/reinstall actions only seed/finalize the
   // phase around their IPC calls. All writes funnel through the one setter so
   // the canonical field can't be set two different ways.
-  const unsubscribeStatus = window.electronAPI.onCompanionStatus((evt) => {
+  const unsubscribeStatus = window.electronAPI.onRuntimeStatus((evt) => {
     const store = useAppStore.getState()
     // The LOCAL daemon is a singleton; its phase is global, not per-workspace.
-    if (evt.companionId === LOCAL_COMPANION_ID) {
+    if (evt.runtimeId === LOCAL_RUNTIME_ID) {
       store.setLocalCompanionPhase(evt.phase)
       return
     }

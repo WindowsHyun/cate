@@ -270,6 +270,11 @@ export const PANEL_TRANSFER = 'panel:transfer'
 export const PANEL_RECEIVE = 'panel:receive'       // main -> renderer
 export const PANEL_TRANSFER_ACK = 'panel:transferAck'
 
+// Panel window list — renderer requests the list of open panel windows.
+export const PANEL_WINDOWS_LIST = 'panel:windowsList'
+// Panel window PTY sync — renderer registers a panelId -> ptyId mapping.
+export const PANEL_WINDOW_SYNC_PTY = 'panel:windowSyncPty' // renderer -> main
+
 // Dock-back — re-integrate a transferred panel into the main window (shared by
 // dock windows via the title-bar double-click).
 export const PANEL_WINDOW_DOCK_BACK = 'panel:dockBack'  // renderer -> main
