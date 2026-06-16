@@ -3,6 +3,7 @@ bun.lock
 pnpm-lock.yaml
 dist/
 dist-runtime/
+dist-companion/
 .DS_Store
 *.tsbuildinfo
 .worktrees/
