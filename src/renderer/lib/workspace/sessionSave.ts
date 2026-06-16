@@ -236,7 +236,7 @@ export async function saveSession(): Promise<void> {
   // path) so a manual reorder and the active tab survive a restart. Triggered by
   // the same autosave that runs on reorder/select. recentProjects is left
   // recency-ordered for the Welcome page.
-  const sidebarSession = deriveSidebarSession(updatedState.workspaces, updatedState.selectedWorkspaceId)
+  const sidebarSession = deriveSidebarSession(updatedState.workspaces, updatedState.selectedWorkspaceId, updatedState.workspaceGroups)
   const sidebarSerialized = JSON.stringify(sidebarSession)
   if (sidebarSerialized !== lastSidebarSessionSerialized) {
     await window.electronAPI.sidebarSessionSet(sidebarSession)
