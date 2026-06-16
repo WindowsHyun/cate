@@ -16,6 +16,8 @@ import type { NativeContextMenuItem } from '../../shared/electron-api'
 import { portalRegistry } from '../lib/portalRegistry'
 import { isUrl, normalizeUrl } from './browserUrl'
 import { getBrowserPanelUrl, setBrowserPanelUrl, getBrowserPanelScroll, setBrowserPanelScroll } from './browserUrlCache'
+import { pageLoadErrorFrom } from './browserLoadError'
+import { Tooltip } from '../ui/Tooltip'
 
 // -----------------------------------------------------------------------------
 // Type declarations for Electron's <webview> element
@@ -145,6 +147,32 @@ export default function BrowserPanel({
   const [crashed, setCrashed] = useState(false)
   const [screenshot, setScreenshot] = useState<{ dataUrl: string; filePath: string } | null>(null)
   const screenshotTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // A dock tab stack renders only its active tab and REUSES this component
+  // instance when the slot switches between two browser panels (same type, no
+  // React key, so A and B reconcile as one instance). Our webview src + nav
+  // state are seeded once at mount, so a reused slot would keep showing the
+  // PREVIOUS browser's page — the "press +/split, then open the new tab and it
+  // renders the first one" bug. Re-seed every per-panel field the moment the
+  // slot switches panels. Done during render (React's "reset state when a prop
+  // changes" pattern) so the panelId-keyed <webview> below mounts straight to
+  // the new URL with no intermediate load of the old page. Editor/terminal
+  // panels stay correct the same way, via their own identity props/effects.
+  const [seededPanelId, setSeededPanelId] = useState(panelId)
+  if (seededPanelId !== panelId) {
+    setSeededPanelId(panelId)
+    setActiveProxy(proxyUrl)
+    setWebviewSrc(initialUrl)
+    setCurrentUrl(initialUrl)
+    setInputUrl(initialUrl)
+    currentUrlRef.current = initialUrl
+    setCanGoBack(false)
+    setCanGoForward(false)
+    setIsLoading(false)
+    setLoadError(null)
+    setCrashed(false)
+    setScreenshot(null)
+  }
 
   // -------------------------------------------------------------------------
   // Navigation helpers
@@ -479,9 +507,10 @@ export default function BrowserPanel({
     }
 
     const onDidFailLoad = (event: any) => {
-      // errorCode -3 is a cancelled load (e.g. navigating away mid-load), ignore it
-      if (event.errorCode === -3) return
-      const description = event.errorDescription || 'Failed to load page'
+      // Only main-frame failures are page errors; subframe failures (blocked
+      // trackers, dead embeds) and aborted loads must not hide a working page.
+      const description = pageLoadErrorFrom(event)
+      if (description === null) return
       setLoadError(description)
       setIsLoading(false)
     }
@@ -519,25 +548,12 @@ export default function BrowserPanel({
       }, 600)
     }
 
-    const onWillNavigate = (event: any) => {
-      try {
-        const { protocol } = new URL(event.url)
-        if (protocol !== 'http:' && protocol !== 'https:' && protocol !== 'file:') {
-          event.preventDefault()
-          console.warn('[BrowserPanel] Blocked navigation to non-http(s)/file URL:', event.url)
-        }
-      } catch {
-        event.preventDefault()
-      }
-    }
-
-    const onNewWindow = (event: any) => {
-      event.preventDefault()
-      const url = event.url ?? event.detail?.url
-      if (url) {
-        useAppStore.getState().createBrowser(workspaceId, url)
-      }
-    }
+    // Navigation/new-window enforcement lives in the main process on the guest
+    // webContents (will-navigate + setWindowOpenHandler in main/webSecurity.ts).
+    // The matching <webview> DOM events here never let preventDefault() take
+    // effect (and `new-window` was removed from the tag in Electron 22), so
+    // handling them in the renderer is dead code that would falsely imply the
+    // policy is enforced here.
 
     const onFoundInPage = (event: any) => {
       const result = event.result ?? event
@@ -598,8 +614,6 @@ export default function BrowserPanel({
     webview.addEventListener('did-fail-load', onDidFailLoad)
     webview.addEventListener('did-start-loading', onDidStartLoading)
     webview.addEventListener('did-stop-loading', onDidStopLoading)
-    webview.addEventListener('will-navigate', onWillNavigate)
-    webview.addEventListener('new-window', onNewWindow)
     webview.addEventListener('render-process-gone', onRenderProcessGone)
     webview.addEventListener('crashed', onCrashed)
     webview.addEventListener('found-in-page', onFoundInPage)
@@ -615,8 +629,6 @@ export default function BrowserPanel({
       webview.removeEventListener('did-fail-load', onDidFailLoad)
       webview.removeEventListener('did-start-loading', onDidStartLoading)
       webview.removeEventListener('did-stop-loading', onDidStopLoading)
-      webview.removeEventListener('will-navigate', onWillNavigate)
-      webview.removeEventListener('new-window', onNewWindow)
       webview.removeEventListener('render-process-gone', onRenderProcessGone)
       webview.removeEventListener('crashed', onCrashed)
       webview.removeEventListener('found-in-page', onFoundInPage)
@@ -655,31 +667,37 @@ export default function BrowserPanel({
       <div className="h-10 flex items-center gap-2 px-2 bg-surface-4 border-b border-subtle shrink-0">
         {/* Navigation pill */}
         <div className="flex items-center h-7 rounded-full border border-subtle bg-surface-5 overflow-hidden">
-          <button
-            onClick={handleGoBack}
-            disabled={!canGoBack}
-            className="w-7 h-7 flex items-center justify-center hover:bg-hover disabled:opacity-30 disabled:hover:bg-transparent text-primary transition-colors"
-            title="Back"
-          >
-            <ArrowLeft size={13} />
-          </button>
+          <Tooltip label="Back">
+            <button
+              onClick={handleGoBack}
+              disabled={!canGoBack}
+              className="w-7 h-7 flex items-center justify-center hover:bg-hover disabled:opacity-30 disabled:hover:bg-transparent text-primary transition-colors"
+              aria-label="Back"
+            >
+              <ArrowLeft size={13} />
+            </button>
+          </Tooltip>
           <div className="w-px h-3.5 bg-subtle" />
-          <button
-            onClick={handleGoForward}
-            disabled={!canGoForward}
-            className="w-7 h-7 flex items-center justify-center hover:bg-hover disabled:opacity-30 disabled:hover:bg-transparent text-primary transition-colors"
-            title="Forward"
-          >
-            <ArrowRight size={13} />
-          </button>
+          <Tooltip label="Forward">
+            <button
+              onClick={handleGoForward}
+              disabled={!canGoForward}
+              className="w-7 h-7 flex items-center justify-center hover:bg-hover disabled:opacity-30 disabled:hover:bg-transparent text-primary transition-colors"
+              aria-label="Forward"
+            >
+              <ArrowRight size={13} />
+            </button>
+          </Tooltip>
           <div className="w-px h-3.5 bg-subtle" />
-          <button
-            onClick={handleReload}
-            className="w-7 h-7 flex items-center justify-center hover:bg-hover text-primary transition-colors"
-            title="Reload"
-          >
-            <ArrowClockwise size={13} className={isLoading ? 'animate-spin' : ''} />
-          </button>
+          <Tooltip label="Reload">
+            <button
+              onClick={handleReload}
+              className="w-7 h-7 flex items-center justify-center hover:bg-hover text-primary transition-colors"
+              aria-label="Reload"
+            >
+              <ArrowClockwise size={13} className={isLoading ? 'animate-spin' : ''} />
+            </button>
+          </Tooltip>
         </div>
 
         {/* Localhost quick-access port buttons */}
@@ -712,66 +730,62 @@ export default function BrowserPanel({
         </div>
 
         {/* Proxy tool — left-click configures, right-click offers clear. */}
-        <button
-          onClick={openProxyDialog}
-          onContextMenu={handleProxyContextMenu}
-          className={`w-7 h-7 flex items-center justify-center rounded-full border transition-colors ${
-            activeProxy
-              ? 'border-agent bg-agent/15 text-agent hover:bg-agent/25'
-              : 'border-subtle bg-surface-5 hover:bg-hover text-primary'
-          }`}
-          title={activeProxy ? `Proxy: ${activeProxy}` : 'Configure proxy'}
-        >
-          <ShieldCheck size={13} weight={activeProxy ? 'fill' : 'regular'} />
-        </button>
+        <Tooltip label={activeProxy ? `Proxy: ${activeProxy}` : 'Configure proxy'}>
+          <button
+            onClick={openProxyDialog}
+            onContextMenu={handleProxyContextMenu}
+            className={`w-7 h-7 flex items-center justify-center rounded-full border transition-colors ${
+              activeProxy
+                ? 'border-agent bg-agent/15 text-agent hover:bg-agent/25'
+                : 'border-subtle bg-surface-5 hover:bg-hover text-primary'
+            }`}
+            aria-label={activeProxy ? `Proxy: ${activeProxy}` : 'Configure proxy'}
+          >
+            <ShieldCheck size={13} weight={activeProxy ? 'fill' : 'regular'} />
+          </button>
+        </Tooltip>
 
         {/* Screenshot tool */}
-        <button
-          onClick={handleScreenshot}
-          className="w-7 h-7 flex items-center justify-center rounded-full border border-subtle bg-surface-5 hover:bg-hover text-primary transition-colors"
-          title="Screenshot"
-        >
-          <Camera size={13} />
-        </button>
+        <Tooltip label="Screenshot">
+          <button
+            onClick={handleScreenshot}
+            className="w-7 h-7 flex items-center justify-center rounded-full border border-subtle bg-surface-5 hover:bg-hover text-primary transition-colors"
+            aria-label="Screenshot"
+          >
+            <Camera size={13} />
+          </button>
+        </Tooltip>
       </div>
 
       {/* Webview + overlays container */}
       <div className="flex-1 relative">
         {/* Error state overlay */}
         {loadError && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-surface-4 text-secondary p-4 text-center z-10">
-            <Globe size={32} className="mb-2 text-muted" />
-            <p className="text-sm font-medium mb-1">Failed to load page</p>
-            <p className="text-xs text-muted">{loadError}</p>
-            <button
-              onClick={handleReload}
-              className="mt-3 px-3 py-1 text-xs rounded bg-surface-6 hover:bg-hover text-primary"
-            >
-              Try Again
-            </button>
-          </div>
+          <WebviewErrorOverlay
+            title="Failed to load page"
+            description={loadError}
+            buttonLabel="Try Again"
+            onRetry={handleReload}
+          />
         )}
 
         {/* Crash state overlay — guest renderer process died (OOM/GPU/native). */}
         {crashed && !loadError && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-surface-4 text-secondary p-4 text-center z-10">
-            <Globe size={32} className="mb-2 text-muted" />
-            <p className="text-sm font-medium mb-1">This page crashed</p>
-            <p className="text-xs text-muted">The browser process for this panel stopped unexpectedly.</p>
-            <button
-              onClick={handleReload}
-              className="mt-3 px-3 py-1 text-xs rounded bg-surface-6 hover:bg-hover text-primary"
-            >
-              Reload Page
-            </button>
-          </div>
+          <WebviewErrorOverlay
+            title="This page crashed"
+            description="The browser process for this panel stopped unexpectedly."
+            buttonLabel="Reload Page"
+            onRetry={handleReload}
+          />
         )}
 
-        {/* Webview — keyed by partition so a proxy change cleanly remounts it,
-            and only rendered once the proxy session is configured. */}
+        {/* Webview — keyed by panelId + partition so a proxy change OR this slot
+            being reused for a different browser panel cleanly remounts it with a
+            fresh webContents (no inherited page or history). Only rendered once
+            the proxy session is configured. */}
         {proxyReady && (
           <webview
-            key={partition}
+            key={`${panelId}:${partition}`}
             ref={webviewRef as any}
             src={webviewSrc}
             className={`w-full h-full ${loadError || crashed ? 'hidden' : ''}`}
@@ -859,6 +873,37 @@ export default function BrowserPanel({
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// -----------------------------------------------------------------------------
+// Webview error/crash overlay
+// -----------------------------------------------------------------------------
+
+/** Full-bleed overlay shown when the webview fails to load or its process crashes. */
+function WebviewErrorOverlay({
+  title,
+  description,
+  buttonLabel,
+  onRetry,
+}: {
+  title: string
+  description: React.ReactNode
+  buttonLabel: string
+  onRetry: () => void
+}) {
+  return (
+    <div className="absolute inset-0 flex flex-col items-center justify-center bg-surface-4 text-secondary p-4 text-center z-10">
+      <Globe size={32} className="mb-2 text-muted" />
+      <p className="text-sm font-medium mb-1">{title}</p>
+      <p className="text-xs text-muted">{description}</p>
+      <button
+        onClick={onRetry}
+        className="mt-3 px-3 py-1 text-xs rounded bg-surface-6 hover:bg-hover text-primary"
+      >
+        {buttonLabel}
+      </button>
     </div>
   )
 }

@@ -14,6 +14,7 @@ import type { StoreApi } from 'zustand'
 import type { CanvasNodeId, CanvasNodeState } from '../../shared/types'
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_DEFAULT } from '../../shared/types'
 import { perfCount } from '../lib/perf/perfClient'
+import { primitiveArrayEqual } from './selectorUtils'
 
 import type { CanvasStore } from './canvas/storeTypes'
 import { createCanvasStoreCtx } from './canvas/storeCtx'
@@ -135,7 +136,10 @@ export function getOrCreateCanvasStoreForPanel(
   return store
 }
 
-export function getCanvasStoreForPanel(panelId: string): UseBoundStore<StoreApi<CanvasStore>> | undefined {
+/** Return the existing canvas store for a panel WITHOUT creating one. */
+export function peekCanvasStoreForPanel(
+  panelId: string,
+): UseBoundStore<StoreApi<CanvasStore>> | undefined {
   return canvasBoundStoresByPanelId.get(panelId)
 }
 
@@ -167,13 +171,7 @@ export function useNodeIds(store?: UseBoundStore<StoreApi<CanvasStore>>): string
     (s) => Object.values(s.nodes)
       .sort((a, b) => a.zOrder - b.zOrder)
       .map(n => n.id),
-    (a, b) => {
-      if (a.length !== b.length) return false
-      for (let i = 0; i < a.length; i++) {
-        if (a[i] !== b[i]) return false
-      }
-      return true
-    },
+    primitiveArrayEqual,
   )
 }
 
@@ -246,14 +244,6 @@ export function useVisibleNodeIds(store?: UseBoundStore<StoreApi<CanvasStore>>):
       }
       return result
     },
-    // Set-equality: only trigger re-render when the visible SET changes, not when
-    // the order changes. zOrder only drives CSS zIndex — DOM order doesn't matter
-    // for visual stacking, but moving a <webview> in the DOM causes Electron to
-    // reload the page and lose scroll state.
-    (a, b) => {
-      if (a.length !== b.length) return false
-      const setA = new Set(a)
-      return b.every((id) => setA.has(id))
-    },
+    primitiveArrayEqual,
   )
 }

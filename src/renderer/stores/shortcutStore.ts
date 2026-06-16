@@ -5,21 +5,8 @@
 
 import { create } from 'zustand'
 import type { ShortcutAction, StoredShortcut } from '../../shared/types'
-import { DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS } from '../../shared/types'
-
-function persistCustomShortcuts(shortcuts: Record<ShortcutAction, StoredShortcut>): void {
-  if (typeof window === 'undefined' || !window.electronAPI) return
-  const custom: Partial<Record<ShortcutAction, StoredShortcut>> = {}
-  for (const action of SHORTCUT_ACTIONS) {
-    const s = shortcuts[action]
-    const d = DEFAULT_SHORTCUTS[action]
-    if (s.key !== d.key || s.command !== d.command || s.shift !== d.shift ||
-        s.option !== d.option || s.control !== d.control) {
-      custom[action] = s
-    }
-  }
-  window.electronAPI.settingsSet('customShortcuts', custom).catch(() => {})
-}
+import { DEFAULT_SHORTCUTS, SHORTCUT_ACTIONS, storedShortcut } from '../../shared/types'
+import { useSettingsStore } from './settingsStore'
 
 // -----------------------------------------------------------------------------
 // Modifier state
@@ -42,6 +29,8 @@ interface ShortcutStoreState {
 
 interface ShortcutStoreActions {
   setShortcut: (action: ShortcutAction, shortcut: StoredShortcut) => void
+  /** Disable a shortcut: an empty-key binding never matches any keystroke. */
+  clearShortcut: (action: ShortcutAction) => void
   resetShortcut: (action: ShortcutAction) => void
   resetAll: () => void
   matchEvent: (e: KeyboardEvent) => ShortcutAction | null
@@ -84,6 +73,42 @@ function normaliseKey(e: KeyboardEvent): string {
   }
 }
 
+/** True when two bindings are the same chord. */
+function sameShortcut(a: StoredShortcut, b: StoredShortcut): boolean {
+  return (
+    a.key === b.key &&
+    a.command === b.command &&
+    a.shift === b.shift &&
+    a.option === b.option &&
+    a.control === b.control
+  )
+}
+
+/** Coerce a hand-edited settings.json value into a StoredShortcut, or null. */
+function sanitizeShortcut(value: unknown): StoredShortcut | null {
+  if (typeof value !== 'object' || value === null) return null
+  const v = value as Record<string, unknown>
+  if (typeof v.key !== 'string') return null
+  return storedShortcut(v.key, {
+    command: v.command === true,
+    shift: v.shift === true,
+    option: v.option === true,
+    control: v.control === true,
+  })
+}
+
+/** Persist the current bindings into settings.json as a diff vs the defaults,
+ *  so customizations (including disabled shortcuts) survive a restart. */
+function persistOverrides(shortcuts: Record<ShortcutAction, StoredShortcut>): void {
+  const overrides: Partial<Record<ShortcutAction, StoredShortcut>> = {}
+  for (const action of SHORTCUT_ACTIONS) {
+    if (!sameShortcut(shortcuts[action], DEFAULT_SHORTCUTS[action])) {
+      overrides[action] = shortcuts[action]
+    }
+  }
+  useSettingsStore.getState().setSetting('customShortcuts', overrides)
+}
+
 // -----------------------------------------------------------------------------
 // Store
 // -----------------------------------------------------------------------------
@@ -95,30 +120,26 @@ export const useShortcutStore = create<ShortcutStore>((set, get) => ({
   // --- Actions ---
 
   setShortcut(action, shortcut) {
-    set((state) => {
-      const next = { ...state.shortcuts, [action]: shortcut }
-      persistCustomShortcuts(next)
-      return { shortcuts: next }
-    })
+    const shortcuts = { ...get().shortcuts, [action]: shortcut }
+    set({ shortcuts })
+    persistOverrides(shortcuts)
+  },
+
+  clearShortcut(action) {
+    const shortcuts = { ...get().shortcuts, [action]: storedShortcut('') }
+    set({ shortcuts })
+    persistOverrides(shortcuts)
   },
 
   resetShortcut(action) {
-    set((state) => {
-      const next = { ...state.shortcuts, [action]: DEFAULT_SHORTCUTS[action] }
-      persistCustomShortcuts(next)
-      return { shortcuts: next }
-    })
-  },
-
-  applyCustomShortcuts(custom) {
-    if (!custom || Object.keys(custom).length === 0) return
-    set((state) => ({
-      shortcuts: { ...state.shortcuts, ...custom },
-    }))
+    const shortcuts = { ...get().shortcuts, [action]: DEFAULT_SHORTCUTS[action] }
+    set({ shortcuts })
+    persistOverrides(shortcuts)
   },
 
   resetAll() {
     set({ shortcuts: { ...DEFAULT_SHORTCUTS } })
+    persistOverrides({ ...DEFAULT_SHORTCUTS })
   },
 
   matchEvent(e: KeyboardEvent): ShortcutAction | null {
@@ -133,6 +154,8 @@ export const useShortcutStore = create<ShortcutStore>((set, get) => ({
 
     for (const action of SHORTCUT_ACTIONS) {
       const stored = shortcuts[action]
+      // An empty key means the user disabled this shortcut.
+      if (!stored.key) continue
       if (
         stored.key === eventKey &&
         stored.command === eventMods.command &&
@@ -147,3 +170,33 @@ export const useShortcutStore = create<ShortcutStore>((set, get) => ({
     return null
   },
 }))
+
+// -----------------------------------------------------------------------------
+// Hydration from settings.json
+//
+// The settings store loads asynchronously (and reloads on external hand-edits
+// of settings.json), so apply `customShortcuts` whenever it changes. Hydration
+// writes the store state directly — never through the actions — so it can't
+// echo back into persistOverrides.
+// -----------------------------------------------------------------------------
+
+let lastAppliedOverrides: string | null = null
+
+function applyOverrides(raw: unknown): void {
+  const json = JSON.stringify(raw ?? {})
+  if (json === lastAppliedOverrides) return
+  lastAppliedOverrides = json
+
+  const shortcuts: Record<ShortcutAction, StoredShortcut> = { ...DEFAULT_SHORTCUTS }
+  if (typeof raw === 'object' && raw !== null) {
+    for (const action of SHORTCUT_ACTIONS) {
+      if (!(action in raw)) continue
+      const parsed = sanitizeShortcut((raw as Record<string, unknown>)[action])
+      if (parsed) shortcuts[action] = parsed
+    }
+  }
+  useShortcutStore.setState({ shortcuts })
+}
+
+applyOverrides(useSettingsStore.getState().customShortcuts)
+useSettingsStore.subscribe((state) => applyOverrides(state.customShortcuts))

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Plus, X, ArrowCounterClockwise } from '@phosphor-icons/react'
 import { useSettingsStore } from '../stores/settingsStore'
 import { DEFAULT_SETTINGS } from '../../shared/types'
-import { SearchableBlock, SettingRow } from './SettingsComponents'
+import { SearchableBlock, SettingRow, SecondaryButton } from './SettingsComponents'
 import { useTranslation } from '../hooks/useTranslation'
 
 function sameAsDefault(list: string[]): boolean {
@@ -73,11 +73,10 @@ export function FileExplorerSettings() {
       </p>
 
       <div className="flex gap-1.5">
-        <input
-          type="text"
+        <TextInput
           value={draft}
-          onChange={(e) => {
-            setDraft(e.target.value)
+          onChange={(value) => {
+            setDraft(value)
             if (error) setError(null)
           }}
           onKeyDown={(e) => {
@@ -122,14 +121,10 @@ export function FileExplorerSettings() {
       </div>
 
       <div className="mt-4 pt-3 border-t border-subtle flex justify-end">
-        <button
-          onClick={restore}
-          disabled={sameAsDefault(folders)}
-          className="flex items-center gap-1.5 px-2 py-1 text-[11px] rounded text-secondary hover:text-primary bg-surface-2 hover:bg-hover border border-subtle disabled:opacity-40 disabled:cursor-default disabled:hover:bg-surface-2 disabled:hover:text-secondary"
-        >
+        <SecondaryButton onClick={restore} disabled={sameAsDefault(folders)}>
           <ArrowCounterClockwise size={11} />
           {t('fileExplorer.restoreDefaults')}
-        </button>
+        </SecondaryButton>
       </div>
     </div>
     </SearchableBlock>

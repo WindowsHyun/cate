@@ -17,6 +17,7 @@
 
 import fsSync from 'fs'
 import log from './logger'
+import { isPlainObject } from './jsonUtils'
 import { DEFAULT_SETTINGS } from '../shared/types'
 import type { AppSettings } from '../shared/types'
 import { createJsonStateFile } from './jsonStateFile'
@@ -37,6 +38,7 @@ const SETTINGS_SCHEMA: Record<keyof AppSettings, string> = {
   systemDarkThemeId: 'string',
   customThemes: 'array',
   editorFontSize: 'number',
+  editorFontFamily: 'string',
   uiScale: 'number',
   showMinimap: 'boolean',
   defaultPanelWidth: 'number',
@@ -70,6 +72,7 @@ const SETTINGS_SCHEMA: Record<keyof AppSettings, string> = {
   crashReportingEnabled: 'boolean',
   usageAnalyticsEnabled: 'boolean',
   telemetryConsentDecided: 'boolean',
+  telemetryNoticeAcknowledgedVersion: 'number',
   onboardingCompleted: 'boolean',
   betaUpdatesEnabled: 'boolean',
   // Agent / layout — structured values. 'object' accepts a plain object or null;
@@ -109,8 +112,8 @@ function mergeValidatedSettings(target: AppSettings, source: Record<string, unkn
  *  AppSettings. Never throws (a malformed hand-edit degrades to defaults). */
 function normalizeSettings(parsed: unknown, defaults: AppSettings): AppSettings {
   const next: AppSettings = { ...defaults }
-  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-    mergeValidatedSettings(next, parsed as Record<string, unknown>)
+  if (isPlainObject(parsed)) {
+    mergeValidatedSettings(next, parsed)
   }
   return next
 }

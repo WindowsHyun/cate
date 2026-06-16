@@ -6,7 +6,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react'
 import { FloppyDisk, Trash, FolderOpen, SquaresFour } from '@phosphor-icons/react'
-import { BACKDROP, CARD_SURFACE } from '../ui/Modal'
+import { PaletteDialogShell } from '../ui/Modal'
 import { useUIStore } from '../stores/uiStore'
 import { useCanvasStoreApi } from '../stores/CanvasStoreContext'
 import {
@@ -16,6 +16,8 @@ import {
   loadLayoutIntoActiveCanvas,
 } from '../lib/layouts'
 import log from '../lib/logger'
+import { useEscapeKey } from '../lib/hooks/useEscapeKey'
+import { Tooltip } from '../ui/Tooltip'
 
 export function SavedLayoutsDialog() {
   const show = useUIStore((s) => s.showLayoutsDialog)
@@ -94,27 +96,15 @@ export function SavedLayoutsDialog() {
     }
   }, [selected])
 
-  // Escape to close
-  useEffect(() => {
-    if (!show) return
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); close() }
-    }
-    document.addEventListener('keydown', handler, { capture: true })
-    return () => document.removeEventListener('keydown', handler, { capture: true })
-  }, [show, close])
+  useEscapeKey(show, close)
 
   if (!show) return null
 
   return (
-    <div
-      className={`fixed inset-0 flex justify-center z-50 ${BACKDROP}`}
-      onClick={close}
+    <PaletteDialogShell
+      onClose={close}
+      cardClassName="w-[600px] max-w-[600px] max-h-[440px] mt-[120px] overflow-hidden flex flex-col self-start"
     >
-      <div
-        className={`w-[600px] max-w-[600px] max-h-[440px] mt-[120px] overflow-hidden flex flex-col self-start ${CARD_SURFACE}`}
-        onClick={(e) => e.stopPropagation()}
-      >
         {/* Save input — mirrors the palette's search-bar treatment */}
         <div className="p-2 shrink-0">
           <div className="flex items-center gap-2 px-2.5 h-8 rounded-md bg-surface-0/60 border border-strong focus-within:border-[rgba(255,255,255,0.18)] transition-colors">
@@ -185,14 +175,16 @@ export function SavedLayoutsDialog() {
                         <FolderOpen size={12} />
                         Load
                       </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleDelete(name) }}
-                        disabled={busy}
-                        className="p-1.5 rounded-md text-muted hover:text-red-400 hover:bg-red-600/10"
-                        title="Delete"
-                      >
-                        <Trash size={12} />
-                      </button>
+                      <Tooltip label="Delete">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDelete(name) }}
+                          disabled={busy}
+                          className="p-1.5 rounded-md text-muted hover:text-red-400 hover:bg-red-600/10"
+                          aria-label="Delete"
+                        >
+                          <Trash size={12} />
+                        </button>
+                      </Tooltip>
                     </div>
                   </div>
                 )
@@ -200,7 +192,6 @@ export function SavedLayoutsDialog() {
             </>
           )}
         </div>
-      </div>
-    </div>
+    </PaletteDialogShell>
   )
 }

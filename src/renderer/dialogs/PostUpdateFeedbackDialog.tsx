@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { Star, GithubLogo, Envelope, ArrowSquareOut } from '@phosphor-icons/react'
 import heroImg from '../assets/dialog-hero.jpg'
+import { useEscapeKey } from '../lib/hooks/useEscapeKey'
+import { useSettingsStore } from '../stores/settingsStore'
+import { TELEMETRY_NOTICE_VERSION } from '../../shared/types'
 
 type Payload = { fromVersion: string; toVersion: string }
 
@@ -23,6 +26,15 @@ export function PostUpdateFeedbackDialog() {
   const [sending, setSending] = useState(false)
   const [resultMessage, setResultMessage] = useState<string | null>(null)
   const [starCount, setStarCount] = useState<number | null>(null)
+
+  // Gate on the telemetry notice (WelcomeDialog) the same way the onboarding
+  // tour does: the notice goes first. Until it's acknowledged this dialog stays
+  // fully dormant — not rendered, and no GitHub fetch — so on an update it never
+  // mounts behind the opaque notice. The pending prompt is held in main and
+  // re-pulled, so it surfaces here the moment the notice is dismissed.
+  const loaded = useSettingsStore((s) => s._loaded)
+  const noticeAcknowledgedVersion = useSettingsStore((s) => s.telemetryNoticeAcknowledgedVersion)
+  const noticeReady = loaded && noticeAcknowledgedVersion >= TELEMETRY_NOTICE_VERSION
 
   const isFirstInstall = payload?.fromVersion === ''
 
@@ -53,14 +65,14 @@ export function PostUpdateFeedbackDialog() {
   }, [])
 
   useEffect(() => {
-    if (!payload) return
+    if (!payload || !noticeReady) return
     fetch(GITHUB_API, { headers: { Accept: 'application/vnd.github.v3+json' } })
       .then((r) => r.json())
       .then((data) => {
         if (typeof data.stargazers_count === 'number') setStarCount(data.stargazers_count)
       })
       .catch(() => {})
-  }, [payload])
+  }, [payload, noticeReady])
 
   const close = useCallback(() => {
     window.electronAPI.dismissFeedback('close')
@@ -87,16 +99,9 @@ export function PostUpdateFeedbackDialog() {
     }
   }, [rating, comment, sending])
 
-  useEffect(() => {
-    if (!payload) return
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); close() }
-    }
-    document.addEventListener('keydown', handler, { capture: true })
-    return () => document.removeEventListener('keydown', handler, { capture: true })
-  }, [payload, close])
+  useEscapeKey(payload !== null && noticeReady, close)
 
-  if (!payload) return null
+  if (!payload || !noticeReady) return null
 
   const displayRating = hover || rating
 

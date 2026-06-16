@@ -9,23 +9,33 @@ import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
 import log from './logger'
-import { writeJsonAtomicSync } from './writeJsonAtomic'
+import { writeJsonAtomicSync, writeTextAtomicSync } from './writeJsonAtomic'
+import { quarantineCorruptFile } from './quarantineCorruptFile'
 
 function fullPath(filename: string): string {
   return path.join(app.getPath('userData'), filename)
 }
 
-/** Read and JSON.parse a file under userData/. Returns the fallback on any failure. */
+/** Read and JSON.parse a file under userData/. Returns the fallback on any
+ *  failure; an unparseable file is quarantined (copied aside as
+ *  `<file>.corrupt-<ts>`) first so the broken content stays recoverable. */
 export function readJsonFile<T>(filename: string, fallback: T): T {
   const p = fullPath(filename)
+  let raw: string
   try {
     if (!fs.existsSync(p)) return fallback
-    const raw = fs.readFileSync(p, 'utf-8')
+    raw = fs.readFileSync(p, 'utf-8')
+  } catch (err) {
+    log.warn('[jsonFileStore] read %s failed: %s', filename, err instanceof Error ? err.message : String(err))
+    return fallback
+  }
+  try {
     const parsed = JSON.parse(raw)
     if (parsed && typeof parsed === 'object') return parsed as T
     return fallback
-  } catch (err) {
-    log.warn('[jsonFileStore] read %s failed: %s', filename, err instanceof Error ? err.message : String(err))
+  } catch {
+    const backup = quarantineCorruptFile(p)
+    log.warn('[jsonFileStore] %s is corrupt%s; using fallback', filename, backup ? `, backed up to ${backup}` : '')
     return fallback
   }
 }
@@ -53,15 +63,10 @@ export function readTextFile(filename: string): string | null {
 
 /** Atomically write raw text to a file under userData/. */
 export function writeTextFile(filename: string, text: string): void {
-  const p = fullPath(filename)
-  const tmp = p + '.tmp'
   try {
-    fs.mkdirSync(path.dirname(p), { recursive: true })
-    fs.writeFileSync(tmp, text, 'utf-8')
-    fs.renameSync(tmp, p)
+    writeTextAtomicSync(fullPath(filename), text)
   } catch (err) {
     log.warn('[jsonFileStore] writeText %s failed: %s', filename, err instanceof Error ? err.message : String(err))
-    try { fs.unlinkSync(tmp) } catch { /* noop */ }
   }
 }
 

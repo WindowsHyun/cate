@@ -17,9 +17,10 @@
 // exported so even hand-rolled overlays match without a component per element.
 // =============================================================================
 
-import { useEffect, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, type CSSProperties, type HTMLAttributes, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from '@phosphor-icons/react'
+import { Tooltip } from './Tooltip'
 
 /** Dimmed, blurred backdrop shared by every full-screen modal. */
 export const BACKDROP = 'bg-black/50 backdrop-blur-sm'
@@ -56,6 +57,39 @@ export const SEGMENT = {
     `px-3 h-7 rounded text-[12px] font-medium transition-colors ${
       active ? 'bg-surface-5 text-primary shadow-sm' : 'text-muted hover:text-secondary'
     }`,
+}
+
+interface PaletteDialogShellProps {
+  /** Dismiss when the backdrop (outside the card) is clicked. */
+  onClose: () => void
+  /** Classes on the inner card (sizing/positioning). CARD_SURFACE is applied. */
+  cardClassName: string
+  /** Extra props forwarded to the inner card (e.g. data-onboarding). */
+  cardProps?: HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string>
+  children: ReactNode
+}
+
+/** Top-anchored palette shell: full-screen dimmed backdrop that closes on an
+ *  outside click, wrapping a centered card that stops propagation so clicks
+ *  inside don't dismiss. Shared by the Cmd+K palette and palette-style dialogs;
+ *  Escape handling stays with each caller. */
+export function PaletteDialogShell({
+  onClose,
+  cardClassName,
+  cardProps,
+  children,
+}: PaletteDialogShellProps) {
+  return (
+    <div className={`fixed inset-0 flex justify-center z-50 ${BACKDROP}`} onClick={onClose}>
+      <div
+        {...cardProps}
+        className={`${cardClassName} ${CARD_SURFACE}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {children}
+      </div>
+    </div>
+  )
 }
 
 interface ModalCardProps {
@@ -97,14 +131,16 @@ export function ModalCard({
           <span className="flex-1 text-[15px] font-semibold text-primary truncate">{title}</span>
           {headerActions}
           {close && onClose && (
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex items-center justify-center w-6 h-6 -mr-1 rounded-md text-secondary hover:text-primary hover:bg-hover transition-colors"
-              title="Close (Esc)"
-            >
-              <X size={14} />
-            </button>
+            <Tooltip label="Close (Esc)">
+              <button
+                type="button"
+                onClick={onClose}
+                className="flex items-center justify-center w-6 h-6 -mr-1 rounded-md text-secondary hover:text-primary hover:bg-hover transition-colors"
+                aria-label="Close"
+              >
+                <X size={14} />
+              </button>
+            </Tooltip>
           )}
         </div>
       )}

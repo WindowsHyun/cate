@@ -5,7 +5,7 @@ import { btn, inputCls, SEGMENT } from './Modal'
 
 // In-panel connect form (no modal) for a remote SSH server or a WSL distro.
 // Presentational: it builds a RemoteConnectSpec and hands it to `onSubmit`;
-// the store action does the actual companionConnect + workspace wiring.
+// the store action does the actual runtimeConnect + workspace wiring.
 //
 // SSH input is built around one "Connection" string (user@host:port) rather
 // than a grid of boxes — paste a target or an `ssh …` command and it splits
@@ -132,7 +132,7 @@ export function RemoteConnect({
   useEffect(() => {
     let alive = true
     window.electronAPI
-      .companionWslDistros()
+      .runtimeWslDistros()
       .then((list) => {
         if (!alive) return
         setDistros(list)
@@ -140,7 +140,7 @@ export function RemoteConnect({
       })
       .catch(() => alive && setDistros([]))
     window.electronAPI
-      .companionSshHosts()
+      .runtimeSshHosts()
       .then((hosts) => alive && setSshHosts(hosts))
       .catch(() => alive && setSshHosts([]))
     return () => {
@@ -248,12 +248,25 @@ export function RemoteConnect({
                 <input type="checkbox" checked={useAgent} onChange={(e) => setUseAgent(e.target.checked)} className="accent-focus-blue" />
                 Use SSH agent
               </label>
-              <input
-                className={inputCls}
-                value={keyPath}
-                onChange={(e) => setKeyPath(e.target.value)}
-                placeholder="Private key path"
-              />
+              <div className="flex items-center gap-2">
+                <input
+                  className={`${inputCls} flex-1 min-w-0`}
+                  value={keyPath}
+                  onChange={(e) => setKeyPath(e.target.value)}
+                  placeholder="Private key path"
+                />
+                <button
+                  type="button"
+                  className={btn.ghost}
+                  onClick={() => {
+                    void window.electronAPI.runtimePickSshKey().then((p) => {
+                      if (p) setKeyPath(p)
+                    })
+                  }}
+                >
+                  Browse…
+                </button>
+              </div>
               <input
                 className={inputCls}
                 type="password"

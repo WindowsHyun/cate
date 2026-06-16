@@ -1,12 +1,17 @@
 // =============================================================================
 // Analytics — anonymous product telemetry posted to cero-analytics'
-// /api/app-events endpoint. Gated by a first-run consent decision
-// (`telemetryConsentDecided`) AND the `usageAnalyticsEnabled` toggle — nothing
-// is sent until the user has explicitly chosen (see isEnabled()).
+// /api/app-events endpoint. Events send only from packaged builds — telemetry
+// is always on there; dev/E2E builds never send (see isEnabled()).
 //
 // What we send:
 //   - app_start                : version, platform, arch, locale, electron version
 //   - app_install              : first launch of this install
+//   - app_install_backfill     : one-time census of a pre-existing install that
+//                                ran an earlier (opt-in) build but never sent
+//                                telemetry. Carries from_version (last seen) so
+//                                the backend can count it as a recovered install
+//                                without inflating "new installs". See
+//                                decideCensusAction.
 //   - app_updated              : from_version → to_version (detected via lastSeenVersion)
 //   - update_download_clicked  : user clicked "Download" on the update button
 //   - update_install_clicked   : user clicked "Restart" to install
@@ -26,8 +31,8 @@
 
 import { app, BrowserWindow, ipcMain, net, shell } from 'electron'
 import log from './logger'
-import { getSettingSync } from './store'
 import { getCommonContext } from './appContext'
+import { installIdPreexisted } from './installId'
 import { readJsonFile, writeJsonFile, readTextFile, writeTextFile, appendLine, removeFile } from './jsonFileStore'
 import { ANALYTICS_FEEDBACK_PROMPT, ANALYTICS_FEEDBACK_SUBMIT, ANALYTICS_FEEDBACK_DISMISS, ANALYTICS_FEEDBACK_GET_PENDING, ANALYTICS_LINK_CLICK, ANALYTICS_TRACK_USAGE, OPEN_EXTERNAL_URL } from '../shared/ipc-channels'
 
@@ -52,6 +57,9 @@ export interface AnalyticsState {
   pendingFeedbackForVersion?: string
   /** Track previous version so the feedback event can include both. */
   pendingFeedbackFromVersion?: string
+  /** Set once the one-time install census (app_install_backfill) has been
+   *  emitted for a previously-silent install, so it never re-fires. */
+  censusSent?: boolean
 }
 
 function readState(): AnalyticsState {
@@ -201,7 +209,7 @@ async function flushPending(): Promise<void> {
 
 async function sendEvent(name: string, props?: Record<string, unknown>): Promise<boolean> {
   if (!isEnabled()) {
-    log.info('[analytics] %s skipped (usageAnalyticsEnabled=false)', name)
+    log.info('[analytics] %s skipped (unpackaged build)', name)
     return false
   }
   const payload = buildPayload(name, props)
@@ -302,7 +310,7 @@ export function initAnalytics(): void {
 
   // Anonymous feature-usage signal. The renderer reports a short feature key
   // (+ optional small primitive props); we clamp it hard so no free-form text
-  // / file paths / project data can ride along. Gated by consent via sendEvent.
+  // / file paths / project data can ride along. Gated by isEnabled via sendEvent.
   ipcMain.on(ANALYTICS_TRACK_USAGE, (_e, raw: unknown) => {
     const payload = (raw ?? {}) as { feature?: unknown; props?: unknown }
     if (typeof payload.feature !== 'string' || !payload.feature) return
@@ -341,6 +349,34 @@ export type UpdateAction =
       nextState: AnalyticsState
       prompt?: { from: string; to: string }
     }
+
+// ---------------------------------------------------------------------------
+// Install census — one-time backfill of installs that existed under an earlier
+// opt-in build but never sent telemetry. Such an install has a recorded
+// `lastSeenVersion` (checkAndReportUpdate wrote it even when sends were gated
+// off) yet no install-id file (the id is written only inside the send path).
+// We emit a single `app_install_backfill` so the backend can count it as a
+// recovered install. Genuinely-new installs have no lastSeenVersion; installs
+// that already sent telemetry had their install-id file pre-exist — neither
+// qualifies, so this can't double-count. Pure for unit testing.
+// ---------------------------------------------------------------------------
+
+export type CensusAction =
+  | { kind: 'none' }
+  | { kind: 'backfill'; fromVersion: string; nextState: AnalyticsState }
+
+export function decideCensusAction(state: AnalyticsState, installIdPreexistedFlag: boolean): CensusAction {
+  if (state.censusSent) return { kind: 'none' }
+  // Already counted: a pre-existing install-id means telemetry was sent before.
+  if (installIdPreexistedFlag) return { kind: 'none' }
+  // Brand-new install: nothing to backfill (a normal app_install covers it).
+  if (!state.lastSeenVersion) return { kind: 'none' }
+  return {
+    kind: 'backfill',
+    fromVersion: state.lastSeenVersion,
+    nextState: { ...state, censusSent: true },
+  }
+}
 
 function isMajorOrMinorBump(from: string, to: string): boolean {
   const pa = from.replace(/^v/, '').split('.').map(Number)
@@ -407,6 +443,17 @@ export async function checkAndReportUpdate(mainWin: BrowserWindow): Promise<void
   }
 
   const current = app.getVersion()
+
+  // One-time install census: backfill a pre-existing install that ran an
+  // earlier opt-in build but never sent telemetry. Runs alongside (not instead
+  // of) the normal app_start/app_updated flow. Persist censusSent first, then
+  // re-read so the update decision below preserves the flag.
+  const census = decideCensusAction(readState(), installIdPreexisted())
+  if (census.kind === 'backfill') {
+    void sendEvent('app_install_backfill', { from_version: census.fromVersion, prior_run: true })
+    updateState({ censusSent: true })
+  }
+
   const state = readState()
   const action = decideUpdateAction(current, state)
 

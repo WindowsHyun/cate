@@ -1,12 +1,12 @@
 // =============================================================================
-// AgentManager — one pi session per panel, run THROUGH the companion.
+// AgentManager — one pi session per panel, run THROUGH the runtime.
 //
 // pi is no longer spawned (or bundled) by the desktop app. The session resolves
-// the workspace's companion from its locator and drives pi via `companion.agent`
+// the workspace's runtime from its locator and drives pi via `runtime.agent`
 // — local (in-process spawn from the on-demand pi tarball) or remote (pi on the
 // daemon's host) identically. PiRpcClient speaks pi's `--mode rpc` JSONL over
 // that channel. Provider credentials are seeded to the host's pi-agent dir via
-// `companion.file` (so they work on a remote host too).
+// `runtime.file` (so they work on a remote host too).
 //
 // This file stays a thin glue layer: forward renderer commands to pi, forward
 // pi's events back to the renderer.
@@ -15,9 +15,9 @@
 import path from 'path'
 import { type WebContents } from 'electron'
 import log from '../../main/logger'
-import { parseLocator } from '../../main/companion/locator'
-import { companions } from '../../main/companion/companionManager'
-import type { Companion } from '../../main/companion/types'
+import { parseLocator } from '../../main/runtime/locator'
+import { runtimes } from '../../main/runtime/runtimeManager'
+import type { Runtime } from '../../main/runtime/types'
 import { PiRpcClient } from './piRpcClient'
 
 import type { PiImageContent } from './piRpcClient'
@@ -36,15 +36,16 @@ import { AGENT_EVENT, AUTH_CHANGED } from '../../shared/ipc-channels'
 import { broadcastToAll } from '../../main/windowRegistry'
 import { installSubagentExtension } from './installSubagents'
 import { installPlanModeExtension } from './installPlanMode'
+import { installAskUserExtension } from './installAskUser'
 import { hostAgentDir, prepareAgentDir, watchWorkspaceAuth, pushSharedToWorkspace } from './agentDir'
 import { mirrorModelsToWorkspace } from './customModels'
 import type { AuthManager } from './authManager'
 
 interface AgentSession {
   panelId: string
-  /** The companion hosting this session (local or remote). */
-  companion: Companion
-  /** Companion-absolute workspace path (the locator's path part). */
+  /** The runtime hosting this session (local or remote). */
+  runtime: Runtime
+  /** Runtime-absolute workspace path (the locator's path part). */
   cwd: string
   client: PiRpcClient
   sender: WebContents
@@ -90,7 +91,7 @@ export class AgentManager {
   private async syncAuthToOpenSessions(): Promise<void> {
     await Promise.all(
       Array.from(this.sessions.values()).map((session) =>
-        pushSharedToWorkspace(session.companion, session.cwd).catch((err) => {
+        pushSharedToWorkspace(session.runtime, session.cwd).catch((err) => {
           log.warn('[agentManager] auth sync failed for %s: %O', session.panelId, err)
         }),
       ),
@@ -102,7 +103,7 @@ export class AgentManager {
    *  on their next model-list fetch). */
   syncCustomModelsToOpenSessions(): void {
     for (const session of this.sessions.values()) {
-      void mirrorModelsToWorkspace(session.companion, session.cwd).catch((err) => {
+      void mirrorModelsToWorkspace(session.runtime, session.cwd).catch((err) => {
         log.warn('[agentManager] models sync failed for %s: %O', session.panelId, err)
       })
     }
@@ -122,34 +123,36 @@ export class AgentManager {
         await this.disposeInternal(opts.panelId)
       }
 
-      // Resolve the workspace's companion from its locator (throws if a remote
-      // companion isn't connected — surfaced as a start error).
-      const { companionId, path: cwd } = parseLocator(opts.cwd)
-      const companion = companions.resolve(companionId)
+      // Resolve the workspace's runtime from its locator (throws if a remote
+      // runtime isn't connected — surfaced as a start error).
+      const { runtimeId, path: cwd } = parseLocator(opts.cwd)
+      const runtime = runtimes.resolve(runtimeId)
 
       // Seed the host's <cwd>/.cate/pi-agent: auth.json + models.json via the
-      // companion (so it lands on the remote host too), plus pi's subagent +
-      // plan-mode extensions. PI_CODING_AGENT_DIR points pi at that dir.
-      await prepareAgentDir(companion, cwd)
-      await mirrorModelsToWorkspace(companion, cwd)
-      await installSubagentExtension(companion, cwd)
-      await installPlanModeExtension(companion, cwd)
+      // runtime (so it lands on the remote host too), plus Cate's bundled
+      // extensions (subagent, plan-mode, ask-user). PI_CODING_AGENT_DIR points
+      // pi at that dir.
+      await prepareAgentDir(runtime, cwd)
+      await mirrorModelsToWorkspace(runtime, cwd)
+      await installSubagentExtension(runtime, cwd)
+      await installPlanModeExtension(runtime, cwd)
+      await installAskUserExtension(runtime, cwd)
 
       const extraArgs: string[] = []
       if (opts.sessionFile) extraArgs.push('--session', opts.sessionFile)
 
-      const client = new PiRpcClient(companion, {
+      const client = new PiRpcClient(runtime, {
         cwd,
         provider: opts.model?.provider,
         model: opts.model?.model,
         args: extraArgs.length > 0 ? extraArgs : undefined,
-        env: { PI_CODING_AGENT_DIR: hostAgentDir(companionId, cwd) },
+        env: { PI_CODING_AGENT_DIR: hostAgentDir(runtimeId, cwd) },
       })
 
-      // Ensure pi is present on the host BEFORE start. pi ships in the companion
+      // Ensure pi is present on the host BEFORE start. pi ships in the runtime
       // tarball (remote) or is resolved/extracted client-side (local), so on a
       // provisioned host this is a quick verify.
-      await companion.agent.ensurePi()
+      await runtime.agent.ensurePi()
 
       try {
         await client.start()
@@ -184,11 +187,11 @@ export class AgentManager {
 
       // Watch the host's auth.json so OAuth token refreshes written by pi
       // propagate back to the shared file.
-      const disposeAuthWatcher = watchWorkspaceAuth(companion, cwd)
+      const disposeAuthWatcher = watchWorkspaceAuth(runtime, cwd)
 
       this.sessions.set(opts.panelId, {
         panelId: opts.panelId,
-        companion,
+        runtime,
         cwd,
         client,
         sender,
@@ -254,11 +257,6 @@ export class AgentManager {
     await session.client.steer(text, toImageContent(images))
   }
 
-  async followUp(panelId: string, text: string, images?: AgentImageAttachment[]): Promise<void> {
-    const session = this.requireSession(panelId)
-    await session.client.followUp(text, toImageContent(images))
-  }
-
   async interrupt(panelId: string): Promise<void> {
     const session = this.sessions.get(panelId)
     if (!session) return
@@ -320,11 +318,6 @@ export class AgentManager {
     await session.client.setAutoCompaction(enabled)
   }
 
-  async setAutoRetry(panelId: string, enabled: boolean): Promise<void> {
-    const session = this.requireSession(panelId)
-    await session.client.setAutoRetry(enabled)
-  }
-
   async abortRetry(panelId: string): Promise<void> {
     const session = this.requireSession(panelId)
     await session.client.abortRetry()
@@ -356,29 +349,9 @@ export class AgentManager {
     }
   }
 
-  async exportHtml(panelId: string, outputPath?: string): Promise<{ path: string }> {
-    const session = this.requireSession(panelId)
-    return session.client.exportHtml(outputPath)
-  }
-
-  async newSession(panelId: string, parentSession?: string): Promise<{ cancelled: boolean }> {
-    const session = this.requireSession(panelId)
-    return session.client.newSession(parentSession)
-  }
-
-  async switchSession(panelId: string, sessionPath: string): Promise<{ cancelled: boolean }> {
-    const session = this.requireSession(panelId)
-    return session.client.switchSession(sessionPath)
-  }
-
   async fork(panelId: string, entryId: string): Promise<{ text: string; cancelled: boolean }> {
     const session = this.requireSession(panelId)
     return session.client.fork(entryId)
-  }
-
-  async clone(panelId: string): Promise<{ cancelled: boolean }> {
-    const session = this.requireSession(panelId)
-    return session.client.clone()
   }
 
   async getForkMessages(panelId: string): Promise<Array<{ entryId: string; text: string }>> {
@@ -392,60 +365,6 @@ export class AgentManager {
     }
   }
 
-  async getLastAssistantText(panelId: string): Promise<string | null> {
-    const session = this.sessions.get(panelId)
-    if (!session) return null
-    try {
-      return await session.client.getLastAssistantText()
-    } catch (err) {
-      log.warn('[agentManager] getLastAssistantText failed for %s: %O', panelId, err)
-      return null
-    }
-  }
-
-  async setSessionName(panelId: string, name: string): Promise<void> {
-    const session = this.requireSession(panelId)
-    await session.client.setSessionName(name)
-  }
-
-  async getMessages(panelId: string): Promise<unknown[]> {
-    const session = this.sessions.get(panelId)
-    if (!session) return []
-    try {
-      return (await session.client.getMessages()) as unknown as unknown[]
-    } catch (err) {
-      log.warn('[agentManager] getMessages failed for %s: %O', panelId, err)
-      return []
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Queue modes
-  // ---------------------------------------------------------------------------
-
-  async setSteeringMode(panelId: string, mode: 'all' | 'one-at-a-time'): Promise<void> {
-    const session = this.requireSession(panelId)
-    await session.client.setSteeringMode(mode)
-  }
-
-  async setFollowUpMode(panelId: string, mode: 'all' | 'one-at-a-time'): Promise<void> {
-    const session = this.requireSession(panelId)
-    await session.client.setFollowUpMode(mode)
-  }
-
-  // ---------------------------------------------------------------------------
-  // Bash
-  // ---------------------------------------------------------------------------
-
-  async bash(panelId: string, command: string): Promise<unknown> {
-    const session = this.requireSession(panelId)
-    return session.client.bash(command)
-  }
-
-  async abortBash(panelId: string): Promise<void> {
-    const session = this.requireSession(panelId)
-    await session.client.abortBash()
-  }
 
   // ---------------------------------------------------------------------------
   // Commands (skills / prompts / extensions)
@@ -456,7 +375,7 @@ export class AgentManager {
     if (!session) return []
     try {
       const commands = await session.client.getCommands()
-      const homeAgent = hostAgentDir(session.companion.id, session.cwd) + path.sep
+      const homeAgent = hostAgentDir(session.runtime.id, session.cwd) + path.sep
       return commands.map((c) => {
         const filePath = (c as { sourceInfo?: { path?: string; scope?: 'user' | 'project' | 'temporary' } }).sourceInfo?.path
         const scope = (c as { sourceInfo?: { scope?: 'user' | 'project' | 'temporary' } }).sourceInfo?.scope
@@ -489,21 +408,6 @@ export class AgentManager {
     } catch (err) {
       log.warn('[agentManager] uiResponse failed for %s: %O', panelId, err)
     }
-  }
-
-  /** Tool gating is pi's responsibility now — this remains a no-op so the IPC
-   *  surface stays compatible with the renderer until we wire up real
-   *  preflight via pi's extension hooks. */
-  async toolDecision(
-    panelId: string,
-    toolCallId: string,
-    decision: 'allow' | 'deny',
-    reason?: string,
-  ): Promise<void> {
-    log.debug(
-      '[agentManager] tool decision (no-op) panel=%s tool=%s decision=%s reason=%s',
-      panelId, toolCallId, decision, reason ?? '',
-    )
   }
 
   /** Drop sessions whose sender WebContents has gone away. */

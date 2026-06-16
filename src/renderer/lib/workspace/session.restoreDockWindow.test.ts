@@ -50,9 +50,9 @@ function makeMultiTabSnapshot(): DetachedDockWindowSnapshot {
     panels,
     bounds: { x: 100, y: 50, width: 900, height: 700 },
     workspaceId: 'ws-9',
-    terminalPtyIds: {
-      'top-term': 'pty-top',
-      'canvas-child-term': 'pty-child',
+    terminalCwds: {
+      'top-term': '/work/top',
+      'canvas-child-term': '/work/child',
     },
     canvasStates: {
       'top-canvas': {
@@ -90,17 +90,21 @@ describe('buildDockWindowRestoreInit', () => {
     expect(initPayload.workspaceId).toBe('ws-9')
   })
 
-  it('seeds terminal replay for EVERY top-level terminal tab (off its persisted ptyId)', () => {
+  it('flags a cold restore and passes through per-panel cwds (replay is by panelId)', () => {
     const dw = makeMultiTabSnapshot()
     const { initPayload } = buildDockWindowRestoreInit(dw)
 
-    expect(initPayload.terminalReplayPtyIds).toEqual({ 'top-term': 'pty-top' })
-    // The canvas child terminal is NOT a top-level replay entry — it rides on the
-    // canvas hydration's childTerminals instead.
-    expect(initPayload.terminalReplayPtyIds?.['canvas-child-term']).toBeUndefined()
+    // The shell arms scrollback replay for EVERY terminal panel by its stable
+    // panelId when `restore` is set — no ptyId map. cwds (top-level AND canvas
+    // children) ride along so respawned terminals land where they were.
+    expect(initPayload.restore).toBe(true)
+    expect(initPayload.terminalCwds).toEqual({
+      'top-term': '/work/top',
+      'canvas-child-term': '/work/child',
+    })
   })
 
-  it('hydrates each top-level canvas tab with its nodes + child panels + child replay', () => {
+  it('hydrates each top-level canvas tab with its nodes + child panels', () => {
     const dw = makeMultiTabSnapshot()
     const { initPayload } = buildDockWindowRestoreInit(dw)
 
@@ -111,8 +115,9 @@ describe('buildDockWindowRestoreInit', () => {
     expect(Object.keys(cs!.nodes)).toEqual(['node-1'])
     // Canvas children = dw.panels NOT referenced by the zones.
     expect(Object.keys(cs!.childPanels).sort()).toEqual(['canvas-child-editor', 'canvas-child-term'])
-    // The child terminal gets a replay hint off its persisted ptyId.
-    expect(cs!.childTerminals?.['canvas-child-term']).toEqual({ replayPtyId: 'pty-child' })
+    // Child terminal scrollback replay is NOT wired into the canvas state — the
+    // shell arms every terminal panel (children included) by its panelId.
+    expect(cs!.childTerminals).toBeUndefined()
   })
 
   it('identifies top-level panels from the zones, not Object.keys(panels)[0]', () => {
@@ -137,12 +142,48 @@ describe('buildDockWindowRestoreInit', () => {
     expect(cs).toBeDefined()
     expect(cs!.nodes).toEqual({})
     expect(cs!.zoomLevel).toBe(1)
-    // Children + replay still recovered from dw.panels / dw.terminalPtyIds.
+    // Children still recovered from dw.panels (replay is armed by panelId in the shell).
     expect(Object.keys(cs!.childPanels).sort()).toEqual(['canvas-child-editor', 'canvas-child-term'])
-    expect(cs!.childTerminals?.['canvas-child-term']).toEqual({ replayPtyId: 'pty-child' })
   })
 
-  it('returns no top-level ids for an empty dock layout', () => {
+  it('recovers panels into a tab stack when dockState is missing entirely (legacy/malformed snapshot)', () => {
+    // FIX: buildDockWindowRestoreInit used to read dw.dockState.zones blindly and
+    // threw "Cannot read properties of undefined (reading 'zones')" for snapshots
+    // produced before dockState was synced. It then degraded to an empty window,
+    // which silently dropped every panel record. Now the panels are recovered as
+    // tabs in a synthesized center stack so the window (and its panels) survive.
+    const dw = makeMultiTabSnapshot()
+    delete (dw as Partial<DetachedDockWindowSnapshot>).dockState
+    const { topLevelPanelIds, initPayload } = buildDockWindowRestoreInit(dw)
+    expect(topLevelPanelIds.sort()).toEqual([
+      'canvas-child-editor',
+      'canvas-child-term',
+      'top-canvas',
+      'top-editor',
+      'top-term',
+    ])
+    expect(initPayload.workspaceId).toBe('ws-9')
+    // Panel records still pass through so the receiver can resolve types/titles.
+    expect(initPayload.panels).toBe(dw.panels)
+    const center = initPayload.dockState.center.layout
+    expect(center?.type).toBe('tabs')
+    expect(center && 'panelIds' in center ? center.panelIds.sort() : []).toEqual([
+      'canvas-child-editor',
+      'canvas-child-term',
+      'top-canvas',
+      'top-editor',
+      'top-term',
+    ])
+  })
+
+  it('recovers panels when dockState exists but its zones are missing', () => {
+    const dw = makeMultiTabSnapshot()
+    dw.dockState = {} as DockStateSnapshot
+    const { topLevelPanelIds } = buildDockWindowRestoreInit(dw)
+    expect(topLevelPanelIds).toHaveLength(5)
+  })
+
+  it('recovers panels orphaned by an empty dock layout', () => {
     const dw = makeMultiTabSnapshot()
     dw.dockState = {
       zones: {
@@ -153,9 +194,60 @@ describe('buildDockWindowRestoreInit', () => {
       },
       locations: {},
     }
+    const { topLevelPanelIds } = buildDockWindowRestoreInit(dw)
+    expect(topLevelPanelIds).toHaveLength(5)
+  })
+
+  it('tolerates zones referencing a panel with no record (stale layout after an incomplete flush)', () => {
+    const dw = makeMultiTabSnapshot()
+    dw.dockState = multiTabDockState(['top-term', 'ghost-panel', 'top-canvas'])
+
+    const { topLevelPanelIds, initPayload } = buildDockWindowRestoreInit(dw)
+
+    // No throw, and no canvas state is fabricated for the missing record.
+    expect(initPayload.canvasStates?.['ghost-panel']).toBeUndefined()
+    expect(initPayload.canvasStates?.['top-canvas']).toBeDefined()
+    expect(topLevelPanelIds).toContain('top-term')
+  })
+
+  // Asserts the DESIRED behavior and is marked `.fails`: a zone entry whose
+  // panel record is gone currently rides through into topLevelPanelIds and the
+  // restored layout, so the shell renders a tab backed by nothing. It should be
+  // pruned at restore. Remove the marker when fixed.
+  it.fails('prunes zone entries whose panel record is missing', () => {
+    const dw = makeMultiTabSnapshot()
+    dw.dockState = multiTabDockState(['top-term', 'ghost-panel', 'top-editor', 'top-canvas'])
+
+    const { topLevelPanelIds, initPayload } = buildDockWindowRestoreInit(dw)
+
+    expect(topLevelPanelIds).not.toContain('ghost-panel')
+    const center = initPayload.dockState.center.layout
+    expect(center && 'panelIds' in center ? center.panelIds : []).not.toContain('ghost-panel')
+  })
+
+  it('normalizes an empty terminalCwds map to undefined', () => {
+    const dw = makeMultiTabSnapshot()
+    dw.terminalCwds = {}
+    const { initPayload } = buildDockWindowRestoreInit(dw)
+    expect(initPayload.terminalCwds).toBeUndefined()
+  })
+
+  it('omits canvasStates entirely when no top-level tab is a canvas', () => {
+    const dw = makeMultiTabSnapshot()
+    dw.dockState = multiTabDockState(['top-term', 'top-editor'])
+
+    const { topLevelPanelIds, initPayload } = buildDockWindowRestoreInit(dw)
+
+    expect(topLevelPanelIds).toEqual(['top-term', 'top-editor'])
+    expect(initPayload.canvasStates).toBeUndefined()
+  })
+
+  it('returns no top-level ids for a genuinely empty window (no panels)', () => {
+    const dw = makeMultiTabSnapshot()
+    delete (dw as Partial<DetachedDockWindowSnapshot>).dockState
+    dw.panels = {}
     const { topLevelPanelIds, initPayload } = buildDockWindowRestoreInit(dw)
     expect(topLevelPanelIds).toEqual([])
-    expect(initPayload.terminalReplayPtyIds).toBeUndefined()
     expect(initPayload.canvasStates).toBeUndefined()
   })
 })

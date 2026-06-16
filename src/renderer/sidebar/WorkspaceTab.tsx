@@ -1,12 +1,13 @@
 import React, { useMemo, useState, useCallback, useEffect, useRef } from 'react'
 import { useShallow } from 'zustand/shallow'
 import { CaretRight, Terminal as TerminalIcon, Folder, FolderPlus, SquaresFour, DotsThree, type Icon as PhosphorIcon } from '@phosphor-icons/react'
-import type { WorkspaceState, PanelType, PanelState } from '../../shared/types'
+import type { WorkspaceState, PanelType, PanelState, WindowPanelInfo } from '../../shared/types'
 import { useStatusStore } from '../stores/statusStore'
 import { useAppStore, WORKSPACE_COLORS } from '../stores/appStore'
 import { ACCENT_COLOR_NAMES } from '../../shared/colors'
 import { revealPanel } from '../lib/workspace/panelReveal'
 import { useWorkspacePanelTree } from '../lib/workspace/useWorkspacePanelTree'
+import { useOtherWindowPanels } from '../stores/windowPanelStore'
 import type { NativeContextMenuItem } from '../../shared/electron-api'
 import type { AgentState } from '../../shared/types'
 import { terminalRegistry } from '../lib/terminal/terminalRegistry'
@@ -15,16 +16,19 @@ import { worktreeTitleStyle } from '../lib/worktreeTitleStyle'
 import { isMiddleClick } from '../lib/mouse'
 import { PANEL_REGISTRY } from '../panels/registry'
 import { useAgentInfoByPanel } from '../hooks/useAgentPanelInfo'
+import { getAgentLogo } from '../lib/agent/agentLogos'
 import { workspaceDisplayName } from '../lib/fs/displayPath'
 import { workspaceRuntime } from '../lib/workspace/workspaceRuntime'
+import { InlineEditInput } from './InlineEditInput'
+import { Tooltip } from '../ui/Tooltip'
 
 // -----------------------------------------------------------------------------
-// Companion status dot — surfaces a remote workspace's connection state in the
+// Runtime status dot — surfaces a remote workspace's connection state in the
 // sidebar and offers the matching one-click recovery. Driven by the canonical
 // workspaceRuntime status (shared with the canvas lock overlay).
 // -----------------------------------------------------------------------------
 
-function CompanionDot({ workspace }: { workspace: WorkspaceState }): JSX.Element | null {
+function RuntimeDot({ workspace }: { workspace: WorkspaceState }): JSX.Element | null {
   const { status, error } = workspaceRuntime(workspace)
   // Only remote, non-connected states get a dot.
   if (status === 'local' || status === 'connected') return null
@@ -32,18 +36,18 @@ function CompanionDot({ workspace }: { workspace: WorkspaceState }): JSX.Element
   const busy = status === 'installing' || status === 'connecting'
   const color = busy ? 'bg-amber-400 animate-pulse' : 'bg-red-500 hover:ring-2 hover:ring-red-500/40'
   const title =
-    status === 'installing' ? 'Installing companion…'
-    : status === 'connecting' ? 'Connecting to companion…'
-    : status === 'disconnected' ? `Companion disconnected${error ? `: ${error}` : ''}. Click to reconnect.`
-    : status === 'missing' ? `Companion not installed${error ? `: ${error}` : ''}. Click to install.`
-    : `Companion not reachable${error ? `: ${error}` : ''}. Click to retry.`
+    status === 'installing' ? 'Installing runtime…'
+    : status === 'connecting' ? 'Connecting to runtime…'
+    : status === 'disconnected' ? `Runtime disconnected${error ? `: ${error}` : ''}. Click to reconnect.`
+    : status === 'missing' ? `Runtime not installed${error ? `: ${error}` : ''}. Click to install.`
+    : `Runtime not reachable${error ? `: ${error}` : ''}. Click to retry.`
 
   const onClick = (e: React.MouseEvent): void => {
     e.stopPropagation()
     if (busy) return
     const app = useAppStore.getState()
-    if (status === 'missing') void app.installCompanion(workspace.id)
-    else void app.retryCompanion(workspace.id)
+    if (status === 'missing') void app.installRuntime(workspace.id)
+    else void app.retryRuntime(workspace.id)
   }
 
   return (
@@ -75,6 +79,15 @@ export interface PanelRenameProps {
   onContextMenu: (e: React.MouseEvent) => void
 }
 
+/** Display label for a panel row: explicit title, else the file basename, else
+ *  the url, else the panel type. Param is the minimal shape shared by the
+ *  TerminalPanelRow prop and a full PanelState. */
+export function panelRowLabel(
+  panel: { type: PanelType; title?: string; filePath?: string; url?: string },
+): string {
+  return panel.title || panel.filePath?.split('/').pop() || panel.url || panel.type
+}
+
 export interface TerminalPanelRowProps {
   panel: { id: string; type: PanelType; title?: string; filePath?: string; url?: string }
   indent: boolean
@@ -86,13 +99,16 @@ export interface TerminalPanelRowProps {
   /** Middle-click closes the row (mirrors the dock tab behavior). */
   onClose?: () => void
   rename?: PanelRenameProps
+  /** Overrides the row's hover tooltip (used by detached rows to note the panel
+   *  lives in another window). Falls back to the panel's path / url / label. */
+  titleHint?: string
 }
 
 const AWAIT_COLOR = '#c08a5a'
 
-export const TerminalPanelRow: React.FC<TerminalPanelRowProps> = ({ panel, indent, agentState, agentLogo: agentLogoProp, hasPorts, worktreeColor, onClick, onClose, rename }) => {
+export const TerminalPanelRow: React.FC<TerminalPanelRowProps> = ({ panel, indent, agentState, agentLogo: agentLogoProp, hasPorts, worktreeColor, onClick, onClose, rename, titleHint }) => {
   const Icon = PANEL_ICONS[panel.type] ?? TerminalIcon
-  const label = panel.title || panel.filePath?.split('/').pop() || panel.url || panel.type
+  const label = panelRowLabel(panel)
 
   const isRunning = agentState === 'running'
   const isAwaiting = agentState === 'waitingForInput'
@@ -114,7 +130,7 @@ export const TerminalPanelRow: React.FC<TerminalPanelRowProps> = ({ panel, inden
           onClose()
         }
       }}
-      title={panel.filePath || panel.url || label}
+      title={titleHint ?? (panel.filePath || panel.url || label)}
     >
       {agentLogo ? (
         <img
@@ -193,6 +209,9 @@ interface WorkspaceTabProps {
   workspace: WorkspaceState
   isSelected: boolean
   isMultiSelected?: boolean
+  /** Expansion is owned by ProjectList so its header can expand/collapse all. */
+  isExpanded: boolean
+  onToggleExpand: () => void
   onClick: (e?: React.MouseEvent) => void
   onClose: () => void
   onBulkContextMenu?: (e: React.MouseEvent) => Promise<boolean>
@@ -202,6 +221,8 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
   workspace,
   isSelected,
   isMultiSelected = false,
+  isExpanded,
+  onToggleExpand,
   onClick,
   onClose,
   onBulkContextMenu,
@@ -223,6 +244,24 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
   // the palette can never disagree about which panels exist or where they live.
   const { panels, canvasPanels, childrenByCanvas, orphanCanvasChildren, freePanels } =
     useWorkspacePanelTree(workspace.id)
+
+  // Panels living in other (detached) windows for this workspace — they dropped
+  // out of the local tree above, so list them in their own "Other windows"
+  // section, mirroring the local tree: detached canvases as parent rows with
+  // their children nested, then top-level panels. Excludes this window's own
+  // panels (the union includes them too).
+  const otherWindowPanels = useOtherWindowPanels(workspace.id, Object.keys(panels))
+  const { detachedCanvases, detachedChildrenByCanvas, detachedTopLevel, detachedCount } = useMemo(() => {
+    const canvases = otherWindowPanels.filter((p) => p.type === 'canvas')
+    const childrenByCanvas: Record<string, WindowPanelInfo[]> = {}
+    const topLevel: WindowPanelInfo[] = []
+    for (const p of otherWindowPanels) {
+      if (p.type === 'canvas') continue
+      if (p.parentCanvasId) (childrenByCanvas[p.parentCanvasId] ??= []).push(p)
+      else topLevel.push(p)
+    }
+    return { detachedCanvases: canvases, detachedChildrenByCanvas: childrenByCanvas, detachedTopLevel: topLevel, detachedCount: otherWindowPanels.length }
+  }, [otherWindowPanels])
 
   // worktrees ignored by useWorkspaceList's equality fn → workspace.worktrees
   // is stale. Subscribe directly so the per-row accent updates as worktrees
@@ -247,7 +286,6 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
     return out
   }, [portsByPty])
 
-  const [isExpanded, setIsExpanded] = useState(false)
   const [isRenaming, setIsRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState('')
   const [isContextActive, setIsContextActive] = useState(false)
@@ -257,6 +295,11 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
   // the matching panel row renders an inline input in place of its label.
   const [renamingPanelId, setRenamingPanelId] = useState<string | null>(null)
   const [panelRenameValue, setPanelRenameValue] = useState('')
+
+  const beginRename = useCallback(() => {
+    setRenameValue(workspace.name || (workspace.rootPath ? workspaceDisplayName(workspace.rootPath) : '') || 'Workspace')
+    setIsRenaming(true)
+  }, [workspace.name, workspace.rootPath])
 
   const handleContextMenu = useCallback(async (e: React.MouseEvent) => {
     if (onBulkContextMenu) {
@@ -327,8 +370,7 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
     switch (id) {
       case 'select': app.selectWorkspace(workspace.id); break
       case 'rename':
-        setRenameValue(workspace.name || workspaceDisplayName(workspace.rootPath) || 'Workspace')
-        setIsRenaming(true)
+        beginRename()
         break
       case 'select-folder': {
         const path = await window.electronAPI.openFolderDialog()
@@ -351,7 +393,7 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
       case 'close-panels': app.closeAllPanels(workspace.id); break
       case 'remove': app.removeWorkspace(workspace.id, true); break
     }
-  }, [workspace.id, workspace.name, workspace.rootPath, workspace.color, workspace.panels, workspace.groupId, isSelected, onBulkContextMenu])
+  }, [workspace.id, workspace.name, workspace.rootPath, workspace.color, workspace.panels, workspace.groupId, isSelected, onBulkContextMenu, beginRename])
 
   useEffect(() => {
     if (isRenaming && renameInputRef.current) {
@@ -411,17 +453,14 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
     }
   }, [beginPanelRename, handleClosePanel])
 
-  const panelCount = Object.keys(panels).length
+  // Local panels plus panels in detached windows — drives the expand toggle and
+  // the count badge so a workspace whose only panels are detached still expands.
+  const treeCount = Object.keys(panels).length + detachedCount
 
   const handlePanelClick = useCallback(async (e: React.MouseEvent, panelId: string) => {
     e.stopPropagation()
     await focusWorkspacePanel(workspace.id, panelId)
   }, [workspace.id])
-
-  const beginRename = useCallback(() => {
-    setRenameValue(workspace.name || (workspace.rootPath ? workspaceDisplayName(workspace.rootPath) : '') || 'Workspace')
-    setIsRenaming(true)
-  }, [workspace.name, workspace.rootPath])
 
   const handleTitleClick = useCallback((e: React.MouseEvent) => {
     // Modified clicks are multi-select gestures — let them fall through to the
@@ -472,17 +511,65 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
   // worktrees (matches WorktreePill's visibility rule — single-branch
   // workspaces would just get noisy with monochrome dots).
   const showWorktreeAccent = worktrees.length >= 2
-  const worktreeColorFor = (panelId: string): string | undefined => {
+  // Resolve a worktree accent color from a panel's worktree tag. isPrimary is no
+  // longer persisted (it's a live-git fact); the primary worktree is the record
+  // keyed by the workspace's own rootPath.
+  const worktreeColorForId = (worktreeId: string | undefined): string | undefined => {
     if (!showWorktreeAccent) return undefined
-    const wtId = panels[panelId]?.worktreeId
-    // isPrimary is no longer persisted (it's a live-git fact); the primary
-    // worktree is the record keyed by the workspace's own rootPath.
-    const wt = worktrees.find((w) => w.id === wtId) ?? worktrees.find((w) => w.path === workspace.rootPath)
+    const wt = worktrees.find((w) => w.id === worktreeId) ?? worktrees.find((w) => w.path === workspace.rootPath)
     return wt?.color
+  }
+  const worktreeColorFor = (panelId: string): string | undefined =>
+    worktreeColorForId(panels[panelId]?.worktreeId)
+
+  // A panel living in another window — click focuses that window and reveals it.
+  // Read-only (no rename/close), since it isn't hosted here, but otherwise
+  // rendered with the SAME data as a local row: agent state, agent logo, ports,
+  // and worktree accent all ride along on the cross-window union (stamped by the
+  // owner window, the only one that sees this panel's activity scan), so the
+  // running shimmer / awaiting indicator / port dot match the local rows exactly.
+  const renderDetachedRow = (p: WindowPanelInfo, indent: boolean) => {
+    const onClick = (e: React.MouseEvent): void => {
+      e.stopPropagation()
+      void window.electronAPI.focusWindowPanel(p.panelId)
+    }
+    const titleHint = `${p.title} — in another window`
+    if (p.type === 'terminal' || p.type === 'agent') {
+      return (
+        <TerminalPanelRow
+          key={p.panelId}
+          panel={{ id: p.panelId, type: p.type, title: p.title }}
+          indent={indent}
+          agentState={p.agentState}
+          agentLogo={getAgentLogo(p.agentName ?? null)}
+          hasPorts={!!p.hasPorts}
+          worktreeColor={worktreeColorForId(p.worktreeId)}
+          onClick={onClick}
+          titleHint={titleHint}
+        />
+      )
+    }
+    const Icon = PANEL_ICONS[p.type] ?? SquaresFour
+    return (
+      <button
+        key={p.panelId}
+        className={`group/panel flex items-center gap-1.5 h-7 pr-2 text-[13px] text-muted hover:text-primary hover:bg-hover text-left min-w-0 focus:outline-none ${
+          indent ? 'pl-10' : 'pl-7'
+        }`}
+        onClick={onClick}
+        title={titleHint}
+      >
+        <Icon size={11} className="flex-shrink-0 opacity-60" />
+        <span className="truncate min-w-0 flex-1">{p.title}</span>
+        {p.hasPorts && (
+          <span className="flex-shrink-0 w-1.5 h-1.5 rounded-full bg-muted opacity-50" />
+        )}
+      </button>
+    )
   }
 
   const renderPanelRow = (p: PanelState, indent = false) => {
-    const label = p.title || p.filePath?.split('/').pop() || p.url || p.type
+    const label = panelRowLabel(p)
     const isRenaming = renamingPanelId === p.id
     const rename: PanelRenameProps = {
       renameValue: isRenaming ? panelRenameValue : null,
@@ -570,12 +657,12 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
           className="flex-shrink-0 w-4 h-4 flex items-center justify-center text-muted hover:text-primary focus:outline-none"
           onClick={(e) => {
             e.stopPropagation()
-            if (panelCount > 0) setIsExpanded((v) => !v)
+            if (treeCount > 0) onToggleExpand()
           }}
-          title={panelCount > 0 ? (isExpanded ? 'Collapse' : 'Expand') : undefined}
-          disabled={panelCount === 0}
+          title={treeCount > 0 ? (isExpanded ? 'Collapse' : 'Expand') : undefined}
+          disabled={treeCount === 0}
         >
-          {panelCount > 0 && (
+          {treeCount > 0 && (
             <CaretRight
               size={10}
               className={`transition-transform ${isExpanded ? 'rotate-90' : ''}`}
@@ -593,17 +680,13 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
 
         {/* Name (or inline rename input) */}
         {isRenaming ? (
-          <input
+          <InlineEditInput
             ref={renameInputRef}
             className="flex-1 min-w-0 text-[14px] bg-surface-3 border border-subtle rounded px-1 py-0 outline-none text-primary"
             value={renameValue}
-            onChange={(e) => setRenameValue(e.target.value)}
-            onBlur={handleRenameSubmit}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleRenameSubmit()
-              if (e.key === 'Escape') setIsRenaming(false)
-            }}
-            onClick={(e) => e.stopPropagation()}
+            onChange={setRenameValue}
+            onSubmit={handleRenameSubmit}
+            onCancel={() => setIsRenaming(false)}
           />
         ) : (
           <span
@@ -616,30 +699,32 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
           </span>
         )}
 
-        {/* Companion connection indicator (remote workspaces only). Reads the
+        {/* Runtime connection indicator (remote workspaces only). Reads the
             same canonical runtime status as the canvas lock, so the dot and the
             overlay never disagree. */}
-        <CompanionDot workspace={workspace} />
+        <RuntimeDot workspace={workspace} />
 
         {/* Panel count badge (only when collapsed and has panels) */}
-        {panelCount > 0 && !isExpanded && (
+        {treeCount > 0 && !isExpanded && (
           <span className="flex-shrink-0 text-[10px] text-secondary font-semibold opacity-80 group-hover:opacity-100 transition-opacity">
-            {panelCount}
+            {treeCount}
           </span>
         )}
 
         {/* Hover actions: dots menu (rename happens via clicking the title) */}
-        <button
-          className="flex-shrink-0 w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-80 hover:!opacity-100 text-secondary hover:text-primary transition-opacity focus:outline-none"
-          onClick={(e) => { e.stopPropagation(); handleContextMenu(e) }}
-          title="More actions"
-        >
-          <DotsThree size={14} weight="bold" />
-        </button>
+        <Tooltip label="More actions">
+          <button
+            className="flex-shrink-0 w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-80 hover:!opacity-100 text-secondary hover:text-primary transition-opacity focus:outline-none"
+            onClick={(e) => { e.stopPropagation(); handleContextMenu(e) }}
+            aria-label="More actions"
+          >
+            <DotsThree size={14} weight="bold" />
+          </button>
+        </Tooltip>
       </div>
 
       {/* Tree of canvases + panels (when expanded) */}
-      {isExpanded && panelCount > 0 && (
+      {isExpanded && treeCount > 0 && (
         <div className="flex flex-col">
           {canvasPanels.map((cp) => (
             <React.Fragment key={cp.id}>
@@ -657,6 +742,20 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
             </>
           )}
           {freePanels.map((p) => renderPanelRow(p))}
+          {detachedCount > 0 && (
+            <>
+              <div className="flex items-center gap-1.5 h-6 pl-7 pr-2 text-[11px] uppercase tracking-wide text-muted opacity-70">
+                <span className="truncate">Other windows</span>
+              </div>
+              {detachedCanvases.map((cp) => (
+                <React.Fragment key={cp.panelId}>
+                  {renderDetachedRow(cp, false)}
+                  {(detachedChildrenByCanvas[cp.panelId] || []).map((c) => renderDetachedRow(c, true))}
+                </React.Fragment>
+              ))}
+              {detachedTopLevel.map((p) => renderDetachedRow(p, false))}
+            </>
+          )}
         </div>
       )}
     </div>

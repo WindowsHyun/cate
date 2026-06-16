@@ -8,16 +8,12 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { GithubLogo, Plus, Trash } from '@phosphor-icons/react'
-import { SettingRow, SearchableBlock } from './SettingsComponents'
+import { SettingRow, SearchableBlock, SecondaryButton, TextInput } from './SettingsComponents'
 import { errorMessage } from '../lib/errorMessage'
 import type { SkillSource } from '../../shared/skills'
+import { Tooltip } from '../ui/Tooltip'
 
 const api = () => window.electronAPI
-
-const SMALL_BTN =
-  'flex items-center gap-1.5 px-2 py-1 text-[11px] rounded text-secondary hover:text-primary bg-surface-2 hover:bg-hover border border-subtle disabled:opacity-40 disabled:cursor-default'
-const INPUT =
-  'w-48 bg-surface-5 border border-subtle rounded-md px-2 py-1 text-sm text-primary placeholder:text-muted focus:border-focus-blue focus:outline-none'
 
 export function SkillsSettings() {
   const [sources, setSources] = useState<SkillSource[]>([])
@@ -81,17 +77,17 @@ export function SkillsSettings() {
         description="GitHub repos of skills, searched alongside the built-in catalog and shared across workspaces."
       >
         <div className="flex items-center gap-2">
-          <input
+          <TextInput
             value={repo}
-            onChange={(e) => setRepo(e.target.value)}
+            onChange={setRepo}
             onKeyDown={(e) => e.key === 'Enter' && void add()}
             placeholder="owner/repo"
-            className={`${INPUT} font-mono`}
+            className="font-mono"
           />
-          <button onClick={() => void add()} disabled={adding || !repo.trim()} className={SMALL_BTN}>
+          <SecondaryButton onClick={() => void add()} disabled={adding || !repo.trim()}>
             <Plus size={11} />
             Add
-          </button>
+          </SecondaryButton>
         </div>
       </SettingRow>
 
@@ -108,13 +104,15 @@ export function SkillsSettings() {
                 <GithubLogo size={14} className="text-muted shrink-0" />
                 <span className="flex-1 min-w-0 text-[12px] text-primary font-mono truncate">{s.repo}</span>
                 {s.path && <span className="text-[11px] text-muted font-mono truncate">/{s.path}</span>}
-                <button
-                  onClick={() => void remove(s.id)}
-                  className="shrink-0 p-0.5 rounded text-muted opacity-0 group-hover:opacity-100 hover:text-red-400 transition-opacity"
-                  title="Remove"
-                >
-                  <Trash size={12} />
-                </button>
+                <Tooltip label="Remove">
+                  <button
+                    onClick={() => void remove(s.id)}
+                    className="shrink-0 p-0.5 rounded text-muted opacity-0 group-hover:opacity-100 hover:text-red-400 transition-opacity"
+                    aria-label="Remove"
+                  >
+                    <Trash size={12} />
+                  </button>
+                </Tooltip>
               </div>
             ))}
           </div>
@@ -127,16 +125,15 @@ export function SkillsSettings() {
         hint={hasToken ? <span className="text-[10px] text-emerald-400">Token saved</span> : undefined}
       >
         <div className="flex items-center gap-2">
-          <input
+          <TextInput
             type="password"
             value={token}
-            onChange={(e) => setToken(e.target.value)}
+            onChange={setToken}
             placeholder={hasToken ? 'Replace…' : 'ghp_…'}
-            className={INPUT}
           />
-          <button onClick={() => void saveToken()} disabled={!token.trim()} className={SMALL_BTN}>
+          <SecondaryButton onClick={() => void saveToken()} disabled={!token.trim()}>
             Save
-          </button>
+          </SecondaryButton>
           {hasToken && (
             <button onClick={() => void clearToken()} className="px-2 py-1 text-[11px] rounded text-muted hover:text-red-400">
               Clear

@@ -2,8 +2,19 @@
 // Type declaration for window.electronAPI exposed via contextBridge
 // =============================================================================
 
-import type { AgentCreateOptions, AgentEventEnvelope, AgentExtensionUIResponse, AgentImageAttachment, AgentModelRef, AgentModelDescriptor, AgentRpcState, AgentSessionListEntry, AgentSessionStats, AgentSlashCommand, AgentThinkingLevel, AgentToolApprovalRequest, AppSettings, AgentState, AuthProviderDescriptor, AuthProviderStatus, CanvasLayoutSnapshot, CateWindowParams, CustomOpenAIProvider, DockWindowInitPayload, DetachedDockWindowSnapshot, DockStateSnapshot, FileSearchOptions, FileSearchResult, FileTreeNode, GitInfo, SearchOptions, SearchResultBatch, SearchDoneEvent, NotificationAction, OAuthFlowEvent, PanelState, PanelTransferSnapshot, PanelWindowSnapshot, PerfSnapshot, Point, SessionSnapshot, SidebarSession, TerminalActivity, WorkspaceInfo, WorkspaceMutationResult, RemoteConnectSpec, CompanionConnectResult, CompanionStatusEvent, CompanionConnection, CompanionPhase, RemoteProjectEntry, SshHostEntry, UIState } from './types'
+import type { AgentCreateOptions, AgentEventEnvelope, AgentExtensionUIResponse, AgentImageAttachment, AgentModelRef, AgentModelDescriptor, AgentRpcState, AgentSessionListEntry, AgentSessionStats, AgentSlashCommand, AgentThinkingLevel, AppSettings, AgentState, AuthProviderDescriptor, AuthProviderStatus, CanvasLayoutSnapshot, CateWindowParams, CustomOpenAIProvider, DockWindowInitPayload, DockWindowSyncState, DetachedDockWindowSnapshot, WindowPanelInfo, WindowPanelReport, DockStateSnapshot, FileSearchOptions, FileSearchResult, FileTreeNode, GitInfo, SearchOptions, SearchResultBatch, SearchDoneEvent, NotificationAction, OAuthFlowEvent, PanelState, PanelTransferSnapshot, PerfSnapshot, Point, SessionSnapshot, SidebarSession, TerminalActivity, WorkspaceInfo, WorkspaceMutationResult, RemoteConnectSpec, RuntimeConnectResult, RuntimeStatusEvent, RuntimeConnection, RuntimePhase, RemoteProjectEntry, SshHostEntry, UIState } from './types'
 import type { SavedSkill, InstalledSkill, SkillEntry, SkillSource, SkillTargetId } from './skills'
+
+/** Lifecycle state of the auto-updater, surfaced to the renderer for the
+ *  in-app "update ready" modal. `downloaded` is the one the modal acts on. */
+export type UpdateState = 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'error'
+export interface UpdateStatus {
+  state: UpdateState
+  /** Version of the update in flight, or null when unknown. */
+  version: string | null
+  /** Download progress 0-100 (present while state === 'downloading'). */
+  percent?: number
+}
 
 export interface NativeContextMenuItem {
   id?: string
@@ -498,10 +509,10 @@ export interface ElectronAPI {
   /** Persist the sidebar arrangement (workspace order + active workspace). */
   sidebarSessionSet(session: SidebarSession): Promise<void>
 
-  /** Get persisted remote-workspace restore entries (cate-companion:// only). */
+  /** Get persisted remote-workspace restore entries (cate-runtime:// only). */
   remoteProjectsGet(): Promise<RemoteProjectEntry[]>
 
-  /** Persist remote-workspace restore entries (cate-companion:// only). */
+  /** Persist remote-workspace restore entries (cate-runtime:// only). */
   remoteProjectsSet(entries: RemoteProjectEntry[]): Promise<void>
 
   // ---------------------------------------------------------------------------
@@ -571,6 +582,18 @@ export interface ElectronAPI {
   /** Close the calling window. */
   windowClose(): Promise<void>
 
+  /** Close every detached (dock) window belonging to a workspace. Used when the
+   *  workspace is reloaded so its detached windows are discarded with it. */
+  windowsCloseForWorkspace(workspaceId: string): Promise<void>
+  runActionInMain(action: string): Promise<void>
+
+  /** Set the OS title of the calling window. Drives the macOS native tab label. */
+  windowSetTitle(title: string): Promise<void>
+
+  /** Merge a partial into the boot snapshot so the next cold launch constructs
+   *  the BrowserWindow with the persisted theme/background/appearance. */
+  bootSnapshotWrite(partial: Record<string, unknown>): Promise<void>
+
   /** Synchronous cached check: is the calling window maximized? Backs the
    *  maximize/restore glyph swap in the custom window controls. */
   isWindowMaximized(): boolean
@@ -591,17 +614,6 @@ export interface ElectronAPI {
 
   /** Subscribe to incoming panel transfers (main -> renderer). */
   onPanelReceive(callback: (snapshot: PanelTransferSnapshot) => void): () => void
-
-  /** List all active panel windows with their metadata and bounds. */
-  panelWindowsList(): Promise<Array<{ windowId: number; panel: PanelState; workspaceId?: string; bounds: { x: number; y: number; width: number; height: number }; terminalPtyId?: string }>>
-
-  /** Report the terminal ptyId for this panel window so the main process can persist it. */
-  panelWindowSyncPty(ptyId: string): Promise<void>
-
-  /** Push an updated PanelState snapshot for this panel window so the
-   *  main-process windowRegistry meta (used by session persistence and the
-   *  panel-window list) reflects post-Save-As filePath/title/dirty state. */
-  panelWindowSyncMeta(payload: { panel: PanelState; workspaceId?: string }): Promise<void>
 
   /** Request this panel window to dock back into the main window. Passing the
    *  panel's full transfer snapshot lets the main window reconstruct the panel
@@ -655,7 +667,7 @@ export interface ElectronAPI {
   onDockWindowInit(callback: (payload: DockWindowInitPayload) => void): () => void
 
   /** Sync dock window state to main process for session persistence. */
-  dockWindowSyncState(state: DockStateSnapshot & { panels: Record<string, PanelState>; terminalPtyIds?: Record<string, string>; canvasStates?: Record<string, CanvasLayoutSnapshot> }): Promise<void>
+  dockWindowSyncState(state: DockWindowSyncState): Promise<void>
 
   /** List all dock windows with their state and bounds. */
   dockWindowsList(): Promise<DetachedDockWindowSnapshot[]>
@@ -672,6 +684,23 @@ export interface ElectronAPI {
   dockWindowFlushSyncDone(): void
 
   // ---------------------------------------------------------------------------
+  // Cross-window panel discovery
+  // ---------------------------------------------------------------------------
+
+  /** Subscribe to the union of panels across all windows (for discovering panels
+   *  that live in other windows). */
+  onWindowPanelsChanged(callback: (panels: WindowPanelInfo[]) => void): () => void
+
+  /** Ask main to focus the window that owns `panelId` and reveal it. */
+  focusWindowPanel(panelId: string): Promise<void>
+
+  /** Report this window's panels (across its workspaces) for cross-window discovery. */
+  reportWindowPanels(report: WindowPanelReport[]): Promise<void>
+
+  /** This window owns `panelId` — bring it forward within this window. */
+  onRevealPanelInWindow(callback: (panelId: string) => void): () => void
+
+  // ---------------------------------------------------------------------------
   // Cross-window drag coordination
   // ---------------------------------------------------------------------------
 
@@ -683,8 +712,10 @@ export interface ElectronAPI {
    *  targeted DRAG_END against the drag it's tracking. */
   onCrossWindowDragUpdate(callback: (screenPos: Point, snapshot: PanelTransferSnapshot, dragId?: string) => void): () => void
 
-  /** Report that this window accepted a cross-window drop. */
-  crossWindowDragDrop(panelId: string): Promise<void>
+  /** Claim the in-flight cross-window drop. Main is the arbiter: `accepted` is
+   *  false when the drag already resolved unclaimed (the source has fallen back
+   *  to a detach) — the caller must NOT materialize the panel in that case. */
+  crossWindowDragDrop(panelId: string): Promise<{ accepted: boolean }>
 
   /** Cancel an active cross-window drag. */
   crossWindowDragCancel(): Promise<void>
@@ -698,43 +729,47 @@ export interface ElectronAPI {
   // ---------------------------------------------------------------------------
 
   /** Create a new workspace in the main process. */
-  workspaceCreate(options?: { name?: string; rootPath?: string; id?: string; connection?: CompanionConnection }): Promise<WorkspaceMutationResult>
+  workspaceCreate(options?: { name?: string; rootPath?: string; id?: string; connection?: RuntimeConnection }): Promise<WorkspaceMutationResult>
 
-  /** Connect to a remote (SSH) or WSL companion. Returns the locator rootPath +
+  /** Connect to a remote (SSH) or WSL runtime. Returns the locator rootPath +
    *  connection record to create the workspace with. */
-  companionConnect(spec: RemoteConnectSpec): Promise<CompanionConnectResult>
+  runtimeConnect(spec: RemoteConnectSpec): Promise<RuntimeConnectResult>
 
   /** Re-establish a connection from a stored connection record (session restore
    *  / reconnect). Auth comes from the encrypted secret store. No-op if already
    *  connected. */
-  companionEnsure(connection: CompanionConnection): Promise<CompanionConnectResult>
+  runtimeEnsure(connection: RuntimeConnection): Promise<RuntimeConnectResult>
 
-  /** Ids of currently-connected remote/WSL companions. */
-  companionList(): Promise<string[]>
+  /** Ids of currently-connected remote/WSL runtimes. */
+  runtimeList(): Promise<string[]>
 
-  /** Current connection phase of the built-in LOCAL companion — a seed for the
+  /** Current connection phase of the built-in LOCAL runtime — a seed for the
    *  startup loading blocker, since the local connect can finish (or fail) before
-   *  a window subscribes to the COMPANION_STATUS broadcast. */
-  companionLocalStatus(): Promise<{ phase: CompanionPhase; message?: string }>
+   *  a window subscribes to the RUNTIME_STATUS broadcast. */
+  runtimeLocalStatus(): Promise<{ phase: RuntimePhase; message?: string }>
 
   /** Names of WSL distros installed on this host ([] on non-Windows / no WSL). */
-  companionWslDistros(): Promise<string[]>
+  runtimeWslDistros(): Promise<string[]>
 
   /** Connectable host aliases from the user's ~/.ssh/config ([] if none). */
-  companionSshHosts(): Promise<SshHostEntry[]>
+  runtimeSshHosts(): Promise<SshHostEntry[]>
 
-  /** Explicit clean install of a remote companion's daemon (wipes the host
+  /** Open a native file picker for an SSH private key. Returns the chosen
+   *  absolute path, or null if the dialog was cancelled. */
+  runtimePickSshKey(): Promise<string | null>
+
+  /** Explicit clean install of a remote runtime's daemon (wipes the host
    *  install dir, re-pulls/pushes the bundle, then connects). The only call that
    *  installs — probes (connect/ensure) never do. */
-  companionInstall(connection: CompanionConnection): Promise<CompanionConnectResult>
+  runtimeInstall(connection: RuntimeConnection): Promise<RuntimeConnectResult>
 
-  /** Literally delete a companion: stop its daemon and rm -rf the host install,
+  /** Literally delete a runtime: stop its daemon and rm -rf the host install,
    *  keeping the saved auth. Drops the workspace to `missing`; recover via
    *  Install. */
-  companionDelete(connection: CompanionConnection): Promise<{ ok: boolean; error?: string }>
+  runtimeDelete(connection: RuntimeConnection): Promise<{ ok: boolean; error?: string }>
 
-  /** Subscribe to companion connection status (main -> renderer). */
-  onCompanionStatus(callback: (event: CompanionStatusEvent) => void): () => void
+  /** Subscribe to runtime connection status (main -> renderer). */
+  onRuntimeStatus(callback: (event: RuntimeStatusEvent) => void): () => void
 
   /** Update workspace metadata in the main process. */
   workspaceUpdate(id: string, changes: Partial<Omit<WorkspaceInfo, 'id'>>): Promise<WorkspaceMutationResult>
@@ -764,10 +799,6 @@ export interface ElectronAPI {
   /** Subscribe to "load this saved layout" dispatches from the native Layouts menu. */
   onMenuLoadLayout(callback: (name: string) => void): () => void
 
-  /** Subscribe to panel-creation actions routed to this (main) window from a
-   *  detached dock/panel window, so the new panel lands on the canvas. */
-  onMenuCreatePanel(callback: (payload: import('./types').MenuCreatePanelPayload) => void): () => void
-
   /** Subscribe to browser navigation shortcuts forwarded from a focused webview
    *  guest (Cmd+R/[/]/L) or the Browser menu. */
   onBrowserShortcut(callback: (action: import('./types').BrowserShortcutAction) => void): () => void
@@ -775,13 +806,25 @@ export interface ElectronAPI {
   /** Show a native context menu. Returns the clicked item id, or null if dismissed. */
   showContextMenu(items: NativeContextMenuItem[]): Promise<string | null>
 
-  // ---------------------------------------------------------------------------
-  // Orchestrator (cate CLI graph sync)
-  // ---------------------------------------------------------------------------
+  /** Ordered top-level labels of the application menu. Backs the custom menu bar
+   *  drawn in the frameless Windows/Linux title bar. */
+  getAppMenuBarItems(): Promise<string[]>
 
-  /** Push a (panelId, webContentsId, alive) tuple to main so it can build a
-   *  webContents → portal-panel reverse map for popup parent resolution. */
-  orchRegisterPortalWc(payload: { panelId: string; webContentsId: number; alive: boolean }): void
+  /** Pop the native submenu of top-level menu `index` at window-relative (x, y),
+   *  anchored below its label in the title-bar menu bar. */
+  popupAppMenu(index: number, x: number, y: number): Promise<void>
+
+  // -------------------------------------------------------------------------
+  // Auto-updater — in-app "update ready" modal
+  // -------------------------------------------------------------------------
+
+  /** Subscribe to auto-updater status changes. Returns an unsubscribe fn. */
+  onUpdateStatus(callback: (status: UpdateStatus) => void): () => void
+  /** Pull the latest auto-updater status (the modal mounts after the event). */
+  getUpdateStatus(): Promise<UpdateStatus>
+  /** Restart now and apply the staged update (electron-updater quitAndInstall).
+   *  Resolves false if no update is staged or self-update isn't possible. */
+  quitAndInstallUpdate(): Promise<boolean>
 
   // -------------------------------------------------------------------------
   // Analytics — post-update feedback prompt
@@ -798,15 +841,14 @@ export interface ElectronAPI {
   submitFeedback(payload: { rating: number; comment?: string }): Promise<{ ok: boolean; buffered?: boolean }>
   /** Mark the feedback prompt as dismissed without submitting. */
   dismissFeedback(method: string): void
-  /** Track that the user engaged with the feedback modal (first interaction). */
-  trackFeedbackEngagement(): void
   /** Pull-based check for pending feedback (renderer calls on mount). */
   getPendingFeedback(): Promise<{ fromVersion: string; toVersion: string } | null>
   /** Track a promo link click (e.g. product_hunt, github_star, newsletter). */
   trackLinkClick(link: string): void
-  /** Record the first-run telemetry consent decision. Persists the choice and
-   *  releases the deferred crash-reporting + analytics init. */
-  setTelemetryConsent(choice: { crashReporting: boolean; usageAnalytics: boolean }): Promise<void>
+  /** Record that the telemetry notice (WelcomeDialog) was acknowledged for the
+   *  current TELEMETRY_NOTICE_VERSION. Informational only — telemetry is always
+   *  on in packaged builds and does not depend on this. */
+  acknowledgeTelemetryNotice(): Promise<void>
   /** Report an anonymous feature-usage signal (gated by analytics consent).
    *  `feature` is a short key; `props` are small primitives, clamped in main. */
   trackFeatureUsed(feature: string, props?: Record<string, string | number | boolean>): void
@@ -827,9 +869,6 @@ export interface ElectronAPI {
   /** Queue a steering message to deliver after the current assistant turn. */
   agentSteer(panelId: string, text: string, images?: AgentImageAttachment[]): Promise<void>
 
-  /** Queue a follow-up message to deliver after the agent fully completes. */
-  agentFollowUp(panelId: string, text: string, images?: AgentImageAttachment[]): Promise<void>
-
   /** Set the reasoning level (off/minimal/low/medium/high/xhigh). */
   agentSetThinkingLevel(panelId: string, level: AgentThinkingLevel): Promise<void>
 
@@ -838,9 +877,6 @@ export interface ElectronAPI {
 
   /** Enable/disable automatic compaction on context-threshold overflow. */
   agentSetAutoCompaction(panelId: string, enabled: boolean): Promise<void>
-
-  /** Enable/disable automatic retry on transient (overload/5xx) errors. */
-  agentSetAutoRetry(panelId: string, enabled: boolean): Promise<void>
 
   /** Abort an in-progress auto-retry (cancels backoff and stops retrying). */
   agentAbortRetry(panelId: string): Promise<void>
@@ -857,45 +893,11 @@ export interface ElectronAPI {
   /** Get pi's RPC session state snapshot. */
   agentGetState(panelId: string): Promise<AgentRpcState>
 
-  /** Export the current session to an HTML file. */
-  agentExportHtml(panelId: string, outputPath?: string): Promise<{ path: string }>
-
-  /** Start a new pi session in the same RPC process. */
-  agentNewSession(panelId: string, parentSession?: string): Promise<{ cancelled: boolean }>
-
-  /** Load a different pi session file in the same RPC process. */
-  agentSwitchSession(panelId: string, sessionPath: string): Promise<{ cancelled: boolean }>
-
   /** Fork from a specific prior user message. */
   agentFork(panelId: string, entryId: string): Promise<{ text: string; cancelled: boolean }>
 
-  /** Clone the current active branch into a new session. */
-  agentClone(panelId: string): Promise<{ cancelled: boolean }>
-
   /** Fork-eligible user messages (entryId + text). */
   agentGetForkMessages(panelId: string): Promise<Array<{ entryId: string; text: string }>>
-
-  /** Text of the last assistant message (or null). */
-  agentGetLastAssistantText(panelId: string): Promise<string | null>
-
-  /** Set a display name for the current session. */
-  agentSetSessionName(panelId: string, name: string): Promise<void>
-
-  /** Get all messages in the current pi session. */
-  agentGetMessages(panelId: string): Promise<unknown[]>
-
-  /** Execute a bash command in pi (result is added to the LLM context on the
-   *  next prompt). Returns BashResult. */
-  agentBash(panelId: string, command: string): Promise<unknown>
-
-  /** Abort a running bash command. */
-  agentAbortBash(panelId: string): Promise<void>
-
-  /** Control how steering messages drain. */
-  agentSetSteeringMode(panelId: string, mode: 'all' | 'one-at-a-time'): Promise<void>
-
-  /** Control how follow-up messages drain. */
-  agentSetFollowUpMode(panelId: string, mode: 'all' | 'one-at-a-time'): Promise<void>
 
   /** Selectable models, derived session-independently from connected providers
    *  in auth.json + the custom OpenAI endpoint. No agent session required. */
@@ -925,58 +927,20 @@ export interface ElectronAPI {
   /** Available slash commands (skills, prompt templates, extension commands). */
   agentGetCommands(panelId: string): Promise<AgentSlashCommand[]>
 
-  /** Approve or deny a pending tool call. */
-  agentToolDecision(panelId: string, toolCallId: string, decision: 'allow' | 'deny', reason?: string): Promise<void>
-
   /** Open <cwd>/.cate/pi-agent/{agents|prompts} in the OS file manager. */
-  agentOpenSkillsFolder(cwd: string, kind: 'agents' | 'prompts' | 'skills'): Promise<void>
+  agentOpenSkillsFolder(cwd: string, kind: 'agents' | 'prompts'): Promise<void>
 
-  /** Open a single skill/prompt/agent file in the OS default editor. */
+  /** Open a single agent/prompt file in the OS default editor. */
   agentOpenSkillFile(filePath: string): Promise<void>
 
-  /** Delete a skill/prompt/agent file. Only allowed under the workspace's pi-agent dir. */
+  /** Delete an agent/prompt file. Only allowed under the workspace's pi-agent dir. */
   agentDeleteSkillFile(cwd: string, filePath: string): Promise<void>
 
-  /** Create a new skill/prompt file from a template, then open it. */
-  agentCreateSkill(cwd: string, kind: 'agents' | 'prompts' | 'skills', name: string): Promise<string>
+  /** Create a new agent/prompt file from a template, then open it. */
+  agentCreateSkill(cwd: string, kind: 'agents' | 'prompts', name: string): Promise<string>
 
   /** List user files under <cwd>/.cate/pi-agent/{agents|prompts}. */
-  agentListSkillFiles(cwd: string, kind: 'agents' | 'prompts' | 'skills'): Promise<Array<{ name: string; description?: string; path: string }>>
-
-  /** Browse-able marketplace catalog backed by a live scrape of pi.dev/packages
-   *  (~2.9k entries, paginated). Returns an empty list when pi.dev is
-   *  unreachable so the UI can render a "Catalog unavailable" state. */
-  agentMarketplaceList(params?: {
-    page?: number
-    query?: string
-    sort?: 'downloads' | 'recent' | 'name'
-  }): Promise<{
-    entries: Array<{
-      name: string
-      description: string
-      author: string
-      downloads: number
-      type: string
-      repoUrl: string
-      requiresTerminal: boolean
-    }>
-    totalPages: number
-    page: number
-  }>
-
-  /** List extensions currently present in <cwd>/.cate/pi-agent/extensions/. */
-  agentMarketplaceListInstalled(cwd: string): Promise<Array<{
-    name: string
-    description?: string
-    requiresTerminal: boolean
-    path: string
-  }>>
-
-  /** Install an extension via `pi install npm:<name>`. Streams output to the log. */
-  agentMarketplaceInstall(cwd: string, name: string): Promise<{ ok: boolean; error?: string }>
-
-  /** Uninstall an extension via `pi remove npm:<name>`. */
-  agentMarketplaceUninstall(cwd: string, name: string): Promise<{ ok: boolean; error?: string }>
+  agentListSkillFiles(cwd: string, kind: 'agents' | 'prompts'): Promise<Array<{ name: string; description?: string; path: string }>>
 
   // ---------------------------------------------------------------------------
   // Cross-agent skills
@@ -1014,9 +978,6 @@ export interface ElectronAPI {
 
   /** Stream of agent events forwarded from the main process. */
   onAgentEvent(callback: (envelope: AgentEventEnvelope) => void): () => void
-
-  /** Tool-call approvals requested by the agent. */
-  onAgentToolRequest(callback: (req: AgentToolApprovalRequest) => void): () => void
 
   // ---------------------------------------------------------------------------
   // Pi auth / providers

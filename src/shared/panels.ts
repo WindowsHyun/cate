@@ -27,8 +27,6 @@ export interface SharedPanelDefinition {
   label: string
   /** Brand color used in panel chrome and the drag ghost window. */
   brandColor: string
-  /** More saturated variant used in the full-screen panel switcher overlay. */
-  switcherColor: string
   /** Dim variant used in the minimap dot. */
   mutedColor: string
   /** Tailwind class for tab-bar tint when the tab is active. */
@@ -61,7 +59,6 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     type: 'terminal',
     label: 'Terminal',
     brandColor: '#4DD964',
-    switcherColor: '#34C759',
     mutedColor: '#4a9960',
     tintClass: 'text-emerald-400',
     defaultSize: { width: 640, height: 400 },
@@ -73,7 +70,6 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     type: 'browser',
     label: 'Browser',
     brandColor: '#4A9EFF',
-    switcherColor: '#007AFF',
     mutedColor: '#4a7ab0',
     tintClass: 'text-sky-400',
     defaultSize: { width: 800, height: 600 },
@@ -85,7 +81,6 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     type: 'editor',
     label: 'Editor',
     brandColor: '#FF9F0A',
-    switcherColor: '#FF9500',
     mutedColor: '#b07440',
     tintClass: 'text-orange-400',
     defaultSize: { width: 600, height: 500 },
@@ -97,7 +92,6 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     type: 'agent',
     label: 'Cate Agent',
     brandColor: '#4A9EFF',
-    switcherColor: '#4A9EFF',
     mutedColor: '#3a7acc',
     tintClass: 'text-blue-400',
     defaultSize: { width: 760, height: 480 },
@@ -109,7 +103,6 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     type: 'document',
     label: 'Document',
     brandColor: '#AF52DE',
-    switcherColor: '#AF52DE',
     mutedColor: '#7a4a9a',
     tintClass: 'text-purple-400',
     defaultSize: { width: 700, height: 500 },
@@ -133,7 +126,6 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     type: 'canvas',
     label: 'Canvas',
     brandColor: '#BF5AF2',
-    switcherColor: '#BF5AF2',
     mutedColor: '#7a4a9a',
     tintClass: 'text-violet-400',
     defaultSize: { width: 800, height: 600 },
@@ -147,4 +139,41 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
  *  drag-ghost behaviour). */
 export function getSharedPanelDef(type: PanelType | string): SharedPanelDefinition {
   return PANEL_DEFINITIONS[type as PanelType] ?? PANEL_DEFINITIONS.editor
+}
+
+// -----------------------------------------------------------------------------
+// Default panel size resolution
+// -----------------------------------------------------------------------------
+
+// The factory defaults for the "Default panel width/height" setting. Mirrored
+// here (rather than imported from ./types) so this module stays at the bottom of
+// the import graph — types.ts imports PANEL_DEFINITIONS from here, so a value
+// import back into types would form a load-time cycle. A user who hasn't touched
+// the setting leaves it at these values, which we treat as "unset" so each panel
+// type keeps its own tuned default size.
+const UNSET_PANEL_WIDTH = 600
+const UNSET_PANEL_HEIGHT = 400
+
+/** Subset of AppSettings this module needs — kept narrow so panels.ts doesn't
+ *  depend on the full settings shape (or its DEFAULT_SETTINGS value). */
+export interface PanelSizeSettings {
+  defaultPanelWidth?: number
+  defaultPanelHeight?: number
+}
+
+/** The size a freshly-created panel of `type` should get. Honors the user's
+ *  "Default panel width/height" setting when it's been customized away from the
+ *  factory default; otherwise falls back to the panel type's own default size.
+ *  A non-positive override dimension is ignored (falls back per dimension). */
+export function resolvePanelSize(type: PanelType, settings?: PanelSizeSettings | null): Size {
+  const fallback = getSharedPanelDef(type).defaultSize
+  const w = settings?.defaultPanelWidth
+  const h = settings?.defaultPanelHeight
+  const customW = typeof w === 'number' && w > 0 && w !== UNSET_PANEL_WIDTH
+  const customH = typeof h === 'number' && h > 0 && h !== UNSET_PANEL_HEIGHT
+  if (!customW && !customH) return fallback
+  return {
+    width: customW ? (w as number) : fallback.width,
+    height: customH ? (h as number) : fallback.height,
+  }
 }

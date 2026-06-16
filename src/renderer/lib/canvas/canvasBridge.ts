@@ -6,8 +6,9 @@
 
 import type { StoreApi } from 'zustand'
 import type { CanvasStore } from '../../stores/canvasStore'
-import type { PanelType, Point, Size, CanvasNodeId, CanvasNodeState, DockLayoutNode } from '../../../shared/types'
+import type { PanelType, Point, Size, CanvasNodeId, CanvasNodeState } from '../../../shared/types'
 import { findNodeDockStore } from '../../panels/nodeDockRegistry'
+import { collectPanelIds } from '../../../shared/collectPanelIds'
 
 // -----------------------------------------------------------------------------
 // Canvas operations callback — the contract createCanvasOps implements, letting
@@ -23,6 +24,7 @@ export interface CanvasOperations {
     panelId: string,
     panelType: PanelType,
     onCancelled: (panelId: string) => void,
+    size?: Size,
   ) => boolean
   removeNodeForPanel: (panelId: string) => void
   loadWorkspaceCanvas: (
@@ -34,13 +36,6 @@ export interface CanvasOperations {
   focusPanelNode: (panelId: string) => void
   /** Access the underlying store API (needed by session restore) */
   storeApi: StoreApi<CanvasStore>
-}
-
-function countLayoutPanels(node: DockLayoutNode): number {
-  if (node.type === 'tabs') return node.panelIds.length
-  let total = 0
-  for (const child of node.children) total += countLayoutPanels(child)
-  return total
 }
 
 export function createCanvasOps(storeApi: StoreApi<CanvasStore>): CanvasOperations {
@@ -56,8 +51,9 @@ export function createCanvasOps(storeApi: StoreApi<CanvasStore>): CanvasOperatio
       panelId: string,
       panelType: PanelType,
       onCancelled: (panelId: string) => void,
+      size?: Size,
     ) {
-      return storeApi.getState().beginPlacement(panelId, panelType, onCancelled)
+      return storeApi.getState().beginPlacement(panelId, panelType, onCancelled, size)
     },
 
     removeNodeForPanel(panelId: string) {
@@ -74,7 +70,7 @@ export function createCanvasOps(storeApi: StoreApi<CanvasStore>): CanvasOperatio
       const layout = liveStore
         ? liveStore.getState().zones.center.layout
         : node.dockLayout
-      if (layout && countLayoutPanels(layout) > 0) return
+      if (layout && collectPanelIds(layout).length > 0) return
       state.removeNode(nodeId)
     },
 

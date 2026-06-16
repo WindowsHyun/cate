@@ -136,6 +136,16 @@ export const BOOT_SNAPSHOT_WRITE = 'boot:snapshotWrite' // renderer -> main
  *  via OS "Open With..."). Renderer opens it as a new workspace. */
 export const APP_OPEN_PATH = 'app:openPath'
 
+// Auto-updater — in-app "update ready" modal
+// Main -> renderer: update lifecycle status. Payload: UpdateStatus
+// ({ state, version, percent? }). Broadcast on every electron-updater event.
+export const UPDATE_STATUS = 'update:status'
+// Renderer -> main: restart now and apply the staged update (quitAndInstall).
+export const UPDATE_QUIT_AND_INSTALL = 'update:quitAndInstall'
+// Renderer -> main: pull the latest status (the modal can mount after the
+// download-finished event already fired). Returns the cached UpdateStatus.
+export const UPDATE_GET_STATUS = 'update:getStatus'
+
 // Analytics — post-update feedback prompt
 // Main -> renderer: show the modal. Payload: { fromVersion, toVersion }
 export const ANALYTICS_FEEDBACK_PROMPT = 'analytics:feedbackPrompt'
@@ -143,15 +153,12 @@ export const ANALYTICS_FEEDBACK_PROMPT = 'analytics:feedbackPrompt'
 export const ANALYTICS_FEEDBACK_SUBMIT = 'analytics:feedbackSubmit'
 // Renderer -> main: user dismissed the modal without submitting.
 export const ANALYTICS_FEEDBACK_DISMISS = 'analytics:feedbackDismiss'
-// Renderer -> main: user interacted with the feedback modal (first star click or textarea focus).
-export const ANALYTICS_FEEDBACK_ENGAGED = 'analytics:feedbackEngaged'
 // Renderer -> main: pull-based check for pending feedback (returns payload or null).
 export const ANALYTICS_FEEDBACK_GET_PENDING = 'analytics:feedbackGetPending'
 // Renderer -> main: track a promo link click (Product Hunt, GitHub, newsletter).
 export const ANALYTICS_LINK_CLICK = 'analytics:linkClick'
-// Renderer -> main: first-run telemetry consent decision.
-// Payload: { crashReporting: boolean, usageAnalytics: boolean }
-export const TELEMETRY_SET_CONSENT = 'telemetry:setConsent'
+// Renderer -> main: user dismissed the telemetry notice (WelcomeDialog). No payload.
+export const TELEMETRY_ACKNOWLEDGE_NOTICE = 'telemetry:acknowledgeNotice'
 // Renderer -> main: a feature was used (anonymous usage signal). Payload:
 // { feature: string, props?: Record<string, string|number|boolean> }
 export const ANALYTICS_TRACK_USAGE = 'analytics:trackUsage'
@@ -168,12 +175,6 @@ export const MENU_TRIGGER_ACTION = 'menu:triggerAction'
 /** Load a named saved layout — main sends the layout name and the focused
  *  renderer restores it (replacing the workspace). */
 export const MENU_LOAD_LAYOUT = 'menu:loadLayout'
-/** Create-panel dispatch routed to a *main* window. Sent when a panel-creation
- *  shortcut/menu item fires from a detached dock/panel window (which has no
- *  canvas): main forwards it to the workspace's main window so the new panel
- *  lands on the canvas. Payload carries the action and the originating
- *  workspace id. */
-export const MENU_CREATE_PANEL = 'menu:createPanel'
 
 /** Browser navigation shortcut (main -> renderer). Sent when a webview guest
  *  swallows a browser key (Cmd+R/[/]/L) via before-input-event, or from the
@@ -187,6 +188,14 @@ export const BROWSER_SET_PROXY = 'browser:setProxy'
 
 // Native context menu (renderer -> main)
 export const MENU_SHOW_CONTEXT = 'menu:showContext'
+
+/** Frameless menu bar (renderer -> main). On Windows/Linux the native menu bar
+ *  is gone (frame:false), so the custom title bar draws the top-level labels and
+ *  these channels reuse the live application menu as the single source of truth:
+ *  one returns the ordered top-level labels, the other pops a top-level item's
+ *  native submenu at a screen-relative point below its label. */
+export const MENU_GET_BAR_ITEMS = 'menu:getBarItems'
+export const MENU_POPUP_BAR_ITEM = 'menu:popupBarItem'
 
 // Dialog
 export const DIALOG_OPEN_FOLDER = 'dialog:openFolder'
@@ -214,6 +223,7 @@ export const SQLITE_EXEC = 'sqlite:exec'
 // untitled buffer into a real file inside a detached panel window.
 export const PANEL_WINDOW_SYNC_META = 'panel:windowSyncMeta'
 
+
 // Recent Projects
 export const RECENT_PROJECTS_GET = 'recent-projects:get'
 export const RECENT_PROJECTS_ADD = 'recent-projects:add'
@@ -224,7 +234,7 @@ export const SIDEBAR_SESSION_GET = 'sidebar-session:get'
 export const SIDEBAR_SESSION_SET = 'sidebar-session:set'
 
 // Remote projects (persisted restore snapshots + reconnect info for
-// cate-companion:// workspaces, which can't use the local .cate/ files)
+// cate-runtime:// workspaces, which can't use the local .cate/ files)
 export const REMOTE_PROJECTS_GET = 'remote-projects:get'
 export const REMOTE_PROJECTS_SET = 'remote-projects:set'
 
@@ -247,16 +257,22 @@ export const WINDOW_TOGGLE_MAXIMIZE = 'window:toggleMaximize' // renderer -> mai
 export const WINDOW_CLOSE = 'window:close'                    // renderer -> main
 export const WINDOW_IS_MAXIMIZED = 'window:isMaximized'       // renderer -> main (sync pull)
 export const WINDOW_MAXIMIZE_STATE = 'window:maximizeState'   // main -> renderer (push)
+// Close every detached (dock) window belonging to a workspace — used when the
+// workspace is closed or reloaded so its detached windows go with it.
+export const WINDOW_CLOSE_FOR_WORKSPACE = 'window:closeForWorkspace' // renderer -> main
+// Run a workspace-level action (e.g. reload-from-disk) in the MAIN window when it
+// was invoked from a detached window, whose per-window store doesn't own the real
+// workspace. Main forwards it to the active main window via MENU_TRIGGER_ACTION.
+export const RUN_ACTION_IN_MAIN = 'window:runActionInMain' // renderer -> main
 
 // Panel transfer (cross-window)
 export const PANEL_TRANSFER = 'panel:transfer'
 export const PANEL_RECEIVE = 'panel:receive'       // main -> renderer
 export const PANEL_TRANSFER_ACK = 'panel:transferAck'
 
-// Panel window queries (session persistence)
-export const PANEL_WINDOWS_LIST = 'panel:windowsList'
-export const PANEL_WINDOW_DOCK_BACK = 'panel:dockBack'  // renderer -> main (double-click title bar)
-export const PANEL_WINDOW_SYNC_PTY = 'panel:windowSyncPty' // renderer -> main: register panelId -> ptyId for calling panel window
+// Dock-back — re-integrate a transferred panel into the main window (shared by
+// dock windows via the title-bar double-click).
+export const PANEL_WINDOW_DOCK_BACK = 'panel:dockBack'  // renderer -> main
 
 // Cross-window drag-and-drop
 export const DRAG_START = 'drag:start'
@@ -276,6 +292,16 @@ export const DOCK_WINDOW_RESTORE = 'dock:windowRestore'      // renderer -> main
 // Final awaited sync from a dock window before quit reads listDockWindows().
 export const DOCK_WINDOW_FLUSH_SYNC = 'dock:windowFlushSync' // main -> renderer
 export const DOCK_WINDOW_FLUSH_SYNC_DONE = 'dock:windowFlushSyncDone' // renderer -> main
+
+// Cross-window panel discovery — main maintains the union of panels across ALL
+// windows and broadcasts it, so every window's overview + Cmd+K can find/reveal
+// panels that live in other windows. Every window type reports its own panels via
+// WINDOW_PANELS_REPORT (lightweight, on appStore change), kept separate from the
+// heavier dock/panel session-persistence syncs.
+export const WINDOW_PANELS_CHANGED = 'window:panelsChanged'   // main -> renderer (broadcast)
+export const FOCUS_WINDOW_PANEL = 'window:focusPanel'         // renderer -> main
+export const REVEAL_PANEL_IN_WINDOW = 'detached:revealPanelInWindow' // main -> owning renderer
+export const WINDOW_PANELS_REPORT = 'window:panelsReport'     // renderer -> main (this window's panels)
 
 // Cross-window drag coordination
 export const CROSS_WINDOW_DRAG_START = 'crossDrag:start'       // renderer -> main
@@ -298,9 +324,7 @@ export const AGENT_INTERRUPT = 'agent:interrupt'     // renderer -> main
 export const AGENT_DISPOSE = 'agent:dispose'         // renderer -> main
 export const AGENT_SET_MODEL = 'agent:setModel'      // renderer -> main
 export const AGENT_GET_COMMANDS = 'agent:getCommands' // renderer -> main (skills + prompts + extension cmds)
-export const AGENT_TOOL_DECISION = 'agent:toolDecision' // renderer -> main (allow/deny pending tool call)
 export const AGENT_EVENT = 'agent:event'             // main -> renderer (forwarded pi event)
-export const AGENT_TOOL_REQUEST = 'agent:toolRequest' // main -> renderer (approval needed)
 export const AGENT_OPEN_SKILLS_FOLDER = 'agent:openSkillsFolder' // renderer -> main
 export const AGENT_OPEN_SKILL_FILE = 'agent:openSkillFile' // renderer -> main
 export const AGENT_DELETE_SKILL_FILE = 'agent:deleteSkillFile' // renderer -> main
@@ -309,27 +333,14 @@ export const AGENT_LIST_SKILL_FILES = 'agent:listSkillFiles' // renderer -> main
 
 // Pi agent — extended RPC surface
 export const AGENT_STEER = 'agent:steer'                       // renderer -> main
-export const AGENT_FOLLOW_UP = 'agent:followUp'                // renderer -> main
 export const AGENT_SET_THINKING_LEVEL = 'agent:setThinkingLevel' // renderer -> main
 export const AGENT_COMPACT = 'agent:compact'                   // renderer -> main
 export const AGENT_SET_AUTO_COMPACTION = 'agent:setAutoCompaction'
-export const AGENT_SET_AUTO_RETRY = 'agent:setAutoRetry'
 export const AGENT_ABORT_RETRY = 'agent:abortRetry'
 export const AGENT_GET_SESSION_STATS = 'agent:getSessionStats'
 export const AGENT_GET_STATE = 'agent:getState'
-export const AGENT_EXPORT_HTML = 'agent:exportHtml'
-export const AGENT_NEW_SESSION = 'agent:newSession'
-export const AGENT_SWITCH_SESSION = 'agent:switchSession'
 export const AGENT_FORK = 'agent:fork'
-export const AGENT_CLONE = 'agent:clone'
 export const AGENT_GET_FORK_MESSAGES = 'agent:getForkMessages'
-export const AGENT_GET_LAST_ASSISTANT_TEXT = 'agent:getLastAssistantText'
-export const AGENT_SET_SESSION_NAME = 'agent:setSessionName'
-export const AGENT_GET_MESSAGES = 'agent:getMessages'
-export const AGENT_BASH = 'agent:bash'                         // renderer -> main
-export const AGENT_ABORT_BASH = 'agent:abortBash'
-export const AGENT_SET_STEERING_MODE = 'agent:setSteeringMode'
-export const AGENT_SET_FOLLOW_UP_MODE = 'agent:setFollowUpMode'
 export const AGENT_LIST_MODELS = 'agent:listModels'
 export const AGENT_UI_RESPONSE = 'agent:uiResponse'            // renderer -> main (reply to extension_ui_request)
 
@@ -337,12 +348,6 @@ export const AGENT_UI_RESPONSE = 'agent:uiResponse'            // renderer -> ma
 export const AGENT_LIST_SESSIONS = 'agent:listSessions'         // renderer -> main
 export const AGENT_LOAD_SESSION_MESSAGES = 'agent:loadSessionMessages' // renderer -> main
 export const AGENT_DELETE_SESSION = 'agent:deleteSession'       // renderer -> main
-
-// Pi extension marketplace
-export const AGENT_MARKETPLACE_LIST = 'agent:marketplaceList'             // renderer -> main
-export const AGENT_MARKETPLACE_LIST_INSTALLED = 'agent:marketplaceListInstalled' // renderer -> main
-export const AGENT_MARKETPLACE_INSTALL = 'agent:marketplaceInstall'       // renderer -> main
-export const AGENT_MARKETPLACE_UNINSTALL = 'agent:marketplaceUninstall'   // renderer -> main
 
 // Custom OpenAI-compatible provider (pi models.json)
 export const AGENT_CUSTOM_MODELS_GET = 'agent:customModelsGet'   // renderer -> main
@@ -380,16 +385,17 @@ export const WORKSPACE_UPDATE = 'workspace:update'
 export const WORKSPACE_REMOVE = 'workspace:remove'
 export const WORKSPACE_CHANGED = 'workspace:changed' // main -> renderer (broadcast)
 
-// Companion connections (remote / WSL backends)
-export const COMPANION_CONNECT = 'companion:connect'       // renderer -> main
-export const COMPANION_ENSURE = 'companion:ensure'         // renderer -> main (reconnect from a stored connection)
-export const COMPANION_LIST = 'companion:list'             // renderer -> main
-export const COMPANION_WSL_DISTROS = 'companion:wsl-distros' // renderer -> main (list installed WSL distros)
-export const COMPANION_SSH_HOSTS = 'companion:ssh-hosts'   // renderer -> main (host aliases from ~/.ssh/config)
-export const COMPANION_INSTALL = 'companion:install'       // renderer -> main (explicit clean install + connect)
-export const COMPANION_DELETE = 'companion:delete'         // renderer -> main (rm -rf the host install, keep saved auth)
-export const COMPANION_STATUS = 'companion:status'         // main -> renderer (broadcast)
-export const COMPANION_LOCAL_STATUS = 'companion:local-status' // renderer -> main (current LOCAL phase, seeds the loading blocker)
+// Runtime connections (remote / WSL backends)
+export const RUNTIME_CONNECT = 'runtime:connect'       // renderer -> main
+export const RUNTIME_ENSURE = 'runtime:ensure'         // renderer -> main (reconnect from a stored connection)
+export const RUNTIME_LIST = 'runtime:list'             // renderer -> main
+export const RUNTIME_WSL_DISTROS = 'runtime:wsl-distros' // renderer -> main (list installed WSL distros)
+export const RUNTIME_SSH_HOSTS = 'runtime:ssh-hosts'   // renderer -> main (host aliases from ~/.ssh/config)
+export const RUNTIME_INSTALL = 'runtime:install'       // renderer -> main (explicit clean install + connect)
+export const RUNTIME_DELETE = 'runtime:delete'         // renderer -> main (rm -rf the host install, keep saved auth)
+export const RUNTIME_STATUS = 'runtime:status'         // main -> renderer (broadcast)
+export const RUNTIME_LOCAL_STATUS = 'runtime:local-status' // renderer -> main (current LOCAL phase, seeds the loading blocker)
+export const RUNTIME_PICK_SSH_KEY = 'runtime:pick-ssh-key' // renderer -> main (native file picker for an SSH private key)
 
 
 // Performance profiler (only active under CATE_PERF=1)

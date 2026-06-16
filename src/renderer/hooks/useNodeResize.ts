@@ -12,12 +12,14 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { minimumSize, findSharedBorders, snapResizeDelta } from '../canvas/layoutEngine'
 import type { SharedBorder } from '../canvas/layoutEngine'
 import type { PanelType, Point, Size } from '../../shared/types'
-import { detectEdge, getCursorForEdge } from './resizeEdge'
+import { getCursorForEdge } from './resizeEdge'
 import type { ResizeEdge } from './resizeEdge'
+import { pinDocumentCursor } from '../lib/dom/pinDocumentCursor'
+import { acquireBodyClass, releaseBodyClass } from '../lib/dom/bodyClassRefcount'
 
 // Re-exported so existing importers (CanvasNode, useNodeResizeCursor,
 // NodeResizeOverlay) keep importing from this module unchanged.
-export { detectEdge, getCursorForEdge } from './resizeEdge'
+export { getCursorForEdge } from './resizeEdge'
 export type { ResizeEdge } from './resizeEdge'
 
 interface PendingResize {
@@ -49,7 +51,6 @@ interface UseNodeResizeReturn {
   isResizing: boolean
   resizeEdge: ResizeEdge | null
   handleResizeStart: (e: React.MouseEvent, edge: ResizeEdge) => void
-  getCursor: (edge: ResizeEdge | null) => string
 }
 
 /** Whether the edge is a cardinal (non-corner) edge. */
@@ -109,10 +110,12 @@ export function useNodeResize(
       const previousBodyCursor = document.body.style.cursor
       const resizeCursor = getCursorForEdge(edge)
       document.body.style.cursor = resizeCursor
-      document.body.classList.add('canvas-interacting')
-      const cursorStyleEl = document.createElement('style')
-      cursorStyleEl.textContent = `*, *::before, *::after { cursor: ${resizeCursor} !important; }`
-      document.head.appendChild(cursorStyleEl)
+      const unpinCursor = pinDocumentCursor(resizeCursor)
+      // Take a refcount on the shared `canvas-interacting` class (pinDocumentCursor
+      // already added it). This keeps a concurrent wheel-pan's ~150ms quiet timer
+      // from stripping the class — and the pointer-events overrides it carries —
+      // out from under the live resize.
+      acquireBodyClass('canvas-interacting')
 
       // Detect shared borders for cardinal edges
       if (isCardinalEdge(edge)) {
@@ -403,10 +406,18 @@ export function useNodeResize(
         }
       }
 
-      const handleMouseUp = (ev: MouseEvent) => {
+      // Tear down all window listeners and restore the pinned cursor. Shared by
+      // the normal mouseup path and the blur-cancel path.
+      const detach = () => {
         window.removeEventListener('mousemove', handleMouseMove)
         window.removeEventListener('mouseup', handleMouseUp)
+        window.removeEventListener('blur', handleBlur)
+        document.body.style.cursor = previousBodyCursor
+        unpinCursor()
+        releaseBodyClass('canvas-interacting')
+      }
 
+      const handleMouseUp = (ev: MouseEvent) => {
         // Snap the moving edge(s) to the grid on release (Alt bypasses, same
         // window only). Recomputing from the final cursor position with snapping
         // on lands the committed geometry — primary node and any shared-border
@@ -421,9 +432,7 @@ export function useNodeResize(
         isResizingRef.current = false
         currentEdgeRef.current = null
 
-        document.body.style.cursor = previousBodyCursor
-        document.body.classList.remove('canvas-interacting')
-        cursorStyleEl.remove()
+        detach()
 
         // Cancel any pending RAF and flush the last geometry immediately
         if (rafId.current) {
@@ -447,21 +456,36 @@ export function useNodeResize(
         resizeStateRef.current = null
       }
 
+      // Cmd+Tab (or any window blur) mid-resize fires no mouseup. Without this
+      // the mousemove listener stays attached, the body cursor stays pinned to
+      // the resize icon, and the `*{cursor:!important}` rule keeps blocking hit-
+      // testing. Cancel the gesture in place: restore the cursor, drop listeners,
+      // and reset state. Whatever geometry was last committed stays (the live
+      // drag already wrote it); we just don't run the release-time snap.
+      const handleBlur = () => {
+        detach()
+        if (rafId.current) {
+          cancelAnimationFrame(rafId.current)
+          rafId.current = 0
+        }
+        isResizingRef.current = false
+        currentEdgeRef.current = null
+        sharedBordersRef.current = []
+        neighborStartRef.current = []
+        resizeStateRef.current = null
+        pendingResize.current = null
+      }
+
       window.addEventListener('mousemove', handleMouseMove)
       window.addEventListener('mouseup', handleMouseUp)
+      window.addEventListener('blur', handleBlur)
     },
     [nodeId, panelType, minSize.width, minSize.height],
-  )
-
-  const getCursor = useCallback(
-    (edge: ResizeEdge | null): string => getCursorForEdge(edge),
-    [],
   )
 
   return {
     isResizing: isResizingRef.current,
     resizeEdge: currentEdgeRef.current,
     handleResizeStart,
-    getCursor,
   }
 }

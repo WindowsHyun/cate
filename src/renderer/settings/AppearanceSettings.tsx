@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { Check, Trash, Upload, DownloadSimple, Sparkle } from '@phosphor-icons/react'
+import { Tooltip } from '../ui/Tooltip'
 import { useSettingsStore } from '../stores/settingsStore'
-import { SettingRow, Select, NumberInput, SearchableBlock } from './SettingsComponents'
+import { SettingRow, Select, NumberInput, TextInput, SearchableBlock, SecondaryButton } from './SettingsComponents'
 import type { Theme } from '../../shared/types'
 import { validateTheme } from '../../shared/theme'
 import { BASE_DARK, BASE_LIGHT, BUILT_IN_THEMES } from '../../shared/themes'
@@ -110,14 +111,10 @@ export function AppearanceSettings() {
       {/* Mode + catalog header */}
       <div className="flex items-center justify-between py-2.5">
         <span className="text-sm text-primary">Theme</span>
-        <button
-          onClick={handleImport}
-          className="flex items-center gap-1.5 px-2 py-1 text-[11px] rounded text-secondary hover:text-primary bg-surface-2 hover:bg-hover border border-subtle"
-          title="Import a theme from a JSON file"
-        >
+        <SecondaryButton onClick={handleImport} title="Import a theme from a JSON file">
           <Upload size={11} />
           Import…
-        </button>
+        </SecondaryButton>
       </div>
 
       {importError && <div className="text-[11px] text-red-400 mb-2">{importError}</div>}
@@ -188,6 +185,14 @@ export function AppearanceSettings() {
       <SettingRow label="Editor font size">
         <NumberInput value={store.editorFontSize} onChange={(v) => store.setSetting('editorFontSize', v)} min={8} max={32} step={1} />
       </SettingRow>
+
+      <SettingRow label="Editor font family" description="Blank = default (Menlo, Monaco)">
+        <TextInput
+          value={store.editorFontFamily}
+          onChange={(v) => store.setSetting('editorFontFamily', v)}
+          placeholder="e.g., JetBrains Mono"
+        />
+      </SettingRow>
     </div>
   )
 }
@@ -253,21 +258,25 @@ function ThemeCard({
       <div className="flex items-center justify-between min-w-0">
         <span className="text-[12px] text-primary truncate">{theme.name}</span>
         <div className="flex items-center gap-1 flex-shrink-0">
-          <button
-            onClick={(e) => { e.stopPropagation(); onExport() }}
-            className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-muted hover:text-primary transition-opacity"
-            title="Export theme"
-          >
-            <DownloadSimple size={12} />
-          </button>
-          {onDelete ? (
+          <Tooltip label="Export theme">
             <button
-              onClick={(e) => { e.stopPropagation(); onDelete() }}
-              className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-muted hover:text-red-400 transition-opacity"
-              title="Remove theme"
+              onClick={(e) => { e.stopPropagation(); onExport() }}
+              className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-muted hover:text-primary transition-opacity"
+              aria-label="Export theme"
             >
-              <Trash size={12} />
+              <DownloadSimple size={12} />
             </button>
+          </Tooltip>
+          {onDelete ? (
+            <Tooltip label="Remove theme">
+              <button
+                onClick={(e) => { e.stopPropagation(); onDelete() }}
+                className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-muted hover:text-red-400 transition-opacity"
+                aria-label="Remove theme"
+              >
+                <Trash size={12} />
+              </button>
+            </Tooltip>
           ) : (
             <span className="text-[10px] text-muted">built-in</span>
           )}

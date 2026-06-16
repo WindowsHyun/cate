@@ -197,10 +197,9 @@ export function SettingsWindow({ isOpen, onClose, initialTab }: SettingsWindowPr
                   size={13}
                   className="absolute left-2 top-1/2 -translate-y-1/2 text-muted pointer-events-none"
                 />
-                <input
-                  type="text"
+                <TextInput
                   value={rawQuery}
-                  onChange={(e) => setRawQuery(e.target.value)}
+                  onChange={setRawQuery}
                   onKeyDown={(e) => {
                     if (e.key === 'Escape' && rawQuery) {
                       e.stopPropagation()

@@ -25,7 +25,7 @@ import { useUIStateStore } from '../stores/uiStateStore'
 import { useShortcutStore } from '../stores/shortcutStore'
 import { displayString, PANEL_DEFAULT_SIZES } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
-import { Tooltip } from '../sidebar/Tooltip'
+import { Tooltip } from '../ui/Tooltip'
 
 // The minimap pill can be docked in any of the four canvas corners. The choice
 // persists across sessions in ui-state.json (via the UI-state store).
@@ -204,8 +204,7 @@ const CanvasToolbar: React.FC<CanvasToolbarProps> = ({
   const toggleMinimapOpen = useUIStore((s) => s.toggleMinimapOpen)
   const activeTool = useUIStore((s) => s.activeTool)
   const setActiveTool = useUIStore((s) => s.setActiveTool)
-  const selectKey = useShortcutStore((s) => displayString(s.shortcuts.toolSelect))
-  const handKey = useShortcutStore((s) => displayString(s.shortcuts.toolHand))
+  const toggleToolKey = useShortcutStore((s) => displayString(s.shortcuts.toggleTool))
   const newBrowserKey = useShortcutStore((s) => displayString(s.shortcuts.newBrowser))
   const newEditorKey = useShortcutStore((s) => displayString(s.shortcuts.newEditor))
   const zoomInKey = useShortcutStore((s) => displayString(s.shortcuts.zoomIn))
@@ -267,14 +266,14 @@ const CanvasToolbar: React.FC<CanvasToolbarProps> = ({
             {/* Interaction tools (Select / Hand) */}
             <ModeButton
               onClick={() => setActiveTool('select')}
-              title={`Select tool (${selectKey})`}
+              title={`Select tool (Space, or ${toggleToolKey} inside a panel)`}
               active={activeTool === 'select'}
             >
               <Cursor size={18} />
             </ModeButton>
             <ModeButton
               onClick={() => setActiveTool('hand')}
-              title={`Hand tool for panning (${handKey})`}
+              title={`Hand tool for panning (Space, or ${toggleToolKey} inside a panel)`}
               active={activeTool === 'hand'}
             >
               <Hand size={18} />

@@ -10,7 +10,9 @@ import { isExternalFileDrag, importDroppedEntries } from '../lib/fs/importExtern
 import type { FileTreeNode as FileTreeNodeType } from '../../shared/types'
 import { folderColorClass, lookupNodeDecoration, type GitTree } from './gitStatusDecoration'
 import { getClipboard, hasClipboard, setClipboard } from './fileClipboard'
-import { parseLocator } from '../../main/companion/locator'
+import { parseLocator } from '../../main/runtime/locator'
+import { InlineEditInput } from './InlineEditInput'
+import { CreateFileForm } from './CreateFileForm'
 
 
 // -----------------------------------------------------------------------------
@@ -442,18 +444,14 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
 
         {/* Name or rename input */}
         {isRenaming ? (
-          <input
+          <InlineEditInput
             ref={renameInputRef}
             className="flex-1 min-w-0 bg-surface-5 text-primary text-sm px-1 rounded border border-blue-500/50 outline-none"
             value={renameValue}
-            onChange={(e) => setRenameValue(e.target.value)}
-            onBlur={commitRename}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commitRename()
-              if (e.key === 'Escape') setIsRenaming(false)
-              e.stopPropagation()
-            }}
-            onClick={(e) => e.stopPropagation()}
+            onChange={setRenameValue}
+            onSubmit={commitRename}
+            onCancel={() => setIsRenaming(false)}
+            stopKeyPropagation
           />
         ) : (
           <span className={`truncate min-w-0 ${nameColorClass} ${decoration?.strike ? 'line-through' : ''}`}>
@@ -479,33 +477,16 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
 
       {/* Inline create input (shows as first child for directories, or sibling for files) */}
       {isCreating && (node.isDirectory ? isExpanded : true) && (
-        <div
-          className="h-7 flex items-center gap-1.5 px-2"
-          style={{ paddingLeft: `${(node.isDirectory ? depth + 1 : depth) * 16 + 8}px` }}
-        >
-          <span className="flex-shrink-0 w-3" />
-          <img
-            src={isCreating === 'folder' ? 'maticon://folder.svg' : 'maticon://file.svg'}
-            width={16}
-            height={16}
-            className="flex-shrink-0"
-            draggable={false}
-          />
-          <input
-            ref={createInputRef}
-            className="flex-1 min-w-0 bg-surface-5 text-primary text-sm px-1 rounded border border-blue-500/50 outline-none"
-            value={createValue}
-            placeholder={isCreating === 'folder' ? 'folder name' : 'file name'}
-            onChange={(e) => setCreateValue(e.target.value)}
-            onBlur={commitCreate}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commitCreate()
-              if (e.key === 'Escape') setIsCreating(null)
-              e.stopPropagation()
-            }}
-            onClick={(e) => e.stopPropagation()}
-          />
-        </div>
+        <CreateFileForm
+          ref={createInputRef}
+          type={isCreating}
+          value={createValue}
+          onChange={setCreateValue}
+          onSubmit={commitCreate}
+          onCancel={() => setIsCreating(null)}
+          paddingLeft={`${(node.isDirectory ? depth + 1 : depth) * 16 + 8}px`}
+          iconSize={ICON_PROPS.size}
+        />
       )}
 
       {/* Expanded children */}

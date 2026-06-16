@@ -1,8 +1,7 @@
 import { useSettingsStore } from '../stores/settingsStore'
 import { SettingRow, TextInput, NumberInput, Toggle, Slider } from './SettingsComponents'
 import { useTranslation } from '../hooks/useTranslation'
-
-const IS_MAC = navigator.userAgent.includes('Mac')
+import { IS_MAC } from '../lib/platform'
 
 export function TerminalSettings() {
   const store = useSettingsStore()

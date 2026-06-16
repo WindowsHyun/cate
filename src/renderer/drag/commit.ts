@@ -6,7 +6,9 @@
 // effects.
 // =============================================================================
 
-import type { PanelTransferSnapshot, PanelType, DockDropTarget } from '../../shared/types'
+import type { PanelTransferSnapshot, PanelType, DockDropTarget, Point, Size } from '../../shared/types'
+import type { StoreApi } from 'zustand'
+import type { CanvasStore } from '../stores/canvasStore'
 import type { DragSource, DropTarget } from './types'
 import { findZoneForStack } from '../stores/dockTreeUtils'
 import { getDefaultSession } from './session'
@@ -30,6 +32,13 @@ export interface CommitContext {
   /** Same-window move hook — arms the terminal registry so a remounted
    *  TerminalPanel reconnects to the live PTY instead of spawning a fresh one. */
   prepareLocalRemount?: (panelId: string, panelType: PanelType) => void
+  /** Hold the drag source hidden while the detach commit's IPC round-trips are
+   *  in flight — the drag state is already reset by then, so without this the
+   *  source flashes at its pre-drag position until removal lands. Called
+   *  synchronously before the commit's first await; `end` is guaranteed via
+   *  finally (source removed, or detach refused and the source reappears). */
+  beginPendingDetach?: (panelId: string, nodeId: string | null) => void
+  endPendingDetach?: (panelId: string) => void
 }
 
 export async function commitDrop(
@@ -52,10 +61,7 @@ export async function commitDrop(
       // Remove the panel from its current location first so addNode doesn't
       // race with a stale duplicate (terminal PTY, xterm DOM, etc.).
       removeFromSource(source, panel.type, ctx)
-      const targetState = target.canvasStoreApi.getState()
-      const newNodeId = targetState.addNode(panel.id, panel.type, target.origin, target.size)
-      target.canvasStoreApi.getState().resizeNode(newNodeId, target.size)
-      target.canvasStoreApi.getState().focusNode(newNodeId)
+      placeNodeOnCanvas(target.canvasStoreApi, panel.id, panel.type, target.origin, target.size)
       return
     }
 
@@ -90,33 +96,44 @@ export async function commitDrop(
     }
 
     case 'detach': {
-      // Ask the main process whether any other window claimed the cross-window
-      // drag. If so, just clean up the source.
-      const { claimed } = await ctx.crossWindowResolve()
-      if (claimed) {
-        removeFromSource(source, panel.type, ctx)
-        ctx.onRemovedFromCanvas?.(source.panelId, panel.type)
+      // The awaits below are real IPC round-trips, and the drag state has
+      // already been reset — keep the source hidden until removal (or refusal)
+      // so it doesn't flash at its pre-drag position in between.
+      ctx.beginPendingDetach?.(
+        source.panelId,
+        source.origin.kind === 'canvas-node' ? source.origin.nodeId : null,
+      )
+      try {
+        // Ask the main process whether any other window claimed the
+        // cross-window drag. If so, just clean up the source.
+        const { claimed } = await ctx.crossWindowResolve()
+        if (claimed) {
+          removeFromSource(source, panel.type, ctx)
+          ctx.onRemovedFromCanvas?.(source.panelId, panel.type)
+          return
+        }
+        // No window claimed. Panel-window sources are already in their own
+        // detached window — spawning ANOTHER detached window would be
+        // surprising, so just cancel the drag and leave the source as-is.
+        if (source.origin.kind === 'panel-window') {
+          ctx.crossWindowCancel()
+          return
+        }
+        // Otherwise: spawn a new dock window holding the panel.
+        const snapshot = ctx.buildSnapshot()
+        if (!snapshot) {
+          ctx.crossWindowCancel()
+          return
+        }
+        const winId = await ctx.dragDetach(snapshot, ctx.workspaceId)
+        if (winId != null) {
+          removeFromSource(source, panel.type, ctx)
+          ctx.onRemovedFromCanvas?.(source.panelId, panel.type)
+        }
         return
+      } finally {
+        ctx.endPendingDetach?.(source.panelId)
       }
-      // No window claimed. Panel-window sources are already in their own
-      // detached window — spawning ANOTHER detached window would be
-      // surprising, so just cancel the drag and leave the source as-is.
-      if (source.origin.kind === 'panel-window') {
-        ctx.crossWindowCancel()
-        return
-      }
-      // Otherwise: spawn a new dock window holding the panel.
-      const snapshot = ctx.buildSnapshot()
-      if (!snapshot) {
-        ctx.crossWindowCancel()
-        return
-      }
-      const winId = await ctx.dragDetach(snapshot, ctx.workspaceId)
-      if (winId != null) {
-        removeFromSource(source, panel.type, ctx)
-        ctx.onRemovedFromCanvas?.(source.panelId, panel.type)
-      }
-      return
     }
   }
 }
@@ -124,6 +141,21 @@ export async function commitDrop(
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+/** Add a panel as a node on a canvas, then size + focus it. Shared by the
+ *  same-window `canvas-add` commit and the cross-window remote-drop handler so
+ *  both place panels identically. */
+export function placeNodeOnCanvas(
+  canvasStoreApi: StoreApi<CanvasStore>,
+  panelId: string,
+  panelType: PanelType,
+  origin: Point,
+  size: Size,
+): void {
+  const newNodeId = canvasStoreApi.getState().addNode(panelId, panelType, origin, size)
+  canvasStoreApi.getState().resizeNode(newNodeId, size)
+  canvasStoreApi.getState().focusNode(newNodeId)
+}
 
 function removeFromSource(
   source: DragSource,

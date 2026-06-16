@@ -10,10 +10,12 @@ import type { Point, Size, PanelTransferSnapshot } from '../../shared/types'
 import { PANEL_DEFAULT_SIZES, PANEL_CANVAS_DROP_SIZES } from '../../shared/types'
 import { useDragStore } from './store'
 import type { DragSource, DragOpSourceSpec, RuntimeState } from './types'
+import { applyBodyClassEffect } from './types'
+import { acquireBodyClass, releaseBodyClass } from '../lib/dom/bodyClassRefcount'
 import { reduce, initial as runtimeInitial } from './runtime'
 import { resolveDrop } from './resolve'
 import { commitDrop } from './commit'
-import { normalizeGrabOffset } from './geometry'
+import { viewToCanvas } from '../lib/canvas/coordinates'
 import { dockTabGrabOffset } from './grabOffset'
 import { findNodeIdForDockStore } from '../panels/nodeDockRegistry'
 import type { CanvasStore } from '../stores/canvasStore'
@@ -24,7 +26,7 @@ import { createTransferSnapshot } from '../lib/panelTransfer'
 import { terminalRegistry } from '../lib/terminal/terminalRegistry'
 import { prepareTerminalRemount } from './terminalRemount'
 import { useAppStore } from '../stores/appStore'
-import { removeDetachedPanelRecords } from '../lib/canvas/removeDetachedPanelRecords'
+import { removePanelFromWindow } from '../lib/panels/removePanelFromWindow'
 import { useSettingsStore } from '../stores/settingsStore'
 
 const DEAD_ZONE_PX = 4
@@ -41,16 +43,17 @@ function attachListeners() {
   if (session.listenersAttached) return
   window.addEventListener('mousemove', onMouseMove, true)
   window.addEventListener('mouseup', onMouseUp, true)
+  // Capture phase so Escape reaches us before the global shortcut handler that
+  // would otherwise clear the canvas selection on the same keypress.
+  window.addEventListener('keydown', onKeyDown, true)
   // Bubble phase (not capture): we only want the window's own blur event.
   // Capture-phase would also fire for element-level blur events bubbling up,
   // and xterm's textarea.focus() — triggered by the focus-on-focus effect on
   // terminal panels — would otherwise cancel an in-flight drag.
   window.addEventListener('blur', onBlur, false)
   session.listenersAttached = true
-  // Body marker so resize-cursor / resize-start can guard against starting an
-  // edge-resize on top of an in-flight drag. Mirrors `canvas-interacting`
-  // which is set by the resize hook.
-  document.body.classList.add('canvas-dragging')
+  // Refcounted body marker for the in-flight drag, balanced by detachListeners.
+  acquireBodyClass('canvas-dragging')
 }
 
 function detachListeners() {
@@ -58,9 +61,10 @@ function detachListeners() {
   if (!session.listenersAttached) return
   window.removeEventListener('mousemove', onMouseMove, true)
   window.removeEventListener('mouseup', onMouseUp, true)
+  window.removeEventListener('keydown', onKeyDown, true)
   window.removeEventListener('blur', onBlur, false)
   session.listenersAttached = false
-  document.body.classList.remove('canvas-dragging')
+  releaseBodyClass('canvas-dragging')
 }
 
 // -----------------------------------------------------------------------------
@@ -171,10 +175,7 @@ function measureCanvasNodeGrab(
     x: cursorClient.x - container.rect.left,
     y: cursorClient.y - container.rect.top,
   }
-  const cursorCanvas: Point = {
-    x: (localView.x - container.viewportOffset.x) / Math.max(zoom, 0.01),
-    y: (localView.y - container.viewportOffset.y) / Math.max(zoom, 0.01),
-  }
+  const cursorCanvas = viewToCanvas(localView, zoom, container.viewportOffset)
   // For a maximized node, project the grab proportionally into the pre-maximize
   // rect so the cursor stays at the same relative spot inside the (smaller)
   // ghost — otherwise grabbing the right side of a maximized node would put
@@ -259,6 +260,9 @@ function buildSnapshotFor(spec: DragOpSourceSpec): PanelTransferSnapshot | null 
   // Carry the source workspace root so the detached window inherits a cwd for
   // new terminals (otherwise its stub workspace has none and re-prompts).
   const rootPath = sourceWs?.rootPath || undefined
+  // Carry the worktree registry so the detached window can tint this panel's
+  // (and a canvas's children's) worktree pills/tabs.
+  const worktrees = sourceWs?.worktrees
 
   if (spec.kind === 'canvas-node') {
     const node = spec.canvasStoreApi.getState().nodes[spec.nodeId]
@@ -267,30 +271,24 @@ function buildSnapshotFor(spec: DragOpSourceSpec): PanelTransferSnapshot | null 
       panel,
       { type: 'canvas', canvasId: '', canvasNodeId: spec.nodeId },
       { origin: node.origin, size: node.size },
-      { resolveChildPanel, workspaceRootPath: rootPath },
-    )
-  }
-
-  if (spec.kind === 'panel-window') {
-    const drag = useDragStore.getState()
-    const size = drag.ghostSize ?? PANEL_DEFAULT_SIZES[spec.panelType]
-    // windowId is filled in by the main process during PANEL_RECEIVE routing;
-    // 0 is a placeholder ("the source detached window") that nothing reads back.
-    return createTransferSnapshot(
-      panel,
-      { type: 'detached', windowId: 0 },
-      { origin: { x: 0, y: 0 }, size },
-      { resolveChildPanel, workspaceRootPath: rootPath },
+      { resolveChildPanel, workspaceRootPath: rootPath, worktrees },
     )
   }
 
   const drag = useDragStore.getState()
   const size = drag.ghostSize ?? PANEL_DEFAULT_SIZES[spec.panelType]
+  // panel-window: windowId is filled in by the main process during
+  // PANEL_RECEIVE routing; 0 is a placeholder ("the source detached window")
+  // that nothing reads back.
+  const location =
+    spec.kind === 'panel-window'
+      ? { type: 'detached' as const, windowId: 0 }
+      : { type: 'dock' as const, zone: spec.zone, stackId: spec.stackId }
   return createTransferSnapshot(
     panel,
-    { type: 'dock', zone: spec.zone, stackId: spec.stackId },
+    location,
     { origin: { x: 0, y: 0 }, size },
-    { resolveChildPanel, workspaceRootPath: rootPath },
+    { resolveChildPanel, workspaceRootPath: rootPath, worktrees },
   )
 }
 
@@ -302,8 +300,7 @@ function runEffects(prevActive: ActiveDispatch, next: RuntimeState) {
   for (const eff of next.effects) {
     switch (eff.kind) {
       case 'set-body-class':
-        if (eff.on) document.body.classList.add(eff.cls)
-        else document.body.classList.remove(eff.cls)
+        applyBodyClassEffect(eff)
         break
       case 'push-history':
         if (prevActive.spec.kind === 'canvas-node') {
@@ -337,7 +334,6 @@ function runEffects(prevActive: ActiveDispatch, next: RuntimeState) {
           buildSnapshot: () => buildSnapshotFor(prevActive.spec),
           workspaceId: resolveOwningWorkspaceId(prevActive.ownerWorkspaceId),
           onRemovedFromCanvas: (panelId, panelType) => {
-            if (panelType === 'terminal') terminalRegistry.release(panelId)
             const wsId = resolveOwningWorkspaceId(prevActive.ownerWorkspaceId)
             // If the user just detached the workspace's only canvas, spawn a
             // fresh empty one so they don't end up staring at an empty dock.
@@ -355,21 +351,25 @@ function runEffects(prevActive: ActiveDispatch, next: RuntimeState) {
                 }
               }
             }
-            // The panel now lives in the detached window — drop it (and a
-            // canvas's children) from this workspace so the overview lists only
-            // what's actually here. The receive side re-adds it on drop-back.
-            removeDetachedPanelRecords(wsId, panelId, panelType)
+            // The panel now lives in the detached window — release its content
+            // (PTYs keep running, mid-transfer) and drop it (and a canvas's
+            // children) from this workspace so the overview lists only what's
+            // actually here. The receive side re-adds it on drop-back.
+            removePanelFromWindow(wsId, panelId, panelType, 'transfer')
           },
           prepareLocalRemount: (panelId, panelType) => {
             prepareTerminalRemount(panelId, panelType, terminalRegistry)
+          },
+          beginPendingDetach: (panelId, nodeId) => {
+            useDragStore.getState().beginPendingDetach(panelId, nodeId)
+          },
+          endPendingDetach: (panelId) => {
+            useDragStore.getState().endPendingDetach(panelId)
           },
         }).catch((err) => {
           // eslint-disable-next-line no-console
           console.warn('[useDragOp] commitDrop failed', err)
         })
-        break
-      case 'clear-state':
-        // Final state published below also clears; nothing extra to do here.
         break
     }
   }
@@ -485,6 +485,22 @@ function onBlur() {
   const session = getDefaultSession()
   const active = session.active
   if (!active) return
+  session.active = null
+  detachListeners()
+  step(active, { type: 'CANCEL' })
+}
+
+function onKeyDown(ev: KeyboardEvent) {
+  if (ev.key !== 'Escape') return
+  const session = getDefaultSession()
+  const active = session.active
+  if (!active) return
+  // Cancel the in-flight drag, and stop the keypress here so it doesn't fall
+  // through to the global shortcut handler that clears the canvas selection
+  // (Escape should only abort the drag, leaving the selection intact).
+  ev.preventDefault()
+  ev.stopPropagation()
+  ev.stopImmediatePropagation()
   session.active = null
   detachListeners()
   step(active, { type: 'CANCEL' })

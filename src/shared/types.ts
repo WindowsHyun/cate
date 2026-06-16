@@ -142,29 +142,29 @@ export interface WorktreeMeta {
 // -----------------------------------------------------------------------------
 
 /**
- * Where a workspace's files physically live, and how the companion that hosts
+ * Where a workspace's files physically live, and how the runtime that hosts
  * its terminal/fs/git operations is reached. Absent ⇒ `{ kind: 'local' }` (the
  * migration default for every workspace that predates remote support). Secrets
  * (SSH passphrases/keys) NEVER live here — they are stored encrypted via
- * Electron safeStorage, keyed by companionId.
+ * Electron safeStorage, keyed by runtimeId.
  */
-export type CompanionConnection =
+export type RuntimeConnection =
   | { kind: 'local' }
   | {
       kind: 'server'
       /** Routing key; matches the authority in this workspace's rootPath URI. */
-      companionId: string
+      runtimeId: string
       host: string
       user: string
       port?: number
-      /** Companion-absolute root on the server. */
+      /** Runtime-absolute root on the server. */
       remotePath: string
     }
   | {
       kind: 'wsl'
-      companionId: string
+      runtimeId: string
       distro: string
-      /** Companion-absolute root inside the distro. */
+      /** Runtime-absolute root inside the distro. */
       distroPath: string
     }
 
@@ -180,16 +180,16 @@ export interface WorkspaceInfo {
   id: string
   name: string
   color: string
-  /** Locator string: a bare absolute path for local, a `cate-companion://`
-   *  URI otherwise. See src/main/companion/locator.ts. */
+  /** Locator string: a bare absolute path for local, a `cate-runtime://`
+   *  URI otherwise. See src/main/runtime/locator.ts. */
   rootPath: string
   /** Defaults to { kind: 'local' } when absent (migration rule). */
-  connection?: CompanionConnection
+  connection?: RuntimeConnection
   /** Tab group this workspace belongs to, if any. */
   groupId?: string
 }
 
-/** What the connect UI sends to main to establish a remote companion. SSH auth
+/** What the connect UI sends to main to establish a remote runtime. SSH auth
  *  secrets are passed once to be stored encrypted (safeStorage); they are not
  *  echoed back. */
 export type RemoteConnectSpec =
@@ -203,8 +203,8 @@ export type RemoteConnectSpec =
     }
   | { kind: 'wsl'; distro: string; distroPath: string }
 
-export type CompanionConnectResult =
-  | { ok: true; companionId: string; rootPath: string; connection: CompanionConnection }
+export type RuntimeConnectResult =
+  | { ok: true; runtimeId: string; rootPath: string; connection: RuntimeConnection }
   | { ok: false; error: string }
 
 /** A connectable host alias parsed from the user's ~/.ssh/config. Wildcard
@@ -219,10 +219,10 @@ export interface SshHostEntry {
 }
 
 /**
- * Canonical lifecycle phase of a remote companion. Emitted by the main process
- * (CompanionManager) and projected onto the owning workspace, where it is the
+ * Canonical lifecycle phase of a remote runtime. Emitted by the main process
+ * (RuntimeManager) and projected onto the owning workspace, where it is the
  * single source of truth the UI derives its runtime status from. Local
- * workspaces have no phase (absent ⇒ no companion).
+ * workspaces have no phase (absent ⇒ no runtime).
  *
  *  - `installing`   — bootstrapping the daemon bundle onto the host (pull/push + extract)
  *  - `connecting`   — launching the daemon + protocol/version handshake
@@ -231,7 +231,7 @@ export interface SshHostEntry {
  *  - `unreachable`  — connect/launch/handshake failed (bad host/auth/network); retry or edit
  *  - `missing`      — the daemon bundle isn't installed / install failed; needs (re)install
  */
-export type CompanionPhase =
+export type RuntimePhase =
   | 'installing'
   | 'connecting'
   | 'connected'
@@ -239,26 +239,26 @@ export type CompanionPhase =
   | 'unreachable'
   | 'missing'
 
-/** Live connection state pushed to the renderer (COMPANION_STATUS). */
-export interface CompanionStatusEvent {
-  companionId: string
-  phase: CompanionPhase
+/** Live connection state pushed to the renderer (RUNTIME_STATUS). */
+export interface RuntimeStatusEvent {
+  runtimeId: string
+  phase: RuntimePhase
   message?: string
 }
 
-/** The canonical companion runtime state stored on a remote workspace. Written
- *  by exactly one path in the renderer (the COMPANION_STATUS subscription, plus
- *  the optimistic seed during the initial connect before companionId is bound).
- *  Absent ⇒ local workspace, or a remote workspace whose companion hasn't been
+/** The canonical runtime runtime state stored on a remote workspace. Written
+ *  by exactly one path in the renderer (the RUNTIME_STATUS subscription, plus
+ *  the optimistic seed during the initial connect before runtimeId is bound).
+ *  Absent ⇒ local workspace, or a remote workspace whose runtime hasn't been
  *  contacted yet this session. */
-export interface CompanionRuntime {
-  phase: CompanionPhase
+export interface RuntimeStatus {
+  phase: RuntimePhase
   /** Human-readable failure reason for unreachable/missing/disconnected. */
   error?: string
 }
 
 export interface WorkspaceMutationError {
-  code: 'INVALID_ROOT_PATH' | 'INVALID_WORKSPACE_ID' | 'WORKSPACE_NOT_FOUND'
+  code: 'INVALID_ROOT_PATH' | 'INVALID_WORKSPACE_ID' | 'WORKSPACE_NOT_FOUND' | 'DUPLICATE_ROOT'
   message: string
 }
 
@@ -271,6 +271,44 @@ export type WorkspaceMutationResult =
 // -----------------------------------------------------------------------------
 
 export type CateWindowType = 'main' | 'panel' | 'dock'
+
+/** A shadow record of a panel and the window that hosts it. Main maintains the
+ *  union across ALL windows (main + detached) and broadcasts it, so every window
+ *  can list/reveal the panels that live in OTHER windows (it filters out its own
+ *  by panel id). `parentCanvasId` is set for panels nested inside a canvas, so
+ *  the overview can render a detached canvas with its children. */
+export interface WindowPanelInfo extends WindowPanelReport {
+  ownerWindowId: number
+  ownerWindowType: CateWindowType
+}
+
+/** A single window's report of its panels for cross-window discovery, sent on
+ *  appStore change by every window type. Main stamps the owning window + type to
+ *  turn each into a WindowPanelInfo. `parentCanvasId` is resolved renderer-side
+ *  from the window's canvas stores. */
+export interface WindowPanelReport {
+  panelId: string
+  type: PanelType
+  title: string
+  workspaceId: string
+  /** Set when this panel lives inside a canvas panel in its window. */
+  parentCanvasId?: string
+  /** The panel's worktree tag (if any), so the overview can tint a detached
+   *  panel's row title with its worktree accent — resolved against the (same)
+   *  workspace's worktree registry, which the listing window already holds. */
+  worktreeId?: string
+  /** Live agent state for a terminal/agent panel, stamped by the OWNER window
+   *  (the only window that receives this panel's activity scans). Carried so the
+   *  overview can render a detached row's running shimmer / awaiting indicator
+   *  exactly like a local row. */
+  agentState?: AgentState
+  /** Agent display name (gated on the agent still being present), so the owner's
+   *  agent logo can be resolved for the detached row's icon. */
+  agentName?: string | null
+  /** Whether the owner window's scan found listening ports for this panel, so a
+   *  detached row shows the same port dot as a local one. */
+  hasPorts?: boolean
+}
 
 export interface CateWindowParams {
   type: CateWindowType
@@ -290,14 +328,23 @@ export interface DockWindowInitPayload {
   /** Owning workspace's project root, so the detached window's stub workspace
    *  can resolve a cwd for newly-created terminals instead of re-prompting. */
   rootPath?: string
-  /** Session-restore only: per top-level terminal panelId → the (now-dead) ptyId
-   *  whose saved scrollback log should be replayed into the freshly-spawned PTY.
-   *  Absent for a fresh live single-panel detach (which uses PANEL_RECEIVE). */
-  terminalReplayPtyIds?: Record<string, string>
+  /** Owning workspace's worktree registry (id/path/color/label). Carried so the
+   *  detached window's stub workspace can resolve each panel's worktree accent —
+   *  without it, worktree pills/tab tints render colorless in detached windows. */
+  worktrees?: WorktreeMeta[]
+  /** Session-restore marker. When true, the receiving shell arms scrollback
+   *  replay for EVERY terminal panel (top-level + canvas children) by its stable
+   *  panelId — identical to the main window's restore. Absent/false for a fresh
+   *  live detach, where the terminal arrives live via PANEL_RECEIVE instead. */
+  restore?: boolean
+  /** Session-restore only: per terminal panelId → its last working directory, so
+   *  a respawned terminal lands where it was. Keyed by the stable panelId (same
+   *  as the main window's snapshot.terminalCwds). */
+  terminalCwds?: Record<string, string>
   /** Session-restore only: per top-level canvas panelId → its reconstructed
-   *  canvas hydration (nodes/viewport + child panels + child terminal replay
-   *  hints), so EVERY canvas tab restores its children rather than only the
-   *  first. Absent for a fresh live detach. */
+   *  canvas hydration (nodes/viewport + child panels), so EVERY canvas tab
+   *  restores its children rather than only the first. Absent for a fresh live
+   *  detach. */
   canvasStates?: Record<string, PanelTransferSnapshot['canvasState']>
 }
 
@@ -314,8 +361,11 @@ export interface DetachedDockWindowSnapshot {
   panels: Record<string, PanelState>
   bounds: { x: number; y: number; width: number; height: number }
   workspaceId: string
-  /** Map of terminal panelId → ptyId, so the scrollback log can be replayed on restore. */
-  terminalPtyIds?: Record<string, string>
+  /** Per terminal panelId → its last working directory, so a respawned terminal
+   *  lands where it was. Scrollback itself is persisted on disk keyed by the
+   *  stable panelId (`<panelId>.scrollback`), exactly like the main window — no
+   *  ptyId indirection, so restore never depends on a captured live-ptyId map. */
+  terminalCwds?: Record<string, string>
   /** Per-canvas-panel layout snapshots (nodes + viewport), keyed by canvas panelId,
    *  so a detached canvas window restores its children instead of landing empty.
    *  Optional for back-compat with session files written before this existed. */
@@ -335,6 +385,12 @@ export interface PanelTransferSnapshot {
    *  workspace inherits the cwd context (new terminals resolve to the project
    *  folder instead of re-prompting). */
   rootPath?: string
+
+  /** Owning workspace's worktree registry (id/path/color/label). Carried so the
+   *  receiving window's stub workspace can resolve the panel's (and a canvas's
+   *  children's) worktree accent colors — pills/tab tints would otherwise be
+   *  colorless in detached windows whose stub workspace has no worktree records. */
+  worktrees?: WorktreeMeta[]
 
   // Terminal-specific
   terminalPtyId?: string
@@ -366,20 +422,15 @@ export interface PanelTransferSnapshot {
   // Without these the receiving window can't resolve child panel types/titles
   // and falls back to a generic "Panel" stub.
   //
-  // `childTerminals` carries each child terminal's restore hint, keyed by child
-  // panel id, in one of two mutually-exclusive modes:
-  //   • LIVE transfer (`ptyId` + `scrollback`): the receiving window RECONNECTS
-  //     to the still-running process — the same live transfer a top-level
-  //     terminal gets via `terminalPtyId`.
-  //   • RESTORE / cold start (`replayPtyId`): the original PTY is dead, so the
-  //     receiver spawns a FRESH PTY and replays that dead PTY's saved scrollback
-  //     log — mirroring the main canvas's terminalRestoreData replay path.
-  canvasState?: {
-    nodes: Record<CanvasNodeId, CanvasNodeState>
-    viewportOffset: Point
-    zoomLevel: number
+  // `childTerminals` carries each child terminal's LIVE-transfer hand-off, keyed
+  // by child panel id: the receiving window RECONNECTS to the still-running
+  // process (`ptyId` + `scrollback`) — the same live transfer a top-level
+  // terminal gets via `terminalPtyId`. Cold session restore does NOT use this:
+  // the receiving shell arms scrollback replay for every terminal panel by its
+  // stable panelId (see DockWindowInitPayload.restore), mirroring the main window.
+  canvasState?: CanvasLayoutSnapshot & {
     childPanels: Record<string, PanelState>
-    childTerminals?: Record<string, { ptyId?: string; scrollback?: string; replayPtyId?: string }>
+    childTerminals?: Record<string, { ptyId?: string; scrollback?: string }>
   }
 }
 
@@ -461,14 +512,14 @@ export interface WorkspaceState {
   rootPath: string
   /** Tab group this workspace belongs to, if any. */
   groupId?: string
-  /** Companion connection for a remote/WSL workspace (absent ⇒ local). Mirrors
+  /** Runtime connection for a remote/WSL workspace (absent ⇒ local). Mirrors
    *  WorkspaceInfo.connection; drives reconnect-on-restore. */
-  connection?: CompanionConnection
-  /** Canonical companion runtime state for a remote workspace (set from
-   *  COMPANION_STATUS, seeded during initial connect). The single source of
+  connection?: RuntimeConnection
+  /** Canonical runtime runtime state for a remote workspace (set from
+   *  RUNTIME_STATUS, seeded during initial connect). The single source of
    *  truth the UI derives editability + the lock overlay from. Absent ⇒ local,
    *  or remote-not-yet-contacted. See lib/workspaceRuntime.ts. */
-  companion?: CompanionRuntime
+  runtime?: RuntimeStatus
   /** Additional project roots opened alongside the primary `rootPath`.
    *  Used to keep multiple repos in one canvas. Order is user-controlled. */
   additionalRoots?: string[]
@@ -539,6 +590,8 @@ export function storedShortcut(
 
 /** Mirrors StoredShortcut.displayString from Swift. */
 export function displayString(s: StoredShortcut): string {
+  // An empty key means the binding is disabled (see clearShortcut).
+  if (!s.key) return 'None'
   const parts: string[] = []
   if (s.control) parts.push('\u2303') // ⌃
   if (s.option) parts.push('\u2325')  // ⌥
@@ -576,7 +629,6 @@ export type ShortcutAction =
   | 'toggleFileExplorer'
   | 'toggleSearch'
   | 'toggleMinimap'
-  | 'nodeSwitcher'
   | 'commandPalette'
   | 'zoomIn'
   | 'zoomOut'
@@ -593,8 +645,7 @@ export type ShortcutAction =
   | 'undo'
   | 'redo'
   | 'deleteNode'
-  | 'toolSelect'
-  | 'toolHand'
+  | 'toggleTool'
   | 'navigateUp'
   | 'navigateDown'
   | 'navigateLeft'
@@ -608,14 +659,6 @@ export type ShortcutAction =
  *  ShortcutAction — includes a few menu-only items that have no keyboard
  *  binding. */
 export type MenuActionId = ShortcutAction | 'openFolder' | 'reloadWorkspace' | 'manageLayouts'
-
-/** Payload for MENU_CREATE_PANEL — a panel-creation action routed to a main
- *  window from a detached dock/panel window, plus the originating workspace so
- *  the panel is created in (and the main window switches to) the right one. */
-export interface MenuCreatePanelPayload {
-  action: MenuActionId
-  workspaceId?: string
-}
 
 /** Browser-panel navigation actions. These are panel-scoped (handled by the
  *  focused BrowserPanel) rather than global shortcuts, so they don't collide
@@ -634,7 +677,6 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   'toggleFileExplorer',
   'toggleSearch',
   'toggleMinimap',
-  'nodeSwitcher',
   'commandPalette',
   'zoomIn',
   'zoomOut',
@@ -651,8 +693,7 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   'undo',
   'redo',
   'deleteNode',
-  'toolSelect',
-  'toolHand',
+  'toggleTool',
   'navigateUp',
   'navigateDown',
   'navigateLeft',
@@ -675,7 +716,6 @@ export const SHORTCUT_DISPLAY_NAMES: Record<ShortcutAction, string> = {
   toggleFileExplorer: 'Toggle File Explorer',
   toggleSearch: 'Toggle Search',
   toggleMinimap: 'Toggle Minimap',
-  nodeSwitcher: 'Panel Switcher',
   commandPalette: 'Command Palette',
   zoomIn: 'Zoom In',
   zoomOut: 'Zoom Out',
@@ -692,8 +732,7 @@ export const SHORTCUT_DISPLAY_NAMES: Record<ShortcutAction, string> = {
   undo: 'Undo',
   redo: 'Redo',
   deleteNode: 'Delete Focused Panel',
-  toolSelect: 'Select Tool',
-  toolHand: 'Hand Tool',
+  toggleTool: 'Toggle Select / Hand Tool',
   navigateUp: 'Navigate to Panel Above',
   navigateDown: 'Navigate to Panel Below',
   navigateLeft: 'Navigate to Panel Left',
@@ -716,7 +755,6 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, StoredShortcut> = {
   toggleFileExplorer: storedShortcut('x', { command: true, shift: true }),
   toggleSearch: storedShortcut('f', { command: true, shift: true }),
   toggleMinimap: storedShortcut('m', { command: true, shift: true }),
-  nodeSwitcher: storedShortcut(' ', { control: true }),
   commandPalette: storedShortcut('k', { command: true }),
   zoomIn: storedShortcut('=', { command: true }),
   zoomOut: storedShortcut('-', { command: true }),
@@ -733,10 +771,13 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, StoredShortcut> = {
   undo: storedShortcut('z', { command: true }),
   redo: storedShortcut('z', { command: true, shift: true }),
   deleteNode: storedShortcut('Backspace', { command: true }),
-  // Modifier combos (not bare V/H) so they switch tools even while typing in a
-  // terminal/editor — and ⌘⇧D avoids the macOS ⌘H "Hide Application" clash.
-  toolSelect: storedShortcut('s', { command: true, shift: true }),
-  toolHand: storedShortcut('d', { command: true, shift: true }),
+  // ⌃Space toggles the tool from anywhere — including a focused terminal,
+  // editor, or input — by being intercepted before the surface sees it. (Plain
+  // Space also toggles, but only when the canvas is focused.) Used to be
+  // ⇧Space, but Shift is still held when the space after `:` `(` `?` `!` lands,
+  // so normal typing kept triggering it and the space never reached the
+  // terminal (issue #371).
+  toggleTool: storedShortcut(' ', { control: true }),
   navigateUp: storedShortcut('↑', { command: true }),
   navigateDown: storedShortcut('↓', { command: true }),
   navigateLeft: storedShortcut('←', { command: true }),
@@ -909,22 +950,22 @@ export interface SessionSnapshot {
    *  stay stable across restarts instead of being re-assigned round-robin from
    *  the palette, and so panel.worktreeId references still resolve. */
   worktrees?: WorktreeMeta[]
-  /** Resolved companion connection for a remote/WSL workspace (absent ⇒ local).
-   *  Persisted so the companion can be reconnected on restore before any
+  /** Resolved runtime connection for a remote/WSL workspace (absent ⇒ local).
+   *  Persisted so the runtime can be reconnected on restore before any
    *  fs/git/terminal op runs. Mirrors WorkspaceState.connection. */
-  connection?: CompanionConnection
+  connection?: RuntimeConnection
 }
 
 /** One persisted remote workspace (stored in `remote-workspaces.json`). Remote
  *  workspaces can't use the local `.cate/` project-state files (their tree lives
- *  on a companion), so their full restore snapshot + reconnect info is kept here,
- *  keyed by the `cate-companion://` locator. Local workspaces never appear here —
+ *  on a runtime), so their full restore snapshot + reconnect info is kept here,
+ *  keyed by the `cate-runtime://` locator. Local workspaces never appear here —
  *  they round-trip through recentProjects + `.cate/` as before. */
 export interface RemoteProjectEntry {
-  /** The `cate-companion://` locator string (this workspace's rootPath). */
+  /** The `cate-runtime://` locator string (this workspace's rootPath). */
   locator: string
-  /** Reconnect info, used by ensureWorkspaceCompanion on restore. */
-  connection: CompanionConnection
+  /** Reconnect info, used by ensureWorkspaceRuntime on restore. */
+  connection: RuntimeConnection
   /** Full session snapshot to rebuild the canvas/panels on restore. */
   snapshot: SessionSnapshot
 }
@@ -949,7 +990,19 @@ export interface DockStateSnapshot {
   locations: Record<string, PanelLocation>
 }
 
-/** Snapshot of a detached panel window for session persistence. */
+/** Dock-window sync payload sent renderer -> main for session persistence.
+ *  Deliberately carries NO workspaceId: the workspace a dock window belongs to
+ *  is owned by main alone (set at window creation in the registry). A renderer
+ *  echo could only ever be the process-local stub id, and overwriting the real
+ *  id would silently drop the window from session.json. */
+export interface DockWindowSyncState {
+  dockState: DockStateSnapshot
+  panels: Record<string, PanelState>
+  terminalCwds?: Record<string, string>
+  canvasStates?: Record<string, CanvasLayoutSnapshot>
+}
+
+// Legacy: detached single-panel windows (removed). Retained only to migrate old session files into dock windows.
 export interface PanelWindowSnapshot {
   panel: PanelState
   bounds: { x: number; y: number; width: number; height: number }
@@ -1017,8 +1070,6 @@ export interface ProjectSessionFile {
    *  terminal working directory, and unsaved scratch content kept out of the
    *  committed file. */
   panels: Record<string, ProjectSessionPanel>
-  /** Detached panel windows (machine-local, not committed). */
-  panelWindows?: PanelWindowSnapshot[]
   /** Detached dock windows (machine-local, not committed). */
   dockWindows?: DetachedDockWindowSnapshot[]
   /** Git worktree registry (id/path/branch/color/label). Machine-local because
@@ -1026,10 +1077,10 @@ export interface ProjectSessionFile {
    *  here (not in committed workspace.json) so colors/labels survive a restart.
    *  Paths are absolute, matching `ProjectSessionPanel.workingDirectory`. */
   worktrees?: WorktreeMeta[]
-  /** Resolved companion connection for THIS workspace on THIS machine. Machine-
+  /** Resolved runtime connection for THIS workspace on THIS machine. Machine-
    *  local on purpose — a server/wsl choice is the opener's, not the repo's, so
    *  it lives here and never in the VCS-committed workspace.json. Absent ⇒ local. */
-  connection?: CompanionConnection
+  connection?: RuntimeConnection
   /** Claude --resume UUIDs captured when the app quit with claude running, keyed
    *  by panel id. On restore, replayTerminalLog issues `claude --resume <uuid>`. */
   claudeResumeIds?: Record<string, string>
@@ -1106,6 +1157,11 @@ export interface SidebarLayout {
   right: SidebarView[]
 }
 
+/** Version of the telemetry/privacy notice. Bump when the privacy policy
+ *  materially changes so every user sees the informational notice once more.
+ *  v1 = the old opt-in consent dialog era; v2 = always-on telemetry notice. */
+export const TELEMETRY_NOTICE_VERSION = 2
+
 export interface AppSettings {
   // General
   language: 'en' | 'ko'
@@ -1121,6 +1177,9 @@ export interface AppSettings {
   /** User-imported / agent-authored unified themes. */
   customThemes: Theme[]
   editorFontSize: number
+  /** CSS font-family for Monaco editor panels. Empty string = built-in default
+   *  stack (Menlo, Monaco, "Courier New", monospace). */
+  editorFontFamily: string
   /** Global UI zoom for Cate's own chrome (panels, sidebars, editor, terminal),
    *  applied via webFrame.setZoomFactor in every window. 1.0 = 100%. Does not
    *  affect web pages shown in browser panels (those keep their own zoom).
@@ -1217,16 +1276,20 @@ export interface AppSettings {
   notifyOnlyWhenUnfocused: boolean
 
   // Privacy
-  /** Send automatic error/crash reports to Sentry. Takes effect on next launch. */
+  /** DEPRECATED — no longer read anywhere. Telemetry is always on in packaged
+   *  builds since notice v2. Kept in the schema so existing settings.json files
+   *  load cleanly; remove in a later release. */
   crashReportingEnabled: boolean
-  /** Send anonymous usage data (app starts, version upgrades, feedback) to the
-   *  cero-analytics endpoint. No personal data, no file paths, no project info. */
+  /** DEPRECATED — see crashReportingEnabled. */
   usageAnalyticsEnabled: boolean
-  /** Whether the user has made a first-run choice about telemetry. Until this is
-   *  true, NOTHING is sent (crash reporting and analytics are both held off),
-   *  regardless of the two flags above — they only describe the post-consent
-   *  state. The first-run consent dialog sets this to true once the user picks. */
+  /** DEPRECATED — see crashReportingEnabled. */
   telemetryConsentDecided: boolean
+  /** Highest TELEMETRY_NOTICE_VERSION the user has dismissed the telemetry
+   *  notice (WelcomeDialog) for. The notice shows whenever this is below the
+   *  current TELEMETRY_NOTICE_VERSION — on first install, and again for every
+   *  existing user when the constant is bumped. Informational only — telemetry
+   *  does not depend on it. */
+  telemetryNoticeAcknowledgedVersion: number
 
   // Onboarding
   /** Whether the user has finished (or skipped) the first-run guided tour.
@@ -1240,6 +1303,12 @@ export interface AppSettings {
    *  stable users and the public website download are never offered betas. */
   betaUpdatesEnabled: boolean
 
+  // Shortcuts
+  /** User keyboard-shortcut overrides, keyed by action. Only bindings that
+   *  differ from DEFAULT_SHORTCUTS are stored; an entry with an empty key
+   *  means the shortcut is disabled. */
+  customShortcuts: Partial<Record<ShortcutAction, StoredShortcut>>
+
   // Agent
   /** The user-pinned default model applied to every new agent chat, or null for
    *  none. Was renderer localStorage (cate.agent.defaultModel.v1) before. */
@@ -1250,9 +1319,6 @@ export interface AppSettings {
    *  localStorage (cate.sidebarLayout.v3) before. */
   sidebarLayout: SidebarLayout
 
-  // Keyboard shortcuts — only user-modified entries are stored here; the rest
-  // fall back to DEFAULT_SHORTCUTS at runtime.
-  customShortcuts: Partial<Record<ShortcutAction, StoredShortcut>>
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -1270,6 +1336,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   systemDarkThemeId: 'dark-cold',
   customThemes: [],
   editorFontSize: 12,
+  editorFontFamily: '',
   uiScale: 1.0,
 
   // Canvas
@@ -1313,17 +1380,22 @@ export const DEFAULT_SETTINGS: AppSettings = {
   notificationsEnabled: true,
   notifyOnlyWhenUnfocused: true,
 
-  // Privacy. The two flags describe the *post-consent* state; nothing is sent
-  // until telemetryConsentDecided flips true via the first-run consent dialog.
+  // Privacy. The three legacy consent flags are deprecated (no longer read);
+  // telemetry is always on in packaged builds. The acknowledged notice version
+  // starts at 0 so every fresh install and every updater sees the notice once.
   crashReportingEnabled: true,
   usageAnalyticsEnabled: true,
   telemetryConsentDecided: false,
+  telemetryNoticeAcknowledgedVersion: 0,
 
   // Onboarding
   onboardingCompleted: false,
 
   // Updates
   betaUpdatesEnabled: false,
+
+  // Shortcuts
+  customShortcuts: {},
 
   // Agent
   agentDefaultModel: null,
@@ -1333,9 +1405,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
     left: ['workspaces', 'explorer', 'search'],
     right: ['git'],
   },
-
-  // Keyboard shortcuts
-  customShortcuts: {},
 }
 
 // -----------------------------------------------------------------------------
@@ -1490,14 +1559,6 @@ export interface AgentEventEnvelope {
     type: string
     [key: string]: unknown
   }
-}
-
-/** Pending tool-call approval request sent from main to renderer. */
-export interface AgentToolApprovalRequest {
-  panelId: string
-  toolCallId: string
-  toolName: string
-  args: unknown
 }
 
 /** Pi's reasoning levels (mirrors `ThinkingLevel` from pi-agent-core). */

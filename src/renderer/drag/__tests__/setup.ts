@@ -43,7 +43,7 @@ function createElectronAPIStub() {
     crossWindowDragCancel: vi.fn().mockResolvedValue(undefined),
     crossWindowDragMove: vi.fn().mockResolvedValue(undefined),
     crossWindowDragResolve: vi.fn().mockResolvedValue({ claimed: false }),
-    crossWindowDragDrop: vi.fn(),
+    crossWindowDragDrop: vi.fn().mockResolvedValue({ accepted: true }),
     dragDetach: vi.fn().mockResolvedValue(null),
     isMainWindowFullscreen: vi.fn().mockReturnValue(false),
     onCrossWindowDragUpdate: vi.fn(() => () => {}),
@@ -54,5 +54,9 @@ function createElectronAPIStub() {
     windowClose: vi.fn().mockResolvedValue(undefined),
     isWindowMaximized: vi.fn().mockReturnValue(false),
     onWindowMaximizeChange: vi.fn(() => () => {}),
+    onFullscreenChange: vi.fn(() => () => {}),
+    // Frameless title-bar menu bar (Windows/Linux).
+    getAppMenuBarItems: vi.fn().mockResolvedValue([]),
+    popupAppMenu: vi.fn().mockResolvedValue(undefined),
   } as unknown as Window['electronAPI']
 }

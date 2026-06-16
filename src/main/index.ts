@@ -23,6 +23,8 @@ import { registerSqliteHandlers } from './sqlite'
 import { registerClaudeResumeHandlers } from './ipc/claudeResume'
 import { companions, forwardFileGrant, forwardClearFileGrantsForWindow, forwardClearScopedWriteAllowancesForWindow } from './companion/companionManager'
 import { registerCompanionHandlers } from './ipc/companion'
+import { runtimes } from './runtime/runtimeManager'
+import { registerRuntimeHandlers } from './ipc/runtime'
 import { registerHandlers as registerFilesystemHandlers, stopWatchersForWindow } from './ipc/filesystem'
 import { registerHandlers as registerGitHandlers } from './ipc/git'
 import { registerHandlers as registerSearchHandlers, stopSearchesForWindow } from './ipc/search'
@@ -45,60 +47,34 @@ import { AgentManager } from '../agent/main/agentManager'
 
 // Shared singletons for pi agent + auth.
 const agentManager = new AgentManager(authManager)
-import { writeDragTempFile, cleanupDragTempFile, createDragGhostImage } from './ipc/drag'
-import { registerWindow, getWindowType, sendToWindow, broadcastToAll, broadcastToAllExcept, setPanelWindowMeta, setPanelWindowTerminalPtyId, listPanelWindows, getWindow, setDockWindowState, listDockWindows, listDockWindowIds, focusWindow, getWindowWorkspaceId, getActiveMainWindow, windowFromEvent } from './windowRegistry'
-import { flushDockWindowsBeforeQuit } from './dockWindowFlush'
 import { registerWorkspaceHandlers } from './workspaceManager'
-import { addAllowedRoot, clearFileGrantsForWindow, clearScopedWriteAllowancesForWindow, grantFileAccess, validatePath } from './ipc/pathValidation'
-import { isLocalLocator } from './companion/locator'
-import { listPersistentGrants, recordPersistentGrant } from './grantedPathStore'
-import { buildApplicationMenu, rebuildApplicationMenu, setNewMainWindowFn } from './menu'
+import { addAllowedRoot } from './ipc/pathValidation'
+import { buildApplicationMenu, setNewMainWindowFn } from './menu'
 import { initShellEnv, getShellEnv } from './shellEnv'
 import { currentExclusionSet } from './ipc/filesystem'
-import { initAutoUpdater, isUpdatePendingInstall } from './auto-updater'
-import { initSentry, captureMainException, captureMainMessage, flushSentry } from './sentry'
-import { initAnalytics, trackAppStart, checkAndReportUpdate, hasRunBefore, devSimulateUpdateFrom } from './analytics'
-import { TELEMETRY_SET_CONSENT } from '../shared/ipc-channels'
-import { beginTerminalTransfer, acknowledgeTerminalTransfer, handleCrossWindowDropTerminalTransfer } from './ipc/terminal'
-import type { CanvasLayoutSnapshot, CateWindowParams, DetachedDockWindowSnapshot, DockLayoutNode, DockWindowInitPayload, PanelState, PanelTransferSnapshot, WindowDockState } from '../shared/types'
-import { disableRendererSandbox, disableTrustScoping } from './featureFlags'
-import { getSharedPanelDef } from '../shared/panels'
+import { initAutoUpdater } from './auto-updater'
+import { initSentry, captureMainException, flushSentry } from './sentry'
+import { initAnalytics, devSimulateUpdateFrom, hasRunBefore } from './analytics'
+import { disableTrustScoping } from './featureFlags'
 import { startPerfMonitor, getLatestSnapshot } from './perf/perfMonitor'
 import { PERF_GET } from '../shared/ipc-channels'
+import { TELEMETRY_NOTICE_VERSION } from '../shared/types'
 import { installWebContentsSecurity } from './webSecurity'
-import { configureBrowserProxy, installProxyAuthHandler } from './browserProxy'
+import { installProxyAuthHandler } from './browserProxy'
 import { installThemeSkill } from './installThemeSkill'
-import { releaseAllProjectLocks } from './projectLock'
-import {
-  startCrossWindowDrag,
-  updateCrossWindowCursor,
-  cancelCrossWindowDrag,
-  claimCrossWindowDrop,
-  resolveCrossWindowDrag,
-  recordClaim,
-  lookupClaim,
-  pruneClaims,
-  decideDetach,
-  clampGhostSize,
-  ghostPosition,
-  isCursorInsideAnyAppWindow,
-  CROSS_WINDOW_POLL_MS,
-  CROSS_WINDOW_CLAIM_WAIT_MS,
-  type CrossWindowDragState,
-  type ClaimRecord,
-  type GhostHostWindow,
-} from './dragLogic'
 
-/** True when any existing Cate BrowserWindow is in macOS native fullscreen.
- *  Used to reject window-creation IPCs so the app can never "escape" into a
- *  separate Space while the user is in fullscreen mode. */
-function anyWindowFullscreen(): boolean {
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (w.isDestroyed()) continue
-    try { if (w.isFullScreen()) return true } catch { /* noop */ }
-  }
-  return false
-}
+import { createWindow } from './windows/windowFactory'
+import { IS_E2E } from './windows/reveal'
+import { registerDialogHandlers } from './ipc/dialogs'
+import { registerCaptureHandlers } from './ipc/capture'
+import { registerWindowControlHandlers } from './ipc/windowControls'
+import { registerPanelWindowHandlers } from './ipc/panelWindows'
+import { registerDockWindowHandlers } from './ipc/dockWindows'
+import { registerWindowPanelHandlers } from './ipc/windowPanels'
+import { registerDragHandlers } from './ipc/dragHandlers'
+import { setMainWindowReady, flushPendingOpenPaths, registerOpenFileHandler } from './lifecycle/openPath'
+import { fireStartupTelemetry, registerTelemetryNoticeHandler } from './lifecycle/telemetry'
+import { registerLifecycleHandlers } from './lifecycle/shutdown'
 
 // NOTE: runSmokeAssertions only ever runs when CATE_SMOKE_TEST=1. The 1200 ms
 // wait below is part of the smoke-only branch in mainWin.once('ready-to-show')
@@ -118,489 +94,6 @@ async function runSmokeAssertions(win: BrowserWindow): Promise<void> {
   if (!result?.hasElectronAPI || !result?.hasFullscreenCheck) {
     throw new Error('Smoke test failed: preload bridge did not initialize correctly')
   }
-}
-
-// Under Playwright (CATE_E2E=1) a normal show() opens the window on the user's
-// active screen and steals focus — and on macOS a *shown* window can't be kept
-// off-screen (off-screen coordinates get clamped back onto a display). So under
-// e2e we never show the window at all: it's never mapped to a display, and
-// Playwright drives the renderer over CDP. A hidden window throttles its rAF
-// loop, so the renderer is instead made deterministic without a visible window
-// elsewhere (e2eHarness zeroes CSS animations; canvas nodes are created already
-// idle; node removal is finalized immediately) so the drag specs stay reliable.
-const IS_E2E = process.env.CATE_E2E === '1'
-
-/** Show a window — but under e2e keep it hidden (never mapped to a display) so it
- *  never appears on screen or steals focus. Playwright drives it over CDP. */
-function revealWindow(win: BrowserWindow, opts: { focus?: boolean } = {}): void {
-  try {
-    if (IS_E2E) return // never map to a display — Playwright drives it over CDP
-    win.show()
-    if (opts.focus) win.focus()
-  } catch {
-    /* window may already be destroyed */
-  }
-}
-
-// =============================================================================
-// Renderer crash recovery.
-//
-// A renderer process can die from OOM, a GPU fault, or a native crash that
-// produces no JS stack — none of which React's ErrorBoundary can catch. Without
-// handling, the window simply goes blank and the user is stuck. We auto-reload
-// on the first crash (cheap, usually recovers a transient GPU/OOM blip) and fall
-// back to an explicit dialog if a window crash-loops, so we never spin forever.
-// =============================================================================
-
-const CRASH_RELOAD_WINDOW_MS = 30_000
-const MAX_RELOADS_IN_WINDOW = 3
-let unresponsiveDialogOpen = false
-
-async function showCrashLoopDialog(win: BrowserWindow, windowType: string, reason: string): Promise<void> {
-  if (win.isDestroyed()) return
-  let response = 0
-  try {
-    ;({ response } = await dialog.showMessageBox(win, {
-      type: 'error',
-      title: 'A window keeps crashing',
-      message: 'This window’s display process exited unexpectedly several times.',
-      detail: `Reason: ${reason}. Auto-reloading hasn’t recovered it. You can try once more, or close the window. Your other windows and saved work are unaffected.`,
-      buttons: ['Reload', 'Close Window'],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-    }))
-  } catch { /* dialog failed — leave the window as-is */ return }
-  if (win.isDestroyed()) return
-  if (response === 0) {
-    try { win.webContents.reload() } catch { /* noop */ }
-  } else {
-    try { win.close() } catch { /* noop */ }
-  }
-}
-
-async function showUnresponsiveDialog(win: BrowserWindow): Promise<void> {
-  if (unresponsiveDialogOpen || win.isDestroyed()) return
-  unresponsiveDialogOpen = true
-  try {
-    const { response } = await dialog.showMessageBox(win, {
-      type: 'warning',
-      title: 'Cate is not responding',
-      message: 'This window has become unresponsive.',
-      detail: 'You can keep waiting in case it recovers, or force it to reload. Reloading discards any in-progress, unsaved work in this window.',
-      buttons: ['Keep Waiting', 'Reload'],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
-    })
-    if (!win.isDestroyed() && response === 1) {
-      // forcefullyCrashRenderer kills a truly-hung renderer that a plain
-      // reload() can't preempt; render-process-gone then auto-reloads it.
-      try { win.webContents.forcefullyCrashRenderer() } catch { /* noop */ }
-    }
-  } catch { /* noop */ } finally {
-    unresponsiveDialogOpen = false
-  }
-}
-
-function installRendererCrashRecovery(win: BrowserWindow, windowType: string, windowId: number): void {
-  let reloads: number[] = []
-
-  win.webContents.on('render-process-gone', (_event, details) => {
-    // 'clean-exit' is a normal teardown (the window is closing) — not a crash.
-    if (details.reason === 'clean-exit') return
-    log.error(
-      '[crash] renderer gone window=%d type=%s reason=%s exitCode=%s',
-      windowId, windowType, details.reason, String(details.exitCode),
-    )
-    captureMainMessage('renderer-process-gone', {
-      reason: details.reason,
-      exitCode: details.exitCode,
-      windowType,
-    })
-    if (win.isDestroyed()) return
-
-    const now = Date.now()
-    reloads = reloads.filter((t) => now - t < CRASH_RELOAD_WINDOW_MS)
-    if (reloads.length >= MAX_RELOADS_IN_WINDOW) {
-      reloads = []
-      void showCrashLoopDialog(win, windowType, details.reason)
-      return
-    }
-    reloads.push(now)
-    log.info('[crash] auto-reloading window=%d (attempt %d/%d)', windowId, reloads.length, MAX_RELOADS_IN_WINDOW)
-    try { win.webContents.reload() } catch (err) {
-      log.warn('[crash] reload failed: %s', err instanceof Error ? err.message : String(err))
-    }
-  })
-
-  win.on('unresponsive', () => {
-    log.warn('[crash] window unresponsive window=%d type=%s', windowId, windowType)
-    captureMainMessage('renderer-unresponsive', { windowType })
-    void showUnresponsiveDialog(win)
-  })
-  win.on('responsive', () => {
-    log.info('[crash] window responsive again window=%d', windowId)
-  })
-}
-
-function createWindow(params?: CateWindowParams): BrowserWindow {
-  const iconPath = path.join(__dirname, '../../build/icon-1024.png')
-  const windowType = params?.type ?? 'main'
-  const isPanel = windowType === 'panel'
-  const isDock = windowType === 'dock'
-
-  // Boot snapshot — used only for the main window. Lets us restore the user's
-  // last window bounds + theme-matched background color synchronously, so the
-  // first frame matches the final UI and there's no white flash.
-  const bootSnap = windowType === 'main' ? readBootSnapshot() : null
-  const snapGeom = bootSnap?.geometry
-  const snapBg = bootSnap?.backgroundColor
-  // The exact background color used for both the native window backdrop and the
-  // renderer's first-paint loading splash, so the splash matches the themed
-  // window before the renderer's JS theme injection runs.
-  const bgColor = snapBg ?? '#1f1e1c'
-
-  // Apply the active theme's native appearance before the window exists so
-  // native chrome (menus, scrollbars, the window backdrop) paints with the
-  // right dark/light material on the first frame. themeSource is app-wide, so
-  // we only need it once from the main window's snapshot; the renderer keeps it
-  // in sync after.
-  if (windowType === 'main' && bootSnap?.appearance) {
-    try { nativeTheme.themeSource = bootSnap.appearance } catch { /* noop */ }
-  }
-
-  const win = new BrowserWindow({
-    width: snapGeom?.width ?? (isDock ? 700 : isPanel ? 700 : 1200),
-    height: snapGeom?.height ?? (isDock ? 500 : isPanel ? 500 : 800),
-    x: snapGeom?.x,
-    y: snapGeom?.y,
-    show: false,
-    minWidth: isDock ? 400 : isPanel ? undefined : 800,
-    minHeight: isDock ? 300 : isPanel ? undefined : 600,
-    title: isDock ? 'Cate' : isPanel ? 'Cate Panel' : 'Cate',
-    // macOS: hide the native title bar and draw a themed strip in its place (the
-    // macOS native bar can't be tinted to a theme color — only dark/light — so we
-    // always use `hiddenInset`/`hidden` and render TitlebarStrip).
-    // Windows/Linux: go fully frameless and draw our own window controls in the
-    // renderer (WindowControls), so the chrome matches the theme. `titleBarStyle`
-    // is irrelevant once `frame:false`.
-    titleBarStyle: process.platform === 'darwin' ? (isPanel ? 'hidden' : 'hiddenInset') : 'default',
-    // Align traffic lights with our 28px themed TitlebarStrip on macOS. Apple's
-    // standard NSWindow title bar is ~28pt with lights at y≈7; matching that
-    // here makes the themed bar visually identical to a native title bar.
-    trafficLightPosition: process.platform !== 'darwin'
-      ? undefined
-      : isDock
-        ? { x: 12, y: 11 }
-        : windowType === 'main'
-          ? { x: 10, y: 6 }
-          : undefined,
-    // macOS main windows keep a (hidden-inset) native frame; everything else —
-    // all panel/dock windows, and every window on Windows/Linux — is frameless.
-    frame: process.platform === 'darwin' ? !(isPanel || isDock) : false,
-    backgroundColor: bgColor,
-    icon: nativeImage.createFromPath(iconPath),
-    webPreferences: {
-      preload: path.join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: !disableRendererSandbox(),
-      webSecurity: true,
-      webviewTag: true,
-      // Under e2e the window is never shown (revealWindow is a no-op).
-      // paintWhenInitiallyHidden makes the hidden renderer paint + fire
-      // ready-to-show anyway; backgroundThrottling:false keeps its rAF/timers
-      // running. (CSS animations are also disabled in e2eHarness.) Harmless
-      // no-ops outside e2e.
-      ...(IS_E2E ? { backgroundThrottling: false, paintWhenInitiallyHidden: true } : {}),
-    },
-  })
-
-  // Show on ready-to-show so the first frame is fully painted before the
-  // window appears — eliminates the white flash from initial mount.
-  win.once('ready-to-show', () => {
-    revealWindow(win)
-  })
-
-  // Persist main-window geometry to the boot snapshot so the next cold launch
-  // restores bounds synchronously (no white flash). The store debounces, so
-  // emitting on every move/resize is cheap.
-  if (windowType === 'main') {
-    const captureGeometry = (): void => {
-      try {
-        if (win.isDestroyed() || win.isMinimized() || win.isFullScreen()) return
-        const [x, y] = win.getPosition()
-        const [width, height] = win.getSize()
-        writeBootSnapshot({ geometry: { x, y, width, height } })
-      } catch { /* noop */ }
-    }
-    win.on('move', captureGeometry)
-    win.on('resize', captureGeometry)
-  }
-
-  // Track this window in the registry with its type
-  registerWindow(win, windowType, params?.workspaceId)
-
-  // Capture ID before window is destroyed (win.id throws after 'closed')
-  const windowId = win.id
-  log.info('Creating window type=%s id=%d', windowType, windowId)
-
-  // Recover from renderer crashes / hangs (OOM, GPU fault, native crash) that
-  // React's ErrorBoundary can't see.
-  installRendererCrashRecovery(win, windowType, windowId)
-
-  // Re-arm grants for every persisted Save-As path so editors restored in
-  // this window (any window type — main, panel, dock) can read+save their
-  // out-of-workspace files. We check the file still exists; missing entries
-  // are pruned so the store doesn't grow unbounded with stale paths. The
-  // returned promise gates loadURL below so the renderer's session-restore
-  // pass cannot mount an out-of-workspace editor before its grant lands.
-  const grantsReady = (async () => {
-    try {
-      const paths = await listPersistentGrants()
-      for (const filePath of paths) {
-        // Note: we do NOT prune missing files here. If the user deletes or
-        // moves the file off-disk between sessions, the grant must survive
-        // so that the editor restored with `filePath = …/missing.txt` can
-        // still receive a Cmd+S that recreates the file at the previously
-        // approved location. The grant only writes/reads to/from that
-        // exact path; it does not widen access elsewhere.
-        try {
-          await grantFileAccess(windowId, filePath)
-          // Mirror the grant into the owning companion's authoritative map so a
-          // restored out-of-root editor can read/save against the daemon.
-          forwardFileGrant(filePath, windowId)
-        } catch (err) {
-          log.warn('[grants] Failed to grant %s to window %d: %s', filePath, windowId, err)
-        }
-      }
-    } catch (err) {
-      log.warn('[grants] Failed to apply persisted grants:', err)
-    }
-  })()
-
-  // When the main window is closed, also close any detached panel/dock
-  // windows so the app actually quits (otherwise they keep the process
-  // alive and `window-all-closed` never fires).
-  if (windowType === 'main') {
-    win.on('close', () => {
-      for (const other of BrowserWindow.getAllWindows()) {
-        if (other.id === windowId || other.isDestroyed()) continue
-        const t = getWindowType(other.id)
-        if (t === 'panel' || t === 'dock') {
-          // Use close() rather than destroy() — destroy() tears down a
-          // BrowserWindow without letting its <webview> children unload,
-          // which crashes the GPU/renderer process on quit and triggers
-          // macOS's "closed unexpectedly" dialog.
-          try { other.close() } catch { /* noop */ }
-        }
-      }
-    })
-  }
-
-  // Clean up window-owned resources on close
-  win.on('closed', () => {
-    log.debug('Window closed id=%d', windowId)
-    stopWatchersForWindow(windowId)
-    unregisterTerminalsForWindow(windowId)
-    stopMonitorsForWindow(windowId)
-    stopSearchesForWindow(windowId)
-    clearScopedWriteAllowancesForWindow(windowId)
-    clearFileGrantsForWindow(windowId)
-    // Forward the clears to every registered companion (the daemon keeps its own
-    // grant maps; a window close has no locator, so fan out to all hosts).
-    forwardClearScopedWriteAllowancesForWindow(windowId)
-    forwardClearFileGrantsForWindow(windowId)
-    // Rebuild menu to update panel/dock window list
-    if (isPanel || isDock) rebuildApplicationMenu()
-    // Trigger immediate session save from main window when a child window closes
-    if (windowType !== 'main') {
-      const allWindows = BrowserWindow.getAllWindows()
-      const mainWin = allWindows.find((w) => !w.isDestroyed() && getWindowType(w.id) === 'main')
-      if (mainWin) {
-        mainWin.webContents.send(SESSION_FLUSH_SAVE)
-      }
-    }
-  })
-
-  // Rebuild menu when panel/dock windows are created
-  if (isPanel || isDock) {
-    win.webContents.once('did-finish-load', () => {
-      rebuildApplicationMenu()
-    })
-  }
-
-  // Broadcast fullscreen state changes so the renderer can react
-  // (e.g., hide detach affordances). The authoritative check is a sync IPC
-  // handler registered once below, but these broadcasts cover the cache
-  // path used by any listener that wants push updates.
-  const broadcastFullscreenState = (): void => {
-    const isFullscreen = anyWindowFullscreen()
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (w.isDestroyed()) continue
-      try { w.webContents.send(WINDOW_FULLSCREEN_STATE, isFullscreen) } catch { /* noop */ }
-    }
-  }
-  win.on('enter-full-screen', broadcastFullscreenState)
-  win.on('leave-full-screen', broadcastFullscreenState)
-  // Fire at the *start* of the transition too so the renderer can hide the
-  // header drag-region before macOS begins its slide animation, instead of
-  // waiting for the post-animation enter/leave events.
-  const broadcastEntering = (): void => {
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (w.isDestroyed()) continue
-      try { w.webContents.send(WINDOW_FULLSCREEN_STATE, true) } catch { /* noop */ }
-    }
-  }
-  const broadcastLeaving = (): void => {
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (w.isDestroyed()) continue
-      try { w.webContents.send(WINDOW_FULLSCREEN_STATE, false) } catch { /* noop */ }
-    }
-  }
-  // macOS-only events; cast to sidestep missing type overloads.
-  ;(win as unknown as { on: (e: string, fn: () => void) => void }).on('will-enter-full-screen', broadcastEntering)
-  ;(win as unknown as { on: (e: string, fn: () => void) => void }).on('will-leave-full-screen', broadcastLeaving)
-  win.webContents.once('did-finish-load', broadcastFullscreenState)
-
-  // Push this window's own maximize state to its renderer so the custom window
-  // controls (WindowControls, Windows/Linux) can swap the maximize/restore glyph.
-  // Per-window (not broadcast): each window's maximize state is independent.
-  const sendMaximizeState = (): void => {
-    if (win.isDestroyed()) return
-    try { win.webContents.send(WINDOW_MAXIMIZE_STATE, win.isMaximized()) } catch { /* noop */ }
-  }
-  win.on('maximize', sendMaximizeState)
-  win.on('unmaximize', sendMaximizeState)
-  win.webContents.once('did-finish-load', sendMaximizeState)
-
-  // Build query string from params
-  const queryParts: string[] = []
-  queryParts.push(`type=${encodeURIComponent(windowType)}`)
-  // Pass the themed boot background so the renderer can paint its loading splash
-  // to match the window backdrop on the first frame (main window only).
-  if (windowType === 'main') queryParts.push(`bg=${encodeURIComponent(bgColor)}`)
-  if (params?.panelType) queryParts.push(`panelType=${encodeURIComponent(params.panelType)}`)
-  if (params?.panelId) queryParts.push(`panelId=${encodeURIComponent(params.panelId)}`)
-  if (params?.workspaceId) queryParts.push(`workspaceId=${encodeURIComponent(params.workspaceId)}`)
-  const query = queryParts.length > 0 ? `?${queryParts.join('&')}` : ''
-
-  // Defer loadURL until persisted grants are applied. Without this, the
-  // renderer can begin session restore and mount an editor pointing at an
-  // out-of-workspace path before grantFileAccess has populated the window's
-  // grant set, causing fsReadFile to be rejected and the editor to mount
-  // empty for a file we should have been able to read.
-  void grantsReady.finally(() => {
-    if (win.isDestroyed()) return
-    if (process.env.ELECTRON_RENDERER_URL) {
-      win.loadURL(`${process.env.ELECTRON_RENDERER_URL}${query}`)
-    } else {
-      win.loadFile(path.join(__dirname, '../renderer/index.html'), {
-        search: query ? query.slice(1) : undefined,
-      })
-    }
-  })
-
-  return win
-}
-
-// =============================================================================
-// Drag ghost window — a tiny borderless always-on-top window that follows the
-// cursor during cross-window drags so the user has visual feedback outside any
-// app window.
-// =============================================================================
-
-let dragGhostWin: BrowserWindow | null = null
-
-function createDragGhostWindow(
-  panelType: string,
-  panelTitle: string,
-  ghostWidth: number,
-  ghostHeight: number,
-): void {
-  if (dragGhostWin && !dragGhostWin.isDestroyed()) {
-    dragGhostWin.destroy()
-  }
-
-  // Clamp ghost size to sane bounds so we don't spawn a massive native window.
-  const { width: w, height: h } = clampGhostSize(ghostWidth, ghostHeight)
-
-  dragGhostWin = new BrowserWindow({
-    width: w,
-    height: h,
-    frame: false,
-    transparent: true,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    hasShadow: false,
-    resizable: false,
-    focusable: false,
-    show: false,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webSecurity: true,
-    },
-  })
-
-  // Tag this window so the cursor-poll loop can exclude it when deciding
-  // whether the cursor is over a Cate window.
-  ;(dragGhostWin as unknown as { __isDragGhost: boolean }).__isDragGhost = true
-
-  // Ignore mouse events so the ghost doesn't interfere with drop targets
-  dragGhostWin.setIgnoreMouseEvents(true)
-
-  const escapeHtml = (s: string) => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!))
-  const icon = getSharedPanelDef(panelType).ghostSvg
-  const safeTitle = escapeHtml(panelTitle.slice(0, 40))
-  const html = `data:text/html;charset=utf-8,<!DOCTYPE html>
-<html><head><style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:transparent;overflow:hidden;font:11px -apple-system,sans-serif}
-.ghost{width:100vw;height:100vh;display:flex;flex-direction:column;
- border:1.5px solid rgba(74,158,255,0.7);background:rgba(74,158,255,0.08);
- border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.5);overflow:hidden}
-.tbar{height:24px;flex:0 0 24px;display:flex;align-items:center;gap:6px;
- padding:0 10px;background:rgba(42,42,58,0.95);
- border-bottom:1px solid rgba(255,255,255,0.08);
- color:rgba(255,255,255,0.85);font-weight:500;white-space:nowrap;overflow:hidden}
-.tbar svg{flex-shrink:0}
-.tbar .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.body{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:16px}
-.body .big{opacity:0.9}
-.body .lbl{color:rgba(74,158,255,0.85);font-size:11px;font-weight:500}
-</style></head><body><div class="ghost"><div class="tbar">${icon}<span class="t">${safeTitle}</span></div><div class="body"><div class="big"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgba(74,158,255,0.85)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/></svg></div><div class="lbl">Drop to place here</div></div></div></body></html>`
-
-  dragGhostWin.loadURL(html)
-  dragGhostWin.webContents.once('did-finish-load', () => {
-    if (dragGhostWin && !dragGhostWin.isDestroyed()) {
-      dragGhostWin.showInactive()
-    }
-  })
-}
-
-function moveDragGhostWindow(
-  screenX: number,
-  screenY: number,
-  grabOffsetX?: number,
-  grabOffsetY?: number,
-): void {
-  if (dragGhostWin && !dragGhostWin.isDestroyed()) {
-    const grab = grabOffsetX != null || grabOffsetY != null
-      ? { x: grabOffsetX ?? 12, y: grabOffsetY ?? 12 }
-      : null
-    const pos = ghostPosition({ x: screenX, y: screenY }, grab)
-    dragGhostWin.setPosition(pos.x, pos.y, false)
-  }
-}
-
-function destroyDragGhostWindow(): void {
-  if (dragGhostWin && !dragGhostWin.isDestroyed()) {
-    dragGhostWin.destroy()
-  }
-  dragGhostWin = null
 }
 
 // =============================================================================
@@ -648,6 +141,7 @@ function registerDeferredHandlers(): void {
   registerAgentHandlers(authManager, agentManager)
   registerSkillHandlers()
   registerCompanionHandlers()
+  registerRuntimeHandlers()
 }
 
 /**
@@ -1551,44 +1045,7 @@ function registerWindowAndDialogHandlers(): void {
 }
 
 // =============================================================================
-// Helpers
-// =============================================================================
-
-/** Build a WindowDockState with a single panel in the center zone */
-/** Collect every panelId referenced by a WindowDockState's zone layout trees. */
-function collectTopLevelPanelIds(zones: WindowDockState): string[] {
-  const ids: string[] = []
-  const walk = (node: DockLayoutNode | null): void => {
-    if (!node) return
-    if (node.type === 'tabs') ids.push(...node.panelIds)
-    else for (const child of node.children) walk(child)
-  }
-  for (const zone of Object.values(zones)) walk(zone.layout)
-  return ids
-}
-
-function buildSinglePanelDockState(panelId: string): WindowDockState {
-  const stackId = crypto.randomUUID()
-  return {
-    left: { position: 'left', visible: false, size: 260, layout: null },
-    right: { position: 'right', visible: false, size: 260, layout: null },
-    bottom: { position: 'bottom', visible: false, size: 240, layout: null },
-    center: {
-      position: 'center',
-      visible: true,
-      size: 0,
-      layout: {
-        type: 'tabs',
-        id: stackId,
-        panelIds: [panelId],
-        activeIndex: 0,
-      },
-    },
-  }
-}
-
-// =============================================================================
-// App lifecycle
+// App lifecycle / bootstrap
 // =============================================================================
 
 // Set app name before menu and window creation
@@ -1608,8 +1065,8 @@ if (!app.isPackaged) {
 
 // First-start simulation (`npm run dev:firststart`). Point userData at a
 // dedicated dir that's wiped on every launch, so the app boots exactly like a
-// brand-new install: telemetry-consent prompt + onboarding tour, empty session,
-// no recent projects or saved window geometry. Dev-only; never in a packaged app.
+// brand-new install: telemetry notice + onboarding tour, empty session, no
+// recent projects or saved window geometry. Dev-only; never in a packaged app.
 if (!app.isPackaged && process.env.CATE_FRESH_USERDATA === '1') {
   const fs = require('fs') as typeof import('fs')
   const dir = path.join(app.getPath('userData'), 'FirstStart')
@@ -1622,9 +1079,12 @@ if (!app.isPackaged && process.env.CATE_FRESH_USERDATA === '1') {
 // Dev-only: simulate launching right after an update at a given level
 // (major / minor / patch). Uses its own wiped userData dir, then seeds the
 // analytics state so `checkAndReportUpdate` sees a version bump from a synthetic
-// previous version. The grandfather block below then treats it as an existing
-// (already-onboarded, already-consented) user, so only the post-update feedback
-// dialog can appear — major/minor show it, patch shows nothing. See dev:update:*.
+// previous version. The grandfather block below marks it as an existing
+// (already-onboarded) user, so the onboarding tour stays hidden — but the
+// telemetry notice still appears, because the simulated profile hasn't
+// acknowledged the current TELEMETRY_NOTICE_VERSION (exactly like a real user
+// updating into this release). On major/minor bumps the post-update feedback
+// dialog appears alongside it; a patch bump shows the notice only. See dev:update:*.
 if (!app.isPackaged && (process.env.CATE_SIMULATE_UPDATE === 'major' || process.env.CATE_SIMULATE_UPDATE === 'minor' || process.env.CATE_SIMULATE_UPDATE === 'patch')) {
   const level = process.env.CATE_SIMULATE_UPDATE
   const fs = require('fs') as typeof import('fs')
@@ -1663,55 +1123,9 @@ if (process.env.CATE_E2E === '1') {
   app.dock?.hide()
 }
 
-// ---------------------------------------------------------------------------
-// Dock / "Open With..." folder opens (macOS `open-file` event)
-//
-// Fires when the user drops a folder onto the dock icon or opens one with
-// Cate via Finder. We resolve the folder to a directory and forward it to
-// the main renderer, which creates a new workspace rooted at that path.
-//
-// The event can fire *before* the window is ready, so we queue paths and
-// flush once the main window signals ready-to-show.
-// ---------------------------------------------------------------------------
-
-const pendingOpenPaths: string[] = []
-let mainWindowReady = false
-
-function findMainWindow(): BrowserWindow | null {
-  for (const w of BrowserWindow.getAllWindows()) {
-    if (w.isDestroyed()) continue
-    if (getWindowType(w.id) === 'main') return w
-  }
-  return null
-}
-
-function deliverOpenPath(p: string): void {
-  const win = findMainWindow()
-  if (!win || !mainWindowReady) {
-    pendingOpenPaths.push(p)
-    return
-  }
-  try {
-    // Skip in e2e so opening a path never foregrounds the shared Electron bundle.
-    if (!IS_E2E) focusWindow(win)
-  } catch { /* noop */ }
-  win.webContents.send(APP_OPEN_PATH, p)
-}
-
-function flushPendingOpenPaths(): void {
-  if (!pendingOpenPaths.length) return
-  const win = findMainWindow()
-  if (!win) return
-  for (const p of pendingOpenPaths.splice(0)) {
-    win.webContents.send(APP_OPEN_PATH, p)
-  }
-}
-
-app.on('open-file', (event, filePath) => {
-  event.preventDefault()
-  log.info('open-file event: %s', filePath)
-  deliverOpenPath(filePath)
-})
+// Register the macOS open-file handler at top level: the event can fire before
+// app-ready, so we must be listening early to queue paths into pendingOpenPaths.
+registerOpenFileHandler()
 
 // Build application menu
 buildApplicationMenu()
@@ -1722,81 +1136,41 @@ log.info('Cate v%s starting (electron %s, node %s, platform %s)', app.getVersion
 // them before the async electron-store finishes initializing.
 loadSettingsSyncFromDisk()
 
-// Scope the WHOLE first-run experience (telemetry-consent screen + onboarding
-// tour) to genuine first installs. Anyone who has launched Cate before (incl.
-// users upgrading from a pre-onboarding / pre-consent build) is marked as past
-// it, so an update shows ONLY the post-update feedback dialog — never the tour
-// and never the consent screen. Telemetry stays OFF for these grandfathered
-// users (they never opted in); they can enable it from Settings. Runs long
-// before the renderer queries settings, so there's no show/hide race.
+// Scope the onboarding tour to genuine first installs. Anyone who has launched
+// Cate before is marked past it, so an update never replays the tour. The
+// telemetry notice (WelcomeDialog) intentionally has NO such clause — every
+// user whose acknowledged notice version is below TELEMETRY_NOTICE_VERSION
+// sees it once, updaters included.
 if (hasRunBefore()) {
   if (!getSettingSync('onboardingCompleted')) {
     void setSettingsFromMain({ onboardingCompleted: true })
   }
-  if (!getSettingSync('telemetryConsentDecided')) {
-    void setSettingsFromMain({
-      telemetryConsentDecided: true,
-      crashReportingEnabled: false,
-      usageAnalyticsEnabled: false,
-    })
-  }
 }
 
 // Under Playwright the profile is a fresh tmpdir, which would otherwise trigger
-// the first-run consent + onboarding takeover and cover the canvas the specs
+// the telemetry notice + onboarding takeover and cover the canvas the specs
 // drive. Mark both as already handled so e2e starts on a clean canvas. Runs
 // before the renderer queries settings, so the dialogs never flash.
 if (IS_E2E) {
-  void setSettingsFromMain({ telemetryConsentDecided: true, onboardingCompleted: true })
+  void setSettingsFromMain({ telemetryNoticeAcknowledgedVersion: TELEMETRY_NOTICE_VERSION, onboardingCompleted: true })
 }
 
-// Initialize Sentry as early as possible — after settings load (so the opt-out
-// is honored) but before any IPC handlers or windows. No-op if DSN unset or
-// the user has disabled crash reporting.
+// Initialize Sentry as early as possible — before any IPC handlers or windows.
+// Always on in packaged builds; no-op in dev unless SENTRY_DSN is set.
 initSentry()
 initAnalytics()
 
-// Fire the first-run/version-change analytics + app_start. Held back entirely
-// until the user has made a telemetry choice, so we never persist install state
-// (or send anything) pre-consent. The event sends inside are additionally gated
-// by the usage-analytics toggle; the version-detection + welcome prompt run once
-// consent is decided either way.
-function fireStartupTelemetry(mainWin: BrowserWindow): void {
-  if (!getSettingSync('telemetryConsentDecided')) {
-    log.info('[telemetry] startup events deferred — awaiting first-run consent')
-    return
-  }
-  checkAndReportUpdate(mainWin).catch((err) => log.warn('Update detection failed:', err))
-  trackAppStart()
-}
-
-// First-run telemetry consent from the renderer. Persists the choice, applies it
-// live (Sentry on/off without restart), and releases the previously-deferred
-// startup analytics.
-ipcMain.handle(TELEMETRY_SET_CONSENT, async (_e, choice: { crashReporting?: boolean; usageAnalytics?: boolean }) => {
-  const crashReporting = choice?.crashReporting === true
-  const usageAnalytics = choice?.usageAnalytics === true
-  await setSettingsFromMain({
-    telemetryConsentDecided: true,
-    crashReportingEnabled: crashReporting,
-    usageAnalyticsEnabled: usageAnalytics,
-  })
-  // initSentry now sees consent=true; it inits only if crash reporting was accepted.
-  initSentry()
-  const mainWin = BrowserWindow.getAllWindows().find(
-    (w) => !w.isDestroyed() && getWindowType(w.id) === 'main',
-  )
-  if (mainWin) fireStartupTelemetry(mainWin)
-})
+// Telemetry-notice acknowledgement from the renderer (WelcomeDialog).
+registerTelemetryNoticeHandler()
 
 // Provide the menu module a way to spawn additional main windows without
 // importing this file (which would create a circular dependency).
 setNewMainWindowFn(() => createWindow({ type: 'main' }))
 
 // ---------------------------------------------------------------------------
-// Crash / signal teardown. Local terminals run in the companion daemon
+// Crash / signal teardown. Local terminals run in the runtime daemon
 // subprocess: when this main process dies its stdin closes, and the daemon's
-// `process.stdin.on('close')` handler (src/companion/index.ts) group-kills its
+// `process.stdin.on('close')` handler (src/runtime/index.ts) group-kills its
 // ptys and exits — so dev servers/watchers don't survive as zombies. No
 // in-process PTY cleanup is needed here anymore.
 // ---------------------------------------------------------------------------
@@ -1841,13 +1215,13 @@ app.whenReady().then(async () => {
   await initShellEnv()
   log.info('Shell environment resolved')
 
-  // Bring the local workspace online: provision + launch the host-target companion
+  // Bring the local workspace online: provision + launch the host-target runtime
   // tarball as a local daemon, the same path remote hosts use. Done after the shell
   // env so the daemon inherits the full PATH for git/terminals. This registers a
-  // DeferredCompanion SYNCHRONOUSLY (resolve(LOCAL) works immediately) and connects
+  // DeferredRuntime SYNCHRONOUSLY (resolve(LOCAL) works immediately) and connects
   // the daemon in the background, so first-run tarball provisioning never blocks
   // the window paint — early IPC ops queue behind the deferred's `ready`.
-  companions.ensureLocalCompanion({
+  runtimes.ensureLocalRuntime({
     root: app.getPath('home'),
     exclusions: [...currentExclusionSet()],
     env: getShellEnv(),
@@ -1899,7 +1273,7 @@ app.whenReady().then(async () => {
   // dialog if one exists. Deferred until after the window is ready so the
   // dialog has a parent window and doesn't block startup.
   mainWin.once('ready-to-show', () => {
-    mainWindowReady = true
+    setMainWindowReady(true)
     flushPendingOpenPaths()
     // Register deferred IPC handlers and start the auto-updater now that the
     // first paint has landed. Anything not on the cold-launch critical path
@@ -1908,8 +1282,7 @@ app.whenReady().then(async () => {
     log.info('Deferred IPC handlers registered')
     initAutoUpdater()
     // Detect a version change since last launch and emit an app_updated event
-    // before app_start, so the upgrade path lands in analytics in order. Held
-    // back on first run until the user accepts/declines telemetry consent.
+    // before app_start, so the upgrade path lands in analytics in order.
     fireStartupTelemetry(mainWin)
     if (process.env.CATE_SMOKE_TEST === '1') {
       runSmokeAssertions(mainWin)
