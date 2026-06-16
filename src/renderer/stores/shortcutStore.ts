@@ -206,5 +206,8 @@ function applyOverrides(raw: unknown): void {
   useShortcutStore.setState({ shortcuts })
 }
 
-applyOverrides(useSettingsStore.getState().customShortcuts)
-useSettingsStore.subscribe((state) => applyOverrides(state.customShortcuts))
+// Defer to break the mutual TDZ cycle: settingsStore imports shortcutStore, which imports settingsStore
+queueMicrotask(() => {
+  applyOverrides(useSettingsStore.getState().customShortcuts)
+  useSettingsStore.subscribe((state) => applyOverrides(state.customShortcuts))
+})
