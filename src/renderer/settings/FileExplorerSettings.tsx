@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Plus, X, ArrowCounterClockwise } from '@phosphor-icons/react'
 import { useSettingsStore } from '../stores/settingsStore'
 import { DEFAULT_SETTINGS } from '../../shared/types'
-import { SearchableBlock, SettingRow, SecondaryButton } from './SettingsComponents'
+import { SearchableBlock, SettingRow, SecondaryButton, TextInput } from './SettingsComponents'
 import { useTranslation } from '../hooks/useTranslation'
 
 function sameAsDefault(list: string[]): boolean {

@@ -28,6 +28,7 @@ import { UpdatesSettings } from './UpdatesSettings'
 import { ProvidersSettings } from './ProvidersSettings'
 import { SkillsSettings } from './SkillsSettings'
 import { SettingsSearchContext } from './SettingsSearchContext'
+import { TextInput } from './SettingsComponents'
 import { useTranslation } from '../hooks/useTranslation'
 import type { StringKey } from '../i18n/strings'
 

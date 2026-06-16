@@ -4,6 +4,8 @@
 // =============================================================================
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+
+const ICON_PROPS = { size: 14 }
 import { CaretRight } from '@phosphor-icons/react'
 import { getFileIconUrl } from '../lib/fileIcons'
 import { isExternalFileDrag, importDroppedEntries } from '../lib/fs/importExternalEntries'

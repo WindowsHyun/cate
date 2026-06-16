@@ -39,6 +39,7 @@ export interface SharedPanelDefinition {
   /** Whether a panel of this type can be placed as a canvas node. Canvas
    *  panels themselves live only in dock zones. */
   canLiveOnCanvas: boolean
+  switcherColor?: string
 }
 
 // -----------------------------------------------------------------------------

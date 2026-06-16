@@ -169,6 +169,14 @@ export const useShortcutStore = create<ShortcutStore>((set, get) => ({
 
     return null
   },
+
+  applyCustomShortcuts(custom) {
+    const base = { ...DEFAULT_SHORTCUTS }
+    for (const action of SHORTCUT_ACTIONS) {
+      if (action in custom && custom[action]) base[action] = custom[action]!
+    }
+    set({ shortcuts: base })
+  },
 }))
 
 // -----------------------------------------------------------------------------

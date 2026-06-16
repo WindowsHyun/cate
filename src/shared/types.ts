@@ -1458,6 +1458,7 @@ export const PANEL_CANVAS_DROP_SIZES: Record<PanelType, Size> = {
   canvas: { width: 640, height: 480 },
   agent: { width: 520, height: 440 },
   document: { width: 640, height: 480 },
+  database: { width: 640, height: 480 },
 }
 
 // -----------------------------------------------------------------------------

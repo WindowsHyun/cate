@@ -224,6 +224,8 @@ export const ProjectList: React.FC = () => {
                         workspace={ws}
                         isSelected={ws.id === selectedWorkspaceId}
                         isMultiSelected={multiSelected.has(ws.id)}
+                        isExpanded={expandedIds.has(ws.id)}
+                        onToggleExpand={() => toggleExpanded(ws.id)}
                         onClick={(e) => handleWorkspaceClick(flatIndex, ws.id, e)}
                         onClose={() => removeWorkspace(ws.id, true)}
                         onBulkContextMenu={(e) => handleBulkContextMenu(e, ws.id)}
