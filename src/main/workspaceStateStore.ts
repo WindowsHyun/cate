@@ -13,7 +13,7 @@ import { isPlainObject } from './jsonUtils'
 import log from './logger'
 import type { SidebarSession, RemoteProjectEntry } from '../shared/types'
 
-const MAX_RECENT_PROJECTS = 10
+const MAX_RECENT_PROJECTS = 50
 
 // Legacy URI scheme from before the companion→runtime rename. Remote workspaces
 // saved by an older build carry `cate-companion://` locators that the current
