@@ -298,6 +298,7 @@ async function restoreSessionHydrate(snapshot: SessionSnapshot, workspaceId: str
     terminalRestoreData.set(panel.id, {
       cwd: snapshot.terminalCwds?.[panel.id],
       replayFromId: panel.id,
+      claudeResumeId: snapshot.claudeResumeIds?.[panel.id],
     })
   }
 
@@ -321,23 +322,34 @@ export async function replayTerminalLog(panelId: string): Promise<void> {
   const data = terminalRestoreData.get(panelId)
   if (!data?.replayFromId) return
 
-  const logData = await window.electronAPI.terminalLogRead(data.replayFromId)
-  if (!logData) {
-    terminalRestoreData.delete(panelId)
-    return
-  }
-
   const entry = terminalRegistry.getEntry(panelId)
   if (!entry) {
     terminalRestoreData.delete(panelId)
     return
   }
 
-  // logData is a SerializeAddon string (serializeTerminalState): escape sequences
-  // that restore the saved buffer — text, styling, wrapping — verbatim. The fresh
-  // shell's prompt then prints below the dim separator.
-  entry.terminal.write(logData)
-  entry.terminal.write('\r\n\x1b[90m--- restored session ---\x1b[0m\r\n')
+  const logData = await window.electronAPI.terminalLogRead(data.replayFromId)
+  if (logData) {
+    // logData is a SerializeAddon string (serializeTerminalState): escape sequences
+    // that restore the saved buffer — text, styling, wrapping — verbatim. The fresh
+    // shell's prompt then prints below the dim separator.
+    entry.terminal.write(logData)
+    entry.terminal.write('\r\n\x1b[90m--- restored session ---\x1b[0m\r\n')
+  }
+
+  // Determine resume id: use quit-time capture if available, else scan filesystem.
+  // Runs even when there is no scrollback so a blank terminal still gets resumed.
+  let resumeId = data.claudeResumeId
+  if (!resumeId && data.cwd) {
+    resumeId = await window.electronAPI.claudeFindResumeId(data.cwd).catch(() => undefined) ?? undefined
+    if (resumeId) {
+      log.info(`[session] filesystem fallback resume for panel ${panelId}: ${resumeId}`)
+    }
+  }
+
+  if (resumeId && entry.ptyId) {
+    window.electronAPI.terminalWrite(entry.ptyId, `claude --resume ${resumeId}\r`).catch(() => {})
+  }
 
   terminalRestoreData.delete(panelId)
 }

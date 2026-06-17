@@ -85,6 +85,8 @@ export function buildSessionFile(
     worktrees: snapshot.worktrees?.length ? snapshot.worktrees : undefined,
     // Machine-local reconnect info for a remote workspace (absent ⇒ local).
     connection: snapshot.connection,
+    claudeResumeIds: snapshot.claudeResumeIds && Object.keys(snapshot.claudeResumeIds).length
+      ? snapshot.claudeResumeIds : undefined,
   }
 }
 
@@ -133,6 +135,8 @@ export function projectFilesToSnapshot(
     // ids), so it passes through verbatim.
     canvases: ws.canvases,
     terminalCwds: Object.keys(terminalCwds).length ? terminalCwds : undefined,
+    claudeResumeIds: sess?.claudeResumeIds && Object.keys(sess.claudeResumeIds).length
+      ? sess.claudeResumeIds : undefined,
     // Restore the persisted worktree registry (absolute paths) so colors/labels
     // are stable and panel.worktreeId references resolve after restart.
     worktrees: sess?.worktrees,
