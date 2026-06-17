@@ -168,6 +168,7 @@ Use this checklist every time you merge upstream changes:
 - [ ] Check `src/main/workspaceStateStore.ts` — `MAX_RECENT_PROJECTS` is **50** (upstream default is 10; restoring 17 workspaces requires ≥17)
 - [ ] Check `src/renderer/stores/canvasStore.ts` — `useVisibleNodeIds` uses `primitiveSetEqual` (NOT `primitiveArrayEqual`); upstream may restore order-sensitive equality which causes webview reload on focus switch
 - [ ] Check `src/renderer/lib/workspace/sessionSave.ts` — `deriveSidebarSession` call passes `updatedState.workspaceGroups` as 3rd arg; upstream omits it, silently dropping group name/color on every autosave
+- [ ] Check `sessionSave.ts` snapshot includes `capturedResumeIds`; `sessionSerialize.ts` `buildSessionFile` and `projectFilesToSnapshot` both handle `claudeResumeIds`; `sessionRestore.ts` `terminalRestoreData` set includes `claudeResumeId` and `replayTerminalLog` runs `claude --resume`
 
 ### Testing
 - [ ] `CATE_SMOKE_TEST=1 ELECTRON_ENABLE_LOGGING=1 ./node_modules/.bin/electron .` — no errors, exits 0
@@ -201,6 +202,7 @@ The entire `companion` subsystem was renamed to `runtime`. If your fork has any 
 | Only 10 workspaces restored (groups assigned to missing workspaces lost) | `MAX_RECENT_PROJECTS` 10→50 in `workspaceStateStore.ts` | `8da6e84` |
 | Canvas browser panel scroll resets on focus switch | `useVisibleNodeIds` → `primitiveSetEqual` in `canvasStore.ts` | `(scroll-fix)` |
 | Workspace group definitions (name/color) lost on every restart | Pass `workspaceGroups` to `deriveSidebarSession` in `sessionSave.ts` | `(groups-save)` |
+| `claude --resume` stops working after restart | Restore 4 missing pieces in sessionSave/Serialize/Restore split by upstream | `(claude-resume)` |
 
 ---
 
