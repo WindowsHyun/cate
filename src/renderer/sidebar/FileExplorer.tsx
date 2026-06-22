@@ -10,7 +10,7 @@ import type { FileTreeNode as FileTreeNodeType } from '../../shared/types'
 import { FileTreeNode } from './FileTreeNode'
 import { CreateFileForm } from './CreateFileForm'
 import { isNavKey, resolveTreeNavAction } from './treeKeyboardNav'
-import { watchFsRoot } from '../lib/fs/fsWatchManager'
+import { watchFsRoot, type FsWatchEvent } from '../lib/fs/fsWatchManager'
 import { useGitTreeFor } from '../stores/gitStatusStore'
 import { getClipboard, hasClipboard } from './fileClipboard'
 import { useAppStore } from '../stores/appStore'
@@ -335,12 +335,38 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ rootPath }) => {
     // multiplexed) so the Explorer and the Search view's git-tree watcher don't
     // tear down each other's subscription. Coalesce bursts (e.g. a build writing
     // many files) with a short trailing debounce.
-    const scheduleReload = () => {
+    const scheduleReload = (event: FsWatchEvent) => {
       if (rootPathRef.current !== rootPath) return
+      // 'update' = file content change only — directory listings don't change.
+      // Skip to avoid O(N expanded) re-reads on every file write (e.g. Claude Code).
+      if (event.type === 'update') return
       if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current)
       reloadTimerRef.current = setTimeout(() => {
         reloadTimerRef.current = null
-        if (rootPathRef.current === rootPath) loadTree(rootPath)
+        if (rootPathRef.current !== rootPath || !window.electronAPI) return
+        // Refresh only the immediate parent directory of the changed entry — O(1)
+        // instead of O(N expanded) that loadTree+refreshExpandedChildren does.
+        const sep = event.path.lastIndexOf('/')
+        const parentDir = sep > rootPath.length ? event.path.slice(0, sep) : rootPath
+        if (parentDir === rootPath) {
+          void window.electronAPI.fsReadDir(rootPath, selectedWorkspaceId)
+            .then((entries) => setNodes(entries))
+            .catch(() => void loadTree(rootPath))
+        } else if (expandedPathsRef.current.has(parentDir)) {
+          void window.electronAPI.fsReadDir(parentDir, selectedWorkspaceId)
+            .then((entries) => setChildrenCache((prev) => new Map(prev).set(parentDir, entries)))
+            .catch(() => {
+              // parentDir itself was deleted — prune from expanded state and refresh root.
+              setExpandedPaths((prev) => {
+                if (!prev.has(parentDir)) return prev
+                const next = new Set(prev); next.delete(parentDir); return next
+              })
+              void window.electronAPI?.fsReadDir(rootPath, selectedWorkspaceId)
+                .then((entries) => setNodes(entries))
+                .catch(() => {})
+            })
+        }
+        // Changed path is in a collapsed directory — no visible update needed.
       }, 150)
     }
     const releaseWatch = watchFsRoot(rootPath, scheduleReload, selectedWorkspaceId)

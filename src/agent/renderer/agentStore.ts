@@ -334,6 +334,48 @@ function withPanel(
 }
 
 // -----------------------------------------------------------------------------
+// Streaming delta batcher — coalesces per-token setState calls into one per
+// animation frame. Without this, 50-100 tokens/s each trigger a full Zustand
+// setState → React re-render of every component subscribed to the panel slice.
+// Batching reduces renders to ≤60/s regardless of streaming token rate.
+// -----------------------------------------------------------------------------
+
+const pendingTextDeltas = new Map<string, string>()
+const pendingThinkingDeltas = new Map<string, string>()
+let deltaFlushScheduled = false
+
+function flushStreamingDeltas(): void {
+  deltaFlushScheduled = false
+  if (pendingTextDeltas.size === 0 && pendingThinkingDeltas.size === 0) return
+  const textSnap = new Map(pendingTextDeltas)
+  const thinkingSnap = new Map(pendingThinkingDeltas)
+  pendingTextDeltas.clear()
+  pendingThinkingDeltas.clear()
+  // Single setState call applies all accumulated deltas — one re-render total.
+  useAgentStore.setState((state) => {
+    let next: AgentStoreState = state
+    for (const [panelId, delta] of textSnap) {
+      next = appendAssistantField(next, panelId, 'text', delta)
+    }
+    for (const [panelId, delta] of thinkingSnap) {
+      next = appendAssistantField(next, panelId, 'thinking', delta)
+    }
+    return { panels: next.panels }
+  })
+}
+
+function scheduleDeltaFlush(): void {
+  if (deltaFlushScheduled) return
+  deltaFlushScheduled = true
+  if (typeof requestAnimationFrame !== 'undefined') {
+    requestAnimationFrame(flushStreamingDeltas)
+  } else {
+    // Node/test environment — flush synchronously.
+    flushStreamingDeltas()
+  }
+}
+
+// -----------------------------------------------------------------------------
 // Store
 // -----------------------------------------------------------------------------
 
@@ -389,15 +431,19 @@ export const useAgentStore = create<AgentStore>((set) => ({
 
   appendAssistantDelta(panelId, delta) {
     if (!delta) return
-    set((state) => appendAssistantField(state, panelId, 'text', delta))
+    pendingTextDeltas.set(panelId, (pendingTextDeltas.get(panelId) ?? '') + delta)
+    scheduleDeltaFlush()
   },
 
   appendAssistantThinking(panelId, delta) {
     if (!delta) return
-    set((state) => appendAssistantField(state, panelId, 'thinking', delta))
+    pendingThinkingDeltas.set(panelId, (pendingThinkingDeltas.get(panelId) ?? '') + delta)
+    scheduleDeltaFlush()
   },
 
   endAssistant(panelId, extras) {
+    // Commit any buffered streaming deltas before marking the message as done.
+    flushStreamingDeltas()
     set((state) =>
       withPanel(state, panelId, (p) => {
         const msgs = p.messages.slice()

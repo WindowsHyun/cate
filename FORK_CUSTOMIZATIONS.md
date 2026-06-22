@@ -209,6 +209,32 @@ With 15+ open workspaces, the autosave cycle was blocking the render thread ever
 
 ---
 
+### 17. File Watcher O(1) Targeted Refresh
+FileExplorer was calling `loadTree(rootPath)` → `refreshExpandedChildren()` on every chokidar event, reading ALL expanded folders via IPC. During Claude Code execution (many file writes), this caused O(N expanded dirs) IPC calls every 150ms.
+
+Fixes:
+- Skip `update` events entirely (file content changes don't affect directory structure)
+- For `create`/`delete`: read only the immediate parent directory of the changed entry — O(1) instead of O(N expanded)
+
+**Key files:**
+- `src/renderer/sidebar/FileExplorer.tsx` — `scheduleReload` callback now accepts `FsWatchEvent`, skips updates, does targeted parent-dir refresh
+
+**Merge risk:** LOW. Behavioral change: expanded subdirectory contents update immediately on structural change (same as before), `update` events now ignored (was: triggered full tree reload unnecessarily).
+
+---
+
+### 18. Agent Streaming Delta rAF Batching
+`appendAssistantDelta` called `set()` directly on every token (50-100/s during Claude streaming), causing the full AgentPanel to re-render on every token.
+
+Batching via `requestAnimationFrame` coalesces all deltas within one frame (~16ms) into a single Zustand `setState` — reduces renders from 50-100/s to ≤60/s. `endAssistant` flushes pending deltas synchronously before finalizing so no tokens are lost.
+
+**Key files:**
+- `src/agent/renderer/agentStore.ts` — module-level `pendingTextDeltas`/`pendingThinkingDeltas` buffers, `flushStreamingDeltas()` via rAF, modified `appendAssistantDelta`/`appendAssistantThinking`/`endAssistant`
+
+**Merge risk:** LOW. Purely mechanical batching — streaming output is identical, just applied in frames instead of per-token.
+
+---
+
 ## Merge Checklist
 
 Use this checklist every time you merge upstream changes:
