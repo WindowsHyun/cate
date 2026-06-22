@@ -15,7 +15,7 @@ import { useGitTreeFor } from '../stores/gitStatusStore'
 import { getClipboard, hasClipboard } from './fileClipboard'
 import { useAppStore } from '../stores/appStore'
 import { useSettingsStore } from '../stores/settingsStore'
-import { openFileAsPanel, openFileAsText } from '../lib/fs/fileRouting'
+import { openFileAsPanel, openFileAsText, openFileGrouped, openFileAsTextGrouped } from '../lib/fs/fileRouting'
 import { workspaceDisplayName } from '../lib/fs/displayPath'
 import { isExternalFileDrag, importDroppedEntries } from '../lib/fs/importExternalEntries'
 import { SidebarSectionHeader, SidebarHeaderButton } from './SidebarSectionHeader'
@@ -442,11 +442,11 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ rootPath }) => {
     (filePaths: string[], mode?: 'dock' | 'canvas') => {
       // Resolve mode: explicit arg > user setting > 'dock'
       const resolved = mode ?? fileOpenMode
-      const placement = resolved === 'canvas'
-        ? undefined
-        : { target: 'dock' as const, zone: 'center' as const }
-      for (const filePath of filePaths) {
-        openFileAsPanel(selectedWorkspaceId, filePath, undefined, placement)
+      if (resolved === 'canvas') {
+        for (const filePath of filePaths) openFileGrouped(selectedWorkspaceId, filePath)
+      } else {
+        const placement = { target: 'dock' as const, zone: 'center' as const }
+        for (const filePath of filePaths) openFileAsPanel(selectedWorkspaceId, filePath, undefined, placement)
       }
     },
     [selectedWorkspaceId, fileOpenMode],
@@ -454,14 +454,22 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ rootPath }) => {
 
   const handleFileOpenAsText = useCallback(
     (filePaths: string[]) => {
-      const placement = fileOpenMode === 'canvas'
-        ? undefined
-        : { target: 'dock' as const, zone: 'center' as const }
-      for (const filePath of filePaths) {
-        openFileAsText(selectedWorkspaceId, filePath, undefined, placement)
+      if (fileOpenMode === 'canvas') {
+        for (const filePath of filePaths) openFileAsTextGrouped(selectedWorkspaceId, filePath)
+      } else {
+        const placement = { target: 'dock' as const, zone: 'center' as const }
+        for (const filePath of filePaths) openFileAsText(selectedWorkspaceId, filePath, undefined, placement)
       }
     },
     [selectedWorkspaceId, fileOpenMode],
+  )
+
+  // Force-open in a new canvas node regardless of existing grouping.
+  const handleFileOpenNew = useCallback(
+    (filePaths: string[]) => {
+      for (const filePath of filePaths) openFileAsPanel(selectedWorkspaceId, filePath)
+    },
+    [selectedWorkspaceId],
   )
 
   const handleReload = useCallback(() => {
@@ -787,6 +795,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ rootPath }) => {
                 onSelect={handleSelect}
                 onFileOpen={handleFileOpen}
                 onFileOpenAsText={handleFileOpenAsText}
+                onFileOpenNew={handleFileOpenNew}
                 onToggleExpand={toggleExpand}
                 onExpand={expand}
                 onDeletePaths={deletePaths}

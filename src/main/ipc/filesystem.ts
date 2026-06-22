@@ -179,6 +179,8 @@ function createWatcher(dirPath: string, subscribers: Map<string, SubscriberEntry
   watcher.on('add', (fp: string) => fanOut('create', fp))
   watcher.on('change', (fp: string) => fanOut('update', fp))
   watcher.on('unlink', (fp: string) => fanOut('delete', fp))
+  watcher.on('addDir', (fp: string) => fanOut('create', fp))
+  watcher.on('unlinkDir', (fp: string) => fanOut('delete', fp))
   return watcher
 }
 

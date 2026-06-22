@@ -1,6 +1,9 @@
 import type { Point } from '../../../shared/types'
 import type { PanelPlacement } from '../../stores/appStore'
 import { useAppStore } from '../../stores/appStore'
+import { getAllCanvasStoreEntries, getOrCreateCanvasStoreForPanel } from '../../stores/canvasStore'
+import { findNodeDockStore } from '../../panels/nodeDockRegistry'
+import { collectPanelIds } from '../canvas/collectPanelIds'
 
 export type DocumentType = 'pdf' | 'docx' | 'image'
 
@@ -62,4 +65,116 @@ export function openFileAsPanel(
     return store.createEditor(workspaceId, filePath, position, placement, { markdownPreview: true })
   }
   return store.createEditor(workspaceId, filePath, position, placement)
+}
+
+// -----------------------------------------------------------------------------
+// Extension-grouped canvas open
+// Finds a mounted canvas node that already has an editor panel with the same
+// file extension, and adds the new file as a tab there instead of spawning a
+// new canvas node. Non-editor types (images, SQLite, HTML) are always opened
+// normally. Falls back to a new canvas node when no matching node is found.
+// -----------------------------------------------------------------------------
+
+function getFileExt(filePath: string): string {
+  const i = filePath.lastIndexOf('.')
+  return i !== -1 ? filePath.slice(i).toLowerCase() : ''
+}
+
+function findGroupNodeForExt(
+  workspaceId: string,
+  ext: string,
+): { nodeId: string; canvasPanelId: string } | null {
+  const ws = useAppStore.getState().workspaces.find((w) => w.id === workspaceId)
+  if (!ws) return null
+
+  // Build set of editor panel IDs whose filePath matches the extension.
+  const matchingPanelIds = new Set<string>()
+  for (const panel of Object.values(ws.panels)) {
+    if (panel.type === 'editor' && panel.filePath && getFileExt(panel.filePath) === ext) {
+      matchingPanelIds.add(panel.id)
+    }
+  }
+  if (matchingPanelIds.size === 0) return null
+
+  // Scan mounted canvas nodes (those with a live DockStore) for a match.
+  for (const [canvasPanelId, store] of getAllCanvasStoreEntries()) {
+    for (const [nodeId, node] of Object.entries(store.getState().nodes)) {
+      const nodeDock = findNodeDockStore(nodeId)
+      if (!nodeDock) continue
+      // Check seed panel.
+      if (node.panelId && matchingPanelIds.has(node.panelId)) return { nodeId, canvasPanelId }
+      // Check all tabs in the node's live center layout.
+      for (const id of collectPanelIds(nodeDock.getState().zones.center.layout)) {
+        if (matchingPanelIds.has(id)) return { nodeId, canvasPanelId }
+      }
+    }
+  }
+  return null
+}
+
+/** Open a file on the canvas, grouping same-extension files as tabs in an
+ *  existing canvas node. Non-editor types open as new nodes always. */
+export function openFileGrouped(workspaceId: string, filePath: string, position?: Point): string {
+  const store = useAppStore.getState()
+  const ext = getFileExt(filePath)
+
+  // Non-editor types: open normally (always new node).
+  const docType = getDocumentType(filePath)
+  if (docType) return store.createDocument(workspaceId, filePath, docType, position)
+  if (SQLITE_EXTENSIONS.has(ext)) return store.createDatabase(workspaceId, filePath, position)
+  if (HTML_EXTENSIONS.has(ext)) return store.createBrowser(workspaceId, `file://${filePath}`, position)
+
+  // Editor/text: try to find an existing node with the same extension.
+  // ext === '' groups all extension-less files (Jenkinsfile, Makefile, etc.).
+  const target = findGroupNodeForExt(workspaceId, ext)
+  if (target) {
+    const nodeDock = findNodeDockStore(target.nodeId)
+    if (nodeDock) {
+      const opts = MARKDOWN_EXTENSIONS.has(ext) ? { markdownPreview: true } : undefined
+      const panelId = store.createEditor(workspaceId, filePath, position, { target: 'none' }, opts)
+      if (panelId) {
+        nodeDock.getState().dockPanel(panelId, 'center')
+        getOrCreateCanvasStoreForPanel(target.canvasPanelId).getState().focusNode(target.nodeId)
+        return panelId
+      }
+    }
+  }
+
+  // No existing group node: create a new canvas node.
+  if (MARKDOWN_EXTENSIONS.has(ext)) {
+    return store.createEditor(workspaceId, filePath, position, undefined, { markdownPreview: true })
+  }
+  return store.createEditor(workspaceId, filePath, position)
+}
+
+/** Open a file as a tab inside a specific canvas node's mini-dock.
+ *  Used when the user drops a file directly onto an existing canvas node.
+ *  Non-editor types (images, PDF, SQLite, HTML) are also supported as tabs. */
+export function openFileAsTabInNode(workspaceId: string, nodeId: string, filePath: string): string {
+  const store = useAppStore.getState()
+  const nodeDock = findNodeDockStore(nodeId)
+  if (!nodeDock) return openFileAsPanel(workspaceId, filePath)
+
+  const panelId = openFileAsPanel(workspaceId, filePath, undefined, { target: 'none' })
+  if (panelId) nodeDock.getState().dockPanel(panelId, 'center')
+  return panelId
+}
+
+/** Open a file as plain text on the canvas, grouped by extension. */
+export function openFileAsTextGrouped(workspaceId: string, filePath: string, position?: Point): string {
+  const store = useAppStore.getState()
+  const ext = getFileExt(filePath)
+  const target = findGroupNodeForExt(workspaceId, ext)
+  if (target) {
+    const nodeDock = findNodeDockStore(target.nodeId)
+    if (nodeDock) {
+      const panelId = store.createEditor(workspaceId, filePath, position, { target: 'none' })
+      if (panelId) {
+        nodeDock.getState().dockPanel(panelId, 'center')
+        getOrCreateCanvasStoreForPanel(target.canvasPanelId).getState().focusNode(target.nodeId)
+        return panelId
+      }
+    }
+  }
+  return store.createEditor(workspaceId, filePath, position)
 }

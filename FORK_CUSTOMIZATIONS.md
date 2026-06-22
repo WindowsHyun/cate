@@ -148,6 +148,51 @@ export const PANEL_WINDOW_SYNC_PTY = 'panel:windowSyncPty'
 
 ---
 
+### 13. Extension-Grouped File Opens
+Files opened from the sidebar (double-click or context menu) group same-extension files as tabs in an existing canvas node instead of always spawning a new node. Files with no extension (Jenkinsfile, Makefile, Dockerfile, etc.) are grouped together using `''` as the group key.
+
+**Key files:**
+- `src/renderer/lib/fs/fileRouting.ts` — `openFileGrouped`, `openFileAsTextGrouped`, `openFileAsTabInNode`, `findGroupNodeForExt`
+- `src/renderer/stores/canvasStore.ts` — `getAllCanvasStoreEntries()` export (reverse panel→store lookup)
+- `src/renderer/sidebar/FileExplorer.tsx` — `handleFileOpen` uses `openFileGrouped` in canvas mode; `handleFileOpenNew` bypasses grouping
+- `src/renderer/sidebar/FileTreeNode.tsx` — `onFileOpenNew` prop + "Open in New Canvas Node" context menu item
+
+**Behavior:**
+- Canvas mode: same extension → add as tab to existing node; first open → new node
+- Right-click "Open in New Canvas Node" → always new canvas node (no grouping)
+- Dock mode: unchanged (goes to center dock zone as before)
+- Non-editor types (image, PDF, SQLite, HTML): always new node
+
+**Merge risk:** LOW. Self-contained in `fileRouting.ts`; only minor additions to FileExplorer/FileTreeNode.
+
+---
+
+### 14. File Drop onto Canvas Node (Tab Insert)
+Dragging a file from the file explorer onto an existing canvas node adds it as a tab in that node's mini-dock instead of creating a new floating canvas node.
+
+**Key files:**
+- `src/renderer/canvas/CanvasNode.tsx` — `onDragOver` + `onDrop` on root container; intercepts `application/cate-file` drops, calls `openFileAsTabInNode`
+- `src/renderer/lib/fs/fileRouting.ts` — `openFileAsTabInNode(workspaceId, nodeId, filePath)`
+
+**Behavior:**
+- Drop on any part of a canvas node → add as tab (stops propagation to canvas)
+- If node has no live mini-dock (unmounted/off-screen) → falls through to canvas handler (new node)
+- Directory drops ignored
+
+**Merge risk:** LOW. Drop handlers added to existing CanvasNode root div; no structural changes.
+
+---
+
+### 15. Directory Events in File Watcher
+File explorer now updates in real-time when directories are created or deleted (previously only file `add`/`change`/`unlink` events were watched).
+
+**Key files:**
+- `src/main/ipc/filesystem.ts` — `createWatcher()` now also listens to `addDir` and `unlinkDir` chokidar events
+
+**Merge risk:** LOW. Two-line addition to `createWatcher`.
+
+---
+
 ## Merge Checklist
 
 Use this checklist every time you merge upstream changes:
@@ -166,9 +211,12 @@ Use this checklist every time you merge upstream changes:
 - [ ] Check `src/renderer/lib/workspace/sessionStartup.ts` — groups applied after workspace restore
 - [ ] Check `src/renderer/stores/shortcutStore.ts` — module-level `useSettingsStore` calls wrapped in `queueMicrotask()`
 - [ ] Check `src/main/workspaceStateStore.ts` — `MAX_RECENT_PROJECTS` is **50** (upstream default is 10; restoring 17 workspaces requires ≥17)
-- [ ] Check `src/renderer/stores/canvasStore.ts` — `useVisibleNodeIds` uses `primitiveSetEqual` (NOT `primitiveArrayEqual`); upstream may restore order-sensitive equality which causes webview reload on focus switch
+- [ ] Check `src/renderer/stores/canvasStore.ts` — `useVisibleNodeIds` uses `primitiveSetEqual` (NOT `primitiveArrayEqual`); `getAllCanvasStoreEntries()` exported (used by grouped file open)
 - [ ] Check `src/renderer/lib/workspace/sessionSave.ts` — `deriveSidebarSession` call passes `updatedState.workspaceGroups` as 3rd arg; upstream omits it, silently dropping group name/color on every autosave
 - [ ] Check `sessionSave.ts` snapshot includes `capturedResumeIds`; `sessionSerialize.ts` `buildSessionFile` and `projectFilesToSnapshot` both handle `claudeResumeIds`; `sessionRestore.ts` `terminalRestoreData` set includes `claudeResumeId` and `replayTerminalLog` runs `claude --resume`
+- [ ] Check `src/renderer/lib/fs/fileRouting.ts` — `openFileGrouped`, `openFileAsTextGrouped`, `openFileAsTabInNode`, `findGroupNodeForExt` still present
+- [ ] Check `src/renderer/canvas/CanvasNode.tsx` — root div has `onDragOver` + `onDrop` handlers for `application/cate-file` drops
+- [ ] Check `src/main/ipc/filesystem.ts` `createWatcher()` — `addDir` and `unlinkDir` events wired alongside `add`/`change`/`unlink`
 
 ### Testing
 - [ ] `CATE_SMOKE_TEST=1 ELECTRON_ENABLE_LOGGING=1 ./node_modules/.bin/electron .` — no errors, exits 0

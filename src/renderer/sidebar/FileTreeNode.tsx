@@ -42,6 +42,8 @@ interface FileTreeNodeProps {
   onSelect: (path: string, meta: { shift?: boolean; cmd?: boolean }) => void
   onFileOpen: (paths: string[], mode?: 'dock' | 'canvas') => void
   onFileOpenAsText?: (paths: string[]) => void
+  /** Force-open each file as a new canvas node, bypassing extension grouping. */
+  onFileOpenNew?: (paths: string[]) => void
   /** Toggle a directory's expansion (lazy-loads children on expand). */
   onToggleExpand: (path: string) => void
   /** Force-expand a directory (used before showing an inline create input / paste). */
@@ -73,6 +75,7 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
   onSelect,
   onFileOpen,
   onFileOpenAsText,
+  onFileOpenNew,
   onToggleExpand,
   onExpand,
   onDeletePaths,
@@ -169,6 +172,10 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
         id: 'open-as-text',
         label: pathsToOpen.length > 1 ? `Open ${pathsToOpen.length} Files as Text` : 'Open as Text',
       })
+      items.push({
+        id: 'open-new-node',
+        label: pathsToOpen.length > 1 ? `Open ${pathsToOpen.length} Files in New Canvas Node` : 'Open in New Canvas Node',
+      })
       items.push({ type: 'separator' })
     }
     items.push(
@@ -193,6 +200,7 @@ export const FileTreeNode: React.FC<FileTreeNodeProps> = ({
       case 'open': onFileOpen(pathsToOpen); break
       case 'open-on-canvas': onFileOpen(pathsToOpen, 'canvas'); break
       case 'open-as-text': onFileOpenAsText ? onFileOpenAsText(pathsToOpen) : onFileOpen(pathsToOpen); break
+      case 'open-new-node': onFileOpenNew ? onFileOpenNew(pathsToOpen) : onFileOpen(pathsToOpen, 'canvas'); break
       case 'new-file': startCreate('file'); break
       case 'new-folder': startCreate('folder'); break
       case 'reveal': window.electronAPI.shellShowInFolder(node.path); break

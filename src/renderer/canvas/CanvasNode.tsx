@@ -24,7 +24,8 @@ import { NodeResizeOverlay } from './NodeResizeOverlay'
 import type { DockStore } from '../stores/dockStore'
 import { DockStoreProvider } from '../stores/DockStoreContext'
 import DockTabStack from '../docking/DockTabStack'
-import { activeLeafPanelId } from '../panels/nodeDockRegistry'
+import { activeLeafPanelId, findNodeDockStore } from '../panels/nodeDockRegistry'
+import { openFileAsTabInNode } from '../lib/fs/fileRouting'
 import { setActivePanel } from '../lib/activePanel'
 import { Tooltip } from '../ui/Tooltip'
 import DockSplitContainer from '../docking/DockSplitContainer'
@@ -639,6 +640,45 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
       onMouseDown={handleMouseDown}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
+      onDragOver={(e) => {
+        if (
+          e.dataTransfer.types.includes('application/cate-file') ||
+          e.dataTransfer.types.includes('application/cate-files') ||
+          e.dataTransfer.types.includes('Files')
+        ) {
+          e.preventDefault()
+          e.stopPropagation()
+          e.dataTransfer.dropEffect = 'copy'
+        }
+      }}
+      onDrop={async (e) => {
+        const multiData = e.dataTransfer.getData('application/cate-files')
+        const singlePath = e.dataTransfer.getData('application/cate-file')
+        let paths: string[] = []
+        if (multiData) { try { paths = JSON.parse(multiData) } catch { /* ignore */ } }
+        if (paths.length === 0 && singlePath) paths = [singlePath]
+        if (paths.length === 0 && e.dataTransfer.files.length > 0) {
+          for (const f of Array.from(e.dataTransfer.files)) {
+            const p = (f as { path?: string }).path
+            if (p) paths.push(p)
+          }
+        }
+        if (paths.length === 0) return
+        // Only intercept if this node has a live mini-dock; otherwise let the
+        // canvas handler create a new floating node.
+        if (!findNodeDockStore(nodeId)) return
+        e.preventDefault()
+        e.stopPropagation()
+        for (const filePath of paths) {
+          let isDir = false
+          try {
+            const st = await window.electronAPI.fsStat(filePath, wsId)
+            isDir = !!st?.isDirectory
+          } catch { /* treat as file */ }
+          if (isDir) continue
+          openFileAsTabInNode(wsId, nodeId, filePath)
+        }
+      }}
     >
       {/* Standalone grab strip — only when the layout is split (or empty). */}
       {!rootIsTabs && (

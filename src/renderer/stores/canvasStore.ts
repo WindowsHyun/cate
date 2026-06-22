@@ -157,6 +157,12 @@ export function getAllCanvasStores(): UseBoundStore<StoreApi<CanvasStore>>[] {
   return Array.from(canvasBoundStoresByPanelId.values())
 }
 
+/** Iterate every live CanvasStore with its canvas panel id.
+ *  Used for extension-grouped file opens to find which canvas panel owns a node. */
+export function getAllCanvasStoreEntries(): Array<[string, UseBoundStore<StoreApi<CanvasStore>>]> {
+  return Array.from(canvasBoundStoresByPanelId.entries())
+}
+
 // -----------------------------------------------------------------------------
 // Granular selectors
 // -----------------------------------------------------------------------------
