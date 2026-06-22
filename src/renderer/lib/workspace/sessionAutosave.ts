@@ -17,11 +17,12 @@ import { getWorkspaceCanvasPanelIds } from './canvasAccess'
 import { peekCanvasStoreForPanel } from '../../stores/canvasStore'
 import { getOrCreateWorkspaceDockStore } from './dockRegistry'
 import { saveSession } from './sessionSave'
+import { useDragStore } from '../../drag'
 import type { CanvasStore } from '../../stores/canvasStore'
 import type { DockStore } from '../../stores/dockStore'
 
-const IDLE_DELAY = 500
-const MAX_WAIT = 4000
+const IDLE_DELAY = 1000
+const MAX_WAIT = 8000
 const PERIODIC_INTERVAL = 30_000
 
 let idleTimer: ReturnType<typeof setTimeout> | null = null
@@ -56,7 +57,7 @@ let sessionDirty = false
 // Resolvers for flush requests waiting on an in-flight save to finish
 let flushWaiters: (() => void)[] = []
 
-function runSave(): void {
+function runSave(quickSave = false): void {
   if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
   if (maxWaitTimer) { clearTimeout(maxWaitTimer); maxWaitTimer = null }
   if (!pendingSave) return
@@ -69,7 +70,7 @@ function runSave(): void {
   saveInFlight = true
   // Snapshot dirty at the moment the save begins; further mutations re-set it.
   sessionDirty = false
-  saveSession()
+  saveSession(quickSave)
     .catch(() => {
       // Save failed — re-mark dirty so the next flush still writes.
       sessionDirty = true
@@ -90,10 +91,13 @@ function scheduleSave(): void {
   if (restoreDepth > 0) return
   pendingSave = true
   sessionDirty = true
+  // Don't arm save timers during active canvas drag — another scheduleSave fires
+  // when the drag ends (canvas store update), arming the timers then.
+  if (useDragStore.getState().isDragging) return
   if (idleTimer) clearTimeout(idleTimer)
-  idleTimer = unrefTimer(setTimeout(runSave, IDLE_DELAY))
+  idleTimer = unrefTimer(setTimeout(() => runSave(true), IDLE_DELAY))
   if (!maxWaitTimer) {
-    maxWaitTimer = unrefTimer(setTimeout(runSave, MAX_WAIT))
+    maxWaitTimer = unrefTimer(setTimeout(() => runSave(true), MAX_WAIT))
   }
 }
 
@@ -172,8 +176,12 @@ export function setupAutoSave(): () => void {
     for (const unsub of canvasUnsubs.values()) unsub()
     canvasUnsubs.clear()
   }
-  const unsubApp = useAppStore.subscribe(() => {
-    subscribeActive()
+  const unsubApp = useAppStore.subscribe((state, prevState) => {
+    // Re-wire canvas subscriptions only when the selected workspace changes,
+    // not on every panel mutation (node drag, focus, etc.).
+    if (state.selectedWorkspaceId !== prevState.selectedWorkspaceId) {
+      subscribeActive()
+    }
     scheduleSave()
   })
   subscribeActive()
@@ -184,12 +192,13 @@ export function setupAutoSave(): () => void {
   periodicTimer = unrefTimer(setInterval(() => {
     if (restoreDepth > 0) return
     if (pendingSave) {
-      runSave()
+      runSave(false)
     } else if (!saveInFlight) {
-      // Force a save even without detected changes — workspace sync may have
-      // drifted or external state (terminal CWD) changed without store updates.
+      // Force a full save even without detected changes — workspace sync may have
+      // drifted or external state (terminal CWD, scrollback) changed without
+      // store updates. This captures all background workspaces too.
       pendingSave = true
-      runSave()
+      runSave(false)
     }
   }, PERIODIC_INTERVAL))
 
@@ -216,7 +225,7 @@ export function setupAutoSave(): () => void {
       saveInFlight = true
       pendingSave = false
       sessionDirty = false
-      saveSession()
+      saveSession(false)
         .catch(() => { sessionDirty = true })
         .finally(() => {
           saveInFlight = false

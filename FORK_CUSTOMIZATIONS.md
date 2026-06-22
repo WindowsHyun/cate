@@ -193,6 +193,22 @@ File explorer now updates in real-time when directories are created or deleted (
 
 ---
 
+### 16. Autosave Performance (Many Workspaces)
+With 15+ open workspaces, the autosave cycle was blocking the render thread every 4s via synchronous `SerializeAddon.serialize()` calls for every terminal across every workspace. Three fixes applied:
+
+1. **Drag-gated scheduling** — `scheduleSave()` now checks `useDragStore.getState().isDragging`; timers are not armed during active canvas drag. A save fires 1s after drag ends instead.
+2. **Quick vs. full saves** — idle/change-triggered saves pass `quickSave=true` to `saveSession()`, skipping scrollback capture and CWD fetch for background (non-selected) workspaces. Periodic saves (every 30s) and flush-on-quit pass `quickSave=false` and capture everything.
+3. **subscribeActive() only on workspace switch** — the appStore subscription now calls `subscribeActive()` only when `selectedWorkspaceId` changes, not on every panel mutation. `scheduleSave()` still fires on all changes.
+4. **Timing tuned** — `IDLE_DELAY` 500ms → 1000ms, `MAX_WAIT` 4000ms → 8000ms.
+
+**Key files:**
+- `src/renderer/lib/workspace/sessionAutosave.ts` — drag check, quickSave propagation, subscribe selector, timing constants
+- `src/renderer/lib/workspace/sessionSave.ts` — `saveSession(quickSave)` parameter, background workspace skip guards
+
+**Merge risk:** LOW. Pure performance opt — no behavioral change for single-workspace usage. Background terminal scrollback may lag up to 30s (periodic save window).
+
+---
+
 ## Merge Checklist
 
 Use this checklist every time you merge upstream changes:

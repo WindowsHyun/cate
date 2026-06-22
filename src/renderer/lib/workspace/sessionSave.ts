@@ -39,8 +39,9 @@ let lastSidebarSessionSerialized: string | null = null
 // And for the remote-projects list (cate-runtime:// restore snapshots).
 let lastRemoteProjectsSerialized: string | null = null
 
-export async function saveSession(): Promise<void> {
+export async function saveSession(quickSave = false): Promise<void> {
   const updatedState = useAppStore.getState()
+  const selectedWsId = updatedState.selectedWorkspaceId
 
   const snapshots: SessionSnapshot[] = []
 
@@ -57,6 +58,11 @@ export async function saveSession(): Promise<void> {
       snapshots.push(deferred)
       continue
     }
+
+    // Quick saves (idle/change-triggered) skip terminal work for background
+    // workspaces to avoid blocking the render thread with N×serializeAddon calls.
+    // Full saves (periodic every 30s, flush on quit) capture everything.
+    const isActiveWorkspace = workspace.id === selectedWsId
 
     // Dock layout from the workspace's OWN dock store if activated, else its
     // last-saved snapshot. The center-zone canvas panel is the primary canvas.
@@ -103,9 +109,10 @@ export async function saveSession(): Promise<void> {
       ;(panels ??= {})[id] = panel
       if (panel.type === 'terminal') {
         const entry = terminalRegistry.getEntry(id)
-        if (entry?.ptyId) {
+        if (entry?.ptyId && (!quickSave || isActiveWorkspace)) {
           // Key scrollback by the (restore-stable) panel id so replay finds it
-          // on the next launch.
+          // on the next launch. Quick saves skip background workspaces — the
+          // periodic full save (every 30s) keeps them current.
           const promise = captureAndSaveScrollback(entry, id)
           if (promise) scrollbackPromises.push(promise)
         }
@@ -126,7 +133,7 @@ export async function saveSession(): Promise<void> {
       for (const panel of Object.values(panels)) {
         if (panel.type !== 'terminal') continue
         const entry = terminalRegistry.getEntry(panel.id)
-        if (entry?.ptyId) {
+        if (entry?.ptyId && (!quickSave || isActiveWorkspace)) {
           cwdPromises.push({
             id: panel.id,
             promise: window.electronAPI.terminalGetCwd(entry.ptyId).catch(() => null),
