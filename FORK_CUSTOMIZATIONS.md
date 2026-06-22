@@ -259,6 +259,10 @@ Use this checklist every time you merge upstream changes:
 - [ ] Check `src/renderer/lib/fs/fileRouting.ts` — `openFileGrouped`, `openFileAsTextGrouped`, `openFileAsTabInNode`, `findGroupNodeForExt` still present
 - [ ] Check `src/renderer/canvas/CanvasNode.tsx` — root div has `onDragOver` + `onDrop` handlers for `application/cate-file` drops
 - [ ] Check `src/main/ipc/filesystem.ts` `createWatcher()` — `addDir` and `unlinkDir` events wired alongside `add`/`change`/`unlink`
+- [ ] Check `src/renderer/lib/workspace/sessionAutosave.ts` — `IDLE_DELAY=1000`, `MAX_WAIT=8000`; `scheduleSave()` checks `useDragStore.getState().isDragging`; appStore subscription only calls `subscribeActive()` when `selectedWorkspaceId` changes; periodic timer calls `runSave(false)`; flush save calls `saveSession(false)`
+- [ ] Check `src/renderer/lib/workspace/sessionSave.ts` — `saveSession(quickSave = false)` parameter; scrollback capture and CWD fetch skip non-active workspaces when `quickSave=true`
+- [ ] Check `src/renderer/sidebar/FileExplorer.tsx` — `scheduleReload` accepts `FsWatchEvent`; skips `event.type === 'update'`; refreshes only parent dir of changed entry (not full `loadTree`); imports `FsWatchEvent` from `fsWatchManager`
+- [ ] Check `src/agent/renderer/agentStore.ts` — module-level `pendingTextDeltas`/`pendingThinkingDeltas` maps and `flushStreamingDeltas()` via rAF; `appendAssistantDelta`/`appendAssistantThinking` accumulate into buffers; `endAssistant` calls `flushStreamingDeltas()` before its `set()`
 
 ### Testing
 - [ ] `CATE_SMOKE_TEST=1 ELECTRON_ENABLE_LOGGING=1 ./node_modules/.bin/electron .` — no errors, exits 0
