@@ -150,7 +150,7 @@ export default function WelcomePage({ workspaceId }: { workspaceId: string }) {
               <h2 className="text-xs font-semibold text-secondary uppercase tracking-wider mb-3">
                 Recent
               </h2>
-              <div className="flex flex-col gap-0.5">
+              <div className="flex flex-col gap-0.5 max-h-[40vh] overflow-y-auto pr-1">
                 {recentProjects.map((projectPath) => {
                   const { runtimeId, path: decodedPath } = parseLocator(projectPath)
                   // Local paths are OS-native — split on `\` too so Windows paths

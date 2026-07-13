@@ -11,8 +11,8 @@ interface HistoryEntry {
   timestamp?: number
 }
 
-/** Read ~/.claude/history.jsonl and find the most recent sessionId for a CWD. */
-async function findResumeIdFromHistory(cwd: string): Promise<string | null> {
+/** Read ~/.claude/history.jsonl and find the most recent sessionId + project path for a CWD. */
+async function findResumeIdFromHistory(cwd: string): Promise<{ sessionId: string; project: string } | null> {
   const historyPath = path.join(os.homedir(), '.claude', 'history.jsonl')
   let content: string
   try {
@@ -21,7 +21,7 @@ async function findResumeIdFromHistory(cwd: string): Promise<string | null> {
     return null
   }
 
-  let best: { timestamp: number; sessionId: string } | null = null
+  let best: { timestamp: number; sessionId: string; project: string; score: number } | null = null
 
   for (const line of content.split('\n')) {
     if (!line.trim()) continue
@@ -34,29 +34,37 @@ async function findResumeIdFromHistory(cwd: string): Promise<string | null> {
     const { project, sessionId, timestamp } = entry
     if (!project || !sessionId || typeof timestamp !== 'number') continue
 
-    // Match when the terminal CWD is at or below the recorded project path,
-    // or when the project path is at or below the terminal CWD.
-    const match =
-      cwd === project ||
-      cwd.startsWith(project + '/') ||
-      project.startsWith(cwd + '/')
+    // Score by specificity: exact match > terminal is inside project > project inside cwd.
+    // Prefer the LONGEST (most specific) matching project path so a home-dir session
+    // doesn't shadow a workspace-specific session for every path under ~.
+    let score: number
+    if (cwd === project) {
+      score = 3
+    } else if (cwd.startsWith(project + '/')) {
+      // terminal is inside the project — score by how specific (longer = better)
+      score = 2 + project.length / 10000
+    } else if (project.startsWith(cwd + '/')) {
+      score = 1 + project.length / 10000
+    } else {
+      continue
+    }
 
-    if (match && (!best || timestamp > best.timestamp)) {
-      best = { timestamp, sessionId }
+    if (!best || score > best.score || (score === best.score && timestamp > best.timestamp)) {
+      best = { timestamp, sessionId, project, score }
     }
   }
 
-  return best?.sessionId ?? null
+  return best ? { sessionId: best.sessionId, project: best.project } : null
 }
 
 export function registerClaudeResumeHandlers(): void {
-  ipcMain.handle(CLAUDE_FIND_RESUME_ID, async (_event, cwd: string): Promise<string | null> => {
+  ipcMain.handle(CLAUDE_FIND_RESUME_ID, async (_event, cwd: string): Promise<{ sessionId: string; project: string } | null> => {
     if (!cwd || typeof cwd !== 'string') return null
     try {
-      const sessionId = await findResumeIdFromHistory(cwd)
-      if (sessionId) {
-        log.info('[claudeResume] found session %s for cwd %s (via history.jsonl)', sessionId, cwd)
-        return sessionId
+      const result = await findResumeIdFromHistory(cwd)
+      if (result) {
+        log.info('[claudeResume] found session %s for cwd %s (project: %s)', result.sessionId, cwd, result.project)
+        return result
       }
       log.warn('[claudeResume] no session found for cwd %s', cwd)
       return null

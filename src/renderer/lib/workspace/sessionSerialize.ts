@@ -87,6 +87,8 @@ export function buildSessionFile(
     connection: snapshot.connection,
     claudeResumeIds: snapshot.claudeResumeIds && Object.keys(snapshot.claudeResumeIds).length
       ? snapshot.claudeResumeIds : undefined,
+    claudeResumeProjects: snapshot.claudeResumeProjects && Object.keys(snapshot.claudeResumeProjects).length
+      ? snapshot.claudeResumeProjects : undefined,
   }
 }
 
@@ -137,6 +139,8 @@ export function projectFilesToSnapshot(
     terminalCwds: Object.keys(terminalCwds).length ? terminalCwds : undefined,
     claudeResumeIds: sess?.claudeResumeIds && Object.keys(sess.claudeResumeIds).length
       ? sess.claudeResumeIds : undefined,
+    claudeResumeProjects: sess?.claudeResumeProjects && Object.keys(sess.claudeResumeProjects).length
+      ? sess.claudeResumeProjects : undefined,
     // Restore the persisted worktree registry (absolute paths) so colors/labels
     // are stable and panel.worktreeId references resolve after restart.
     worktrees: sess?.worktrees,

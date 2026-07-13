@@ -131,6 +131,19 @@ export function CanvasSettings() {
           ]}
         />
       </SettingRow>
+      <SettingRow
+        label={t('canvas.fitPanelsThreePanelLayout')}
+        description={t('canvas.fitPanelsThreePanelLayout.desc')}
+      >
+        <Select
+          value={store.fitPanelsThreePanelLayout ?? 'vertical'}
+          onChange={(v) => store.setSetting('fitPanelsThreePanelLayout', v as 'vertical' | 'horizontal')}
+          options={[
+            { value: 'vertical', label: t('canvas.fitPanelsThreePanelLayout.vertical') },
+            { value: 'horizontal', label: t('canvas.fitPanelsThreePanelLayout.horizontal') },
+          ]}
+        />
+      </SettingRow>
       <SettingRow label={t('canvas.defaultWidth')}>
         <NumberInput value={store.defaultPanelWidth} onChange={(v) => store.setSetting('defaultPanelWidth', v)} min={300} max={1200} step={50} />
       </SettingRow>

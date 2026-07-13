@@ -235,6 +235,44 @@ Batching via `requestAnimationFrame` coalesces all deltas within one frame (~16m
 
 ---
 
+### 19. Claude --resume Project-Scoped Fix
+`claude --resume <uuid>` in Claude Code 2.x is **project-scoped**: it searches `~/.claude/projects/<encoded-cwd>/` relative to the process CWD. When Cate restores a terminal in a different directory than where Claude was originally run (e.g., session stored in `-Users-nhn/` but terminal CWD is a sub-project), the session file exists but `claude` can't find it → "No conversation found".
+
+Fix: also capture the project directory from `history.jsonl` at quit-time and store it alongside the session UUID. On restore, `replayTerminalLog` issues `cd "/original/project" && claude --resume <uuid>` instead of running from the terminal's CWD.
+
+**Key files:**
+- `src/main/ipc/claudeResume.ts` — `findResumeIdFromHistory` returns `{ sessionId, project }` instead of `string | null`; uses specificity scoring (exact > cwd-inside-project > project-inside-cwd, then path length, then timestamp) so workspace sessions win over broad home-dir matches
+- `src/preload/index.ts` — `claudeFindResumeId` return type updated to match
+- `src/shared/electron-api.d.ts` — same return type update
+- `src/renderer/lib/claudeSessionCapture.ts` — exports `capturedResumeProjects: Record<string, string>` alongside `capturedResumeIds`
+- `src/shared/types.ts` — `SessionSnapshot` + `ProjectSessionFile` gain `claudeResumeProjects?: Record<string, string>`
+- `src/renderer/lib/workspace/sessionSerialize.ts` — `buildSessionFile` + `projectFilesToSnapshot` both pass through `claudeResumeProjects`
+- `src/renderer/lib/workspace/sessionSave.ts` — snapshot includes `capturedResumeProjects`
+- `src/renderer/lib/terminal/terminalRestoreData.ts` — entry gains `claudeResumeProject?: string`
+- `src/renderer/lib/workspace/sessionRestore.ts` — `terminalRestoreData` seeded with `claudeResumeProject`; `replayTerminalLog` does `cd <project> && claude --resume <uuid>` when project is known
+
+**Backward compat:** sessions saved before this fix have no `claudeResumeProjects` → falls back to `claude --resume <uuid>` without `cd` (same behavior as before).
+
+**Merge risk:** LOW. Purely additive — new optional field + one extra `cd` in the restore command. Old session files unaffected.
+
+---
+
+### 20. Fit Panels 3-Panel Horizontal Layout Setting
+"Fit Panels to Screen" (⌘5, `fitPanelsToViewport`) picks a uniform grid by minimizing empty cells + aspect deviation from 16:9. For exactly 3 panels any 2-column split leaves one empty cell (heavily penalized), so it only ever chose a single column (vertical stack) or single row — never the "2 on top, 1 wide on bottom" shape a landscape monitor user actually wants, since that shape is asymmetric and can't come out of a uniform-grid formula.
+
+Fix: new setting `fitPanelsThreePanelLayout: 'vertical' | 'horizontal'` (default `'vertical'`, preserving existing behavior). When `'horizontal'` and exactly 3 panels are open, `fitPanelsToViewport()` takes a dedicated branch before the cols-selection loop and lays out 2 equal-width panels on top + 1 full-width panel on the bottom.
+
+**Key files:**
+- `src/shared/types.ts` — `AppSettings.fitPanelsThreePanelLayout` + `DEFAULT_SETTINGS` entry
+- `src/main/settingsFile.ts` — schema entry (`'string'`)
+- `src/renderer/stores/canvas/arrangeSlice.ts` — `fitPanelsToViewport()` early-return branch for `n === 3 && fitPanelsThreePanelLayout === 'horizontal'`
+- `src/renderer/settings/CanvasSettings.tsx` — new `Select` row next to Auto Layout mode
+- `src/renderer/i18n/strings.ts` — `canvas.fitPanelsThreePanelLayout*` keys (en/ko)
+
+**Merge risk:** LOW. New optional setting, defaults to prior behavior, isolated branch in one function.
+
+---
+
 ## Merge Checklist
 
 Use this checklist every time you merge upstream changes:
@@ -255,7 +293,7 @@ Use this checklist every time you merge upstream changes:
 - [ ] Check `src/main/workspaceStateStore.ts` — `MAX_RECENT_PROJECTS` is **50** (upstream default is 10; restoring 17 workspaces requires ≥17)
 - [ ] Check `src/renderer/stores/canvasStore.ts` — `useVisibleNodeIds` uses `primitiveSetEqual` (NOT `primitiveArrayEqual`); `getAllCanvasStoreEntries()` exported (used by grouped file open)
 - [ ] Check `src/renderer/lib/workspace/sessionSave.ts` — `deriveSidebarSession` call passes `updatedState.workspaceGroups` as 3rd arg; upstream omits it, silently dropping group name/color on every autosave
-- [ ] Check `sessionSave.ts` snapshot includes `capturedResumeIds`; `sessionSerialize.ts` `buildSessionFile` and `projectFilesToSnapshot` both handle `claudeResumeIds`; `sessionRestore.ts` `terminalRestoreData` set includes `claudeResumeId` and `replayTerminalLog` runs `claude --resume`
+- [ ] Check `sessionSave.ts` snapshot includes `capturedResumeIds` **and** `capturedResumeProjects`; `sessionSerialize.ts` `buildSessionFile` and `projectFilesToSnapshot` both pass through `claudeResumeIds` **and** `claudeResumeProjects`; `terminalRestoreData.ts` entry has `claudeResumeProject?`; `sessionRestore.ts` seeds `claudeResumeProject` and `replayTerminalLog` does `cd <project> && claude --resume <uuid>`; `claudeResume.ts` `findResumeIdFromHistory` returns `{ sessionId, project }`; preload + `electron-api.d.ts` match that return type
 - [ ] Check `src/renderer/lib/fs/fileRouting.ts` — `openFileGrouped`, `openFileAsTextGrouped`, `openFileAsTabInNode`, `findGroupNodeForExt` still present
 - [ ] Check `src/renderer/canvas/CanvasNode.tsx` — root div has `onDragOver` + `onDrop` handlers for `application/cate-file` drops
 - [ ] Check `src/main/ipc/filesystem.ts` `createWatcher()` — `addDir` and `unlinkDir` events wired alongside `add`/`change`/`unlink`
@@ -263,6 +301,7 @@ Use this checklist every time you merge upstream changes:
 - [ ] Check `src/renderer/lib/workspace/sessionSave.ts` — `saveSession(quickSave = false)` parameter; scrollback capture and CWD fetch skip non-active workspaces when `quickSave=true`
 - [ ] Check `src/renderer/sidebar/FileExplorer.tsx` — `scheduleReload` accepts `FsWatchEvent`; skips `event.type === 'update'`; refreshes only parent dir of changed entry (not full `loadTree`); imports `FsWatchEvent` from `fsWatchManager`
 - [ ] Check `src/agent/renderer/agentStore.ts` — module-level `pendingTextDeltas`/`pendingThinkingDeltas` maps and `flushStreamingDeltas()` via rAF; `appendAssistantDelta`/`appendAssistantThinking` accumulate into buffers; `endAssistant` calls `flushStreamingDeltas()` before its `set()`
+- [ ] Check `src/shared/types.ts` — `AppSettings.fitPanelsThreePanelLayout` and `DEFAULT_SETTINGS.fitPanelsThreePanelLayout` still present; `src/main/settingsFile.ts` `SETTINGS_SCHEMA` has matching `'string'` entry; `arrangeSlice.ts` `fitPanelsToViewport()` still has the `n === 3` horizontal branch before the cols-selection loop
 
 ### Testing
 - [ ] `CATE_SMOKE_TEST=1 ELECTRON_ENABLE_LOGGING=1 ./node_modules/.bin/electron .` — no errors, exits 0
@@ -297,6 +336,7 @@ The entire `companion` subsystem was renamed to `runtime`. If your fork has any 
 | Canvas browser panel scroll resets on focus switch | `useVisibleNodeIds` → `primitiveSetEqual` in `canvasStore.ts` | `(scroll-fix)` |
 | Workspace group definitions (name/color) lost on every restart | Pass `workspaceGroups` to `deriveSidebarSession` in `sessionSave.ts` | `(groups-save)` |
 | `claude --resume` stops working after restart | Restore 4 missing pieces in sessionSave/Serialize/Restore split by upstream | `(claude-resume)` |
+| `claude --resume` → "No conversation found" despite session file existing | `claude --resume` is project-scoped; capture project path from `history.jsonl` and `cd` to it before resuming (Feature 19) | `(claude-resume-project)` |
 
 ---
 

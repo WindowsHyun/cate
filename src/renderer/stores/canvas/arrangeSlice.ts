@@ -225,6 +225,37 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
       const gap = 6
       const n = nodeList.length
 
+      // 3-panel horizontal bias: the "2 top + 1 full-width bottom" shape can't
+      // come out of the uniform-grid cols-loop below (bottom cell would need a
+      // different width than the top cells), so it's a dedicated branch.
+      if (n === 3 && useSettingsStore.getState().fitPanelsThreePanelLayout === 'horizontal') {
+        const topW = Math.floor((avW - gap * 3) / 2)
+        const rowH = Math.floor((avH - gap * 3) / 2)
+        const bottomW = avW - gap * 2
+        const positions = [
+          { x: gap, y: gap, w: topW, h: rowH },
+          { x: gap * 2 + topW, y: gap, w: topW, h: rowH },
+          { x: gap, y: gap * 2 + rowH, w: bottomW, h: rowH },
+        ]
+
+        get().pushHistory()
+        const updatedNodes = { ...state.nodes }
+        nodeList.forEach((node, i) => {
+          const p = positions[i]
+          updatedNodes[node.id] = {
+            ...updatedNodes[node.id],
+            origin: { x: p.x, y: p.y },
+            size: { width: p.w, height: p.h },
+          }
+        })
+        set({
+          nodes: updatedNodes,
+          zoomLevel: 1.0,
+          viewportOffset: { x: viewportInsets.left, y: 0 },
+        })
+        return
+      }
+
       // Pick cols that minimizes empty grid cells, with minor preference for
       // panels near 16:9. The old aspect-ratio sqrt formula over-shoots on wide
       // screens (e.g. 4 panels → 3 cols instead of 2×2).

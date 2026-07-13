@@ -7,9 +7,10 @@
 import log from './logger'
 import { terminalRegistry } from './terminal/terminalRegistry'
 
-// Shared storage: populated by captureClaudeSessions(), read by buildSnapshot()
-// in session.ts before it serializes the snapshot.
+// Shared storage: populated by captureClaudeSessions(), read by sessionSave.
+// project path is stored alongside so replayTerminalLog can cd before resuming.
 export const capturedResumeIds: Record<string, string> = {}
+export const capturedResumeProjects: Record<string, string> = {}
 
 export function initClaudeSessionCapture(): void {
   if (typeof window === 'undefined' || !window.electronAPI) return
@@ -25,7 +26,8 @@ async function captureClaudeSessions(ptyIds: string[]): Promise<void> {
   }
 
   log.info(`[claudeCapture] scanning filesystem for ${ptyIds.length} terminal(s)`)
-  const result: Record<string, string> = {}
+  const resultIds: Record<string, string> = {}
+  const resultProjects: Record<string, string> = {}
 
   await Promise.all(
     ptyIds.map(async (ptyId) => {
@@ -35,14 +37,16 @@ async function captureClaudeSessions(ptyIds: string[]): Promise<void> {
       const cwd = await window.electronAPI.terminalGetCwd(ptyId).catch(() => null)
       if (!cwd) return
 
-      const sessionId = await window.electronAPI.claudeFindResumeId(cwd).catch(() => null)
-      if (sessionId) {
-        result[panelId] = sessionId
-        log.info(`[claudeCapture] panel ${panelId}: found resume ${sessionId} (cwd: ${cwd})`)
+      const found = await window.electronAPI.claudeFindResumeId(cwd).catch(() => null)
+      if (found) {
+        resultIds[panelId] = found.sessionId
+        resultProjects[panelId] = found.project
+        log.info(`[claudeCapture] panel ${panelId}: found resume ${found.sessionId} (project: ${found.project})`)
       }
     }),
   )
 
-  Object.assign(capturedResumeIds, result)
-  window.electronAPI.claudeCaptureDone(result)
+  Object.assign(capturedResumeIds, resultIds)
+  Object.assign(capturedResumeProjects, resultProjects)
+  window.electronAPI.claudeCaptureDone(resultIds)
 }

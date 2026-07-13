@@ -946,6 +946,10 @@ export interface SessionSnapshot {
    *  by panel id. On restore, replayTerminalLog writes `claude --resume <uuid>`
    *  so the session resumes automatically. */
   claudeResumeIds?: Record<string, string>
+  /** Project directories paired with claudeResumeIds — the dir claude was
+   *  originally launched from. `claude --resume` is project-scoped, so Cate
+   *  must `cd` to this path before running it, or the session won't be found. */
+  claudeResumeProjects?: Record<string, string>
   /** Git worktree registry (with per-worktree color/label). Persisted so colors
    *  stay stable across restarts instead of being re-assigned round-robin from
    *  the palette, and so panel.worktreeId references still resolve. */
@@ -1084,6 +1088,8 @@ export interface ProjectSessionFile {
   /** Claude --resume UUIDs captured when the app quit with claude running, keyed
    *  by panel id. On restore, replayTerminalLog issues `claude --resume <uuid>`. */
   claudeResumeIds?: Record<string, string>
+  /** Project directories paired with claudeResumeIds (see SessionSnapshot). */
+  claudeResumeProjects?: Record<string, string>
 }
 
 export interface ProjectSessionPanel {
@@ -1217,6 +1223,12 @@ export interface AppSettings {
   /** Layout used by the Auto Layout shortcut (Cmd+Shift+L) and menu item.
    *  'grid' = adaptive grid, 'columns' = 2 equal columns, 'rows' = 2 equal rows. */
   defaultLayoutMode: 'grid' | 'columns' | 'rows'
+  /** Bias for "Fit Panels to Screen" (⌘5) when exactly 3 panels are open.
+   *  'vertical' keeps the existing auto-selected grid (single column or single
+   *  row, whichever the empty-cell/aspect scoring picks for the viewport).
+   *  'horizontal' forces 2 panels on top + 1 full-width panel on the bottom —
+   *  a shape the uniform-grid scoring can never produce on its own. */
+  fitPanelsThreePanelLayout: 'vertical' | 'horizontal'
   /** Paint the soft per-worktree "territory" backgrounds behind panels when a
    *  workspace has multiple git worktrees. Off hides the visualization. */
   showWorktreeTerritory: boolean
@@ -1351,6 +1363,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   snapToGrid: false,
   placementPicker: true,
   defaultLayoutMode: 'grid',
+  fitPanelsThreePanelLayout: 'vertical',
   showWorktreeTerritory: true,
 
   // Terminal

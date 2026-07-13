@@ -67,6 +67,7 @@ const SETTINGS_SCHEMA: Record<keyof AppSettings, string> = {
   fileExclusions: 'array',
   fileOpenMode: 'string',
   defaultLayoutMode: 'string',
+  fitPanelsThreePanelLayout: 'string',
   notificationsEnabled: 'boolean',
   notifyOnlyWhenUnfocused: 'boolean',
   crashReportingEnabled: 'boolean',

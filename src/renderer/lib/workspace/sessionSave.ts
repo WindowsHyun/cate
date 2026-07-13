@@ -19,7 +19,7 @@ import { terminalRegistry } from '../terminal/terminalRegistry'
 import { isLocalLocator } from '../../../main/runtime/locator'
 import { deriveSidebarSession } from './sidebarSession'
 import { buildWorkspaceFile, buildSessionFile, collectPanelIdsFromDockState } from './sessionSerialize'
-import { capturedResumeIds } from '../claudeSessionCapture'
+import { capturedResumeIds, capturedResumeProjects } from '../claudeSessionCapture'
 import type {
   SessionSnapshot,
   DetachedDockWindowSnapshot,
@@ -156,6 +156,7 @@ export async function saveSession(quickSave = false): Promise<void> {
       canvases,
       terminalCwds: Object.keys(terminalCwds).length ? terminalCwds : undefined,
       claudeResumeIds: Object.keys(capturedResumeIds).length ? { ...capturedResumeIds } : undefined,
+      claudeResumeProjects: Object.keys(capturedResumeProjects).length ? { ...capturedResumeProjects } : undefined,
       // Persist the worktree registry (colors/labels) so they're stable across
       // restarts instead of re-assigned from the palette on rediscovery.
       worktrees: workspace.worktrees?.length ? workspace.worktrees : undefined,

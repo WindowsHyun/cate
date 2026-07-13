@@ -671,7 +671,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.send(CLAUDE_CAPTURE_DONE, resumeIds)
   },
 
-  claudeFindResumeId(cwd: string): Promise<string | null> {
+  claudeFindResumeId(cwd: string): Promise<{ sessionId: string; project: string } | null> {
     return ipcRenderer.invoke(CLAUDE_FIND_RESUME_ID, cwd)
   },
 

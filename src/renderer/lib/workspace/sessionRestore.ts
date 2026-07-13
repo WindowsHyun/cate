@@ -299,6 +299,7 @@ async function restoreSessionHydrate(snapshot: SessionSnapshot, workspaceId: str
       cwd: snapshot.terminalCwds?.[panel.id],
       replayFromId: panel.id,
       claudeResumeId: snapshot.claudeResumeIds?.[panel.id],
+      claudeResumeProject: snapshot.claudeResumeProjects?.[panel.id],
     })
   }
 
@@ -338,17 +339,31 @@ export async function replayTerminalLog(panelId: string): Promise<void> {
   }
 
   // Determine resume id: use quit-time capture if available, else scan filesystem.
-  // Runs even when there is no scrollback so a blank terminal still gets resumed.
+  // The filesystem scan matches by CWD only, which can't tell which of several
+  // terminals in the same project actually ran claude — so only attempt it when
+  // THIS terminal's own scrollback shows claude was invoked here. Without that
+  // gate, a plain shell sharing a cwd with a claude terminal gets --resume'd too.
+  // ponytail: substring check, not process-tree replay; false positive only if
+  // scrollback happens to mention the word "claude" without running it.
   let resumeId = data.claudeResumeId
-  if (!resumeId && data.cwd) {
-    resumeId = await window.electronAPI.claudeFindResumeId(data.cwd).catch(() => undefined) ?? undefined
-    if (resumeId) {
-      log.info(`[session] filesystem fallback resume for panel ${panelId}: ${resumeId}`)
+  let resumeProject = data.claudeResumeProject
+  if (!resumeId && data.cwd && logData && /claude/i.test(logData)) {
+    const found = await window.electronAPI.claudeFindResumeId(data.cwd).catch(() => undefined) ?? undefined
+    if (found) {
+      resumeId = found.sessionId
+      resumeProject = found.project
+      log.info(`[session] filesystem fallback resume for panel ${panelId}: ${resumeId} (project: ${resumeProject})`)
     }
   }
 
   if (resumeId && entry.ptyId) {
-    window.electronAPI.terminalWrite(entry.ptyId, `claude --resume ${resumeId}\r`).catch(() => {})
+    // claude --resume is project-scoped: must run from the directory where the
+    // session was originally started. Use a subshell + exec so the terminal's
+    // CWD is NOT permanently changed after claude exits.
+    const cmd = resumeProject
+      ? `(cd ${JSON.stringify(resumeProject)} && exec claude --resume ${resumeId})\r`
+      : `claude --resume ${resumeId}\r`
+    window.electronAPI.terminalWrite(entry.ptyId, cmd).catch(() => {})
   }
 
   terminalRestoreData.delete(panelId)

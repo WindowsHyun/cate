@@ -8,4 +8,4 @@
 // and replayTerminalLog(). Re-exported from lib/workspace/session for back-compat.
 // =============================================================================
 
-export const terminalRestoreData = new Map<string, { cwd?: string; replayFromId?: string; claudeResumeId?: string }>()
+export const terminalRestoreData = new Map<string, { cwd?: string; replayFromId?: string; claudeResumeId?: string; claudeResumeProject?: string }>()
