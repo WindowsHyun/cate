@@ -940,7 +940,10 @@ export default function EditorPanel({
           <div className="w-px bg-subtle shrink-0" />
         )}
         {showPreview && (
-          <div className={isSplit ? 'flex-1 min-w-0 overflow-y-auto' : 'absolute inset-0 overflow-auto'}>
+          <div
+            className={isSplit ? 'flex-1 min-w-0 overflow-y-auto' : 'absolute inset-0 overflow-auto'}
+            style={{ userSelect: 'text' }}
+          >
             <MarkdownPreview content={markdownContent} />
           </div>
         )}

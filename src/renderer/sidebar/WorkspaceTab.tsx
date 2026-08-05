@@ -22,10 +22,11 @@ import { worktreeTitleStyle } from '../lib/worktreeTitleStyle'
 import { isMiddleClick } from '../lib/mouse'
 import { PANEL_REGISTRY } from '../panels/registry'
 import { panelRowLabel } from '../lib/panelTitle'
-import { useAgentInfoByPanel } from '../hooks/useAgentPanelInfo'
+import { useAgentInfoByPanel, type AgentPanelInfo } from '../hooks/useAgentPanelInfo'
 import { getAgentLogo } from '../lib/agent/agentLogos'
 import { workspaceDisplayName } from '../lib/fs/displayPath'
 import { workspaceRuntime } from '../lib/workspace/workspaceRuntime'
+import { useGitStatusSnapshot } from '../stores/gitStatusStore'
 import { InlineEditInput } from './InlineEditInput'
 import { WorkspaceSkillsTree } from './WorkspaceSkillsTree'
 import { canvasKey, toggleCollapsed, useTreeCollapseStore } from './treeCollapse'
@@ -71,6 +72,46 @@ function RuntimeDot({ workspace }: { workspace: WorkspaceState }): JSX.Element |
       title={title}
       onClick={onClick}
     />
+  )
+}
+
+/** At-a-glance workspace status: an agent dot (running = pulsing green,
+ *  awaiting input = the same static amber dot terminal rows use) and a git
+ *  dot (uncommitted changes). Purely additive — never touches ws.color/the
+ *  row's accent wash. Hidden entirely when there's nothing to flag, so a
+ *  quiet workspace adds no visual noise. `agentInfoByPanel` is passed in
+ *  (already computed once per row by the caller) to avoid a second
+ *  subscription to the same store slice. */
+export function WorkspaceStatusDots({
+  workspace,
+  agentInfoByPanel,
+}: {
+  workspace: WorkspaceState
+  agentInfoByPanel: Record<string, AgentPanelInfo>
+}): JSX.Element | null {
+  const states = Object.values(agentInfoByPanel).map((info) => info.state)
+  const agentRunning = states.includes('running')
+  const agentAwaiting = !agentRunning && states.includes('waitingForInput')
+
+  const gitStatus = useGitStatusSnapshot(workspace.rootPath || '')
+  const gitDirty = !!workspace.rootPath && gitStatus.statusFiles.length > 0
+
+  if (!agentRunning && !agentAwaiting && !gitDirty) return null
+
+  return (
+    <div className="flex items-center gap-1 flex-shrink-0">
+      {agentRunning && (
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" title="Agent running" />
+      )}
+      {agentAwaiting && (
+        <span className="cate-await-indicator" title="Agent awaiting input">
+          <span className="cate-await-dot" style={{ backgroundColor: AWAIT_COLOR }} />
+        </span>
+      )}
+      {gitDirty && (
+        <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" title="Uncommitted changes" />
+      )}
+    </div>
   )
 }
 
@@ -884,6 +925,9 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({
             same canonical runtime status as the canvas lock, so the dot and the
             overlay never disagree. */}
         <RuntimeDot workspace={workspace} />
+
+        {/* At-a-glance agent-running/awaiting + git-dirty dots. */}
+        <WorkspaceStatusDots workspace={workspace} agentInfoByPanel={agentInfoByPanel} />
 
         {/* Panel count badge (only when collapsed and has panels) */}
         {treeCount > 0 && !isExpanded && (

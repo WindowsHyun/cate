@@ -193,6 +193,13 @@ beforeEach(() => {
     recentProjectsAdd: vi.fn(),
     recentProjectsRemove: vi.fn(async () => undefined),
     agentDispose: vi.fn(async () => undefined),
+    // gitStatusStore's per-row subscription (workspace status dots): treat
+    // every workspace as a non-repo so it resolves to an empty snapshot
+    // without needing gitLsFiles/gitStatus/gitWorktreeList stubs.
+    onFsWatchEvent: vi.fn(() => () => {}),
+    fsWatchStart: vi.fn(async () => undefined),
+    fsWatchStop: vi.fn(async () => undefined),
+    gitIsRepo: vi.fn(async () => false),
   }
   Object.defineProperty(window.navigator, 'clipboard', {
     value: { writeText: clipboardWriteText },

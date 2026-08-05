@@ -13,7 +13,7 @@ vi.mock('../workspace/panelReveal', () => ({
   },
 }))
 
-const { openFileGrouped, openFileAsPanel, openFileAsTextGrouped } = await import('./fileRouting')
+const { openFileGrouped, openFileAsPanel, openFileAsTextGrouped, openFileAsText } = await import('./fileRouting')
 
 beforeEach(() => {
   revealed.length = 0
@@ -52,5 +52,20 @@ describe('duplicate-file dedup', () => {
     const second = openFileAsTextGrouped('ws-1', '/repo/a.ts')
     expect(second).toBe(first)
     expect(revealed).toEqual([first])
+  })
+
+  it('openFileGrouped reuses the existing browser panel for the same HTML file', () => {
+    const first = openFileGrouped('ws-1', '/repo/index.html')
+    const second = openFileGrouped('ws-1', '/repo/index.html')
+    expect(second).toBe(first)
+    expect(revealed).toEqual([first])
+    const panels = useAppStore.getState().workspaces[0].panels
+    expect(Object.values(panels).filter((p) => p.type === 'browser')).toHaveLength(1)
+  })
+
+  it('openFileAsText opens an HTML file as an editor, not a browser', () => {
+    const id = openFileAsText('ws-1', '/repo/index.html')
+    const panel = useAppStore.getState().workspaces[0].panels[id]
+    expect(panel.type).toBe('editor')
   })
 })

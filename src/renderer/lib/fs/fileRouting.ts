@@ -53,13 +53,32 @@ function revealExistingPanelForFile(workspaceId: string, filePath: string, type:
   return null
 }
 
+/** A browser panel already showing this exact URL as one of its tabs, or null.
+ *  Opening the same local HTML file again should focus that tab, not spawn a
+ *  new browser panel. */
+function findExistingBrowserPanelForUrl(workspaceId: string, url: string): string | null {
+  const ws = useAppStore.getState().workspaces.find((w) => w.id === workspaceId)
+  if (!ws) return null
+  for (const panel of Object.values(ws.panels)) {
+    if (panel.type === 'browser' && panel.tabs?.some((tab) => tab.url === url)) return panel.id
+  }
+  return null
+}
+
+function revealExistingBrowserPanelForUrl(workspaceId: string, url: string): string | null {
+  const existing = findExistingBrowserPanelForUrl(workspaceId, url)
+  if (existing && revealOnce(workspaceId, existing)) return existing
+  return null
+}
+
 export function openFileAsText(
   workspaceId: string,
   filePath: string,
   position?: Point,
   placement?: PanelPlacement,
 ): string {
-  return useAppStore.getState().createEditor(workspaceId, filePath, position, placement)
+  return revealExistingPanelForFile(workspaceId, filePath, 'editor')
+    ?? useAppStore.getState().createEditor(workspaceId, filePath, position, placement)
 }
 
 export function openFileAsPanel(
@@ -81,7 +100,9 @@ export function openFileAsPanel(
       ?? store.createDatabase(workspaceId, filePath, position, placement)
   }
   if (HTML_EXTENSIONS.has(ext)) {
-    return store.createBrowser(workspaceId, `file://${filePath}`, position, placement)
+    const url = `file://${filePath}`
+    return revealExistingBrowserPanelForUrl(workspaceId, url)
+      ?? store.createBrowser(workspaceId, url, position, placement)
   }
   const existingEditor = revealExistingPanelForFile(workspaceId, filePath, 'editor')
   if (existingEditor) return existingEditor
@@ -150,7 +171,11 @@ export function openFileGrouped(workspaceId: string, filePath: string, position?
     return revealExistingPanelForFile(workspaceId, filePath, 'database')
       ?? store.createDatabase(workspaceId, filePath, position)
   }
-  if (HTML_EXTENSIONS.has(ext)) return store.createBrowser(workspaceId, `file://${filePath}`, position)
+  if (HTML_EXTENSIONS.has(ext)) {
+    const url = `file://${filePath}`
+    return revealExistingBrowserPanelForUrl(workspaceId, url)
+      ?? store.createBrowser(workspaceId, url, position)
+  }
 
   // Already open as an editor tab somewhere — focus it instead of duplicating.
   const existingEditor = revealExistingPanelForFile(workspaceId, filePath, 'editor')
