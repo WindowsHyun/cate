@@ -257,15 +257,15 @@ Fix: also capture the project directory from `history.jsonl` at quit-time and st
 
 ---
 
-### 20. Fit Panels 3-Panel Horizontal Layout Setting
-"Fit Panels to Screen" (⌘5, `fitPanelsToViewport`) picks a uniform grid by minimizing empty cells + aspect deviation from 16:9. For exactly 3 panels any 2-column split leaves one empty cell (heavily penalized), so it only ever chose a single column (vertical stack) or single row — never the "2 on top, 1 wide on bottom" shape a landscape monitor user actually wants, since that shape is asymmetric and can't come out of a uniform-grid formula.
+### 20. Fit Panels Odd-Count Horizontal Layout Setting
+"Fit Panels to Screen" (⌘5, `fitPanelsToViewport`) picks a uniform grid by minimizing empty cells + aspect deviation from 16:9. For an odd panel count, any multi-column split leaves an empty cell (heavily penalized), so it only ever chose a single column (vertical stack) or single row — never a "top row gets the extra panel" shape a landscape monitor user actually wants, since that shape is asymmetric and can't come out of a uniform-grid formula.
 
-Fix: new setting `fitPanelsThreePanelLayout: 'vertical' | 'horizontal'` (default `'vertical'`, preserving existing behavior). When `'horizontal'` and exactly 3 panels are open, `fitPanelsToViewport()` takes a dedicated branch before the cols-selection loop and lays out 2 equal-width panels on top + 1 full-width panel on the bottom.
+Fix: new setting `fitPanelsThreePanelLayout: 'vertical' | 'horizontal'` (default `'vertical'`, preserving existing behavior). When `'horizontal'` and an odd number of panels (≥3) are open, `fitPanelsToViewport()` takes a dedicated branch before the cols-selection loop and splits into 2 full-width rows: top row = `ceil(n/2)` equal-width panels, bottom row = `floor(n/2)` equal-width panels (3 → 2/1, 5 → 3/2, 7 → 4/3, ...).
 
 **Key files:**
 - `src/shared/types.ts` — `AppSettings.fitPanelsThreePanelLayout` + `DEFAULT_SETTINGS` entry
 - `src/main/settingsFile.ts` — schema entry (`'string'`)
-- `src/renderer/stores/canvas/arrangeSlice.ts` — `fitPanelsToViewport()` early-return branch for `n === 3 && fitPanelsThreePanelLayout === 'horizontal'`
+- `src/renderer/stores/canvas/arrangeSlice.ts` — `fitPanelsToViewport()` early-return branch for `n >= 3 && n % 2 === 1 && fitPanelsThreePanelLayout === 'horizontal'`
 - `src/renderer/settings/CanvasSettings.tsx` — new `Select` row next to Auto Layout mode
 - `src/renderer/i18n/strings.ts` — `canvas.fitPanelsThreePanelLayout*` keys (en/ko)
 
@@ -301,7 +301,7 @@ Use this checklist every time you merge upstream changes:
 - [ ] Check `src/renderer/lib/workspace/sessionSave.ts` — `saveSession(quickSave = false)` parameter; scrollback capture and CWD fetch skip non-active workspaces when `quickSave=true`
 - [ ] Check `src/renderer/sidebar/FileExplorer.tsx` — `scheduleReload` accepts `FsWatchEvent`; skips `event.type === 'update'`; refreshes only parent dir of changed entry (not full `loadTree`); imports `FsWatchEvent` from `fsWatchManager`
 - [ ] Check `src/agent/renderer/agentStore.ts` — module-level `pendingTextDeltas`/`pendingThinkingDeltas` maps and `flushStreamingDeltas()` via rAF; `appendAssistantDelta`/`appendAssistantThinking` accumulate into buffers; `endAssistant` calls `flushStreamingDeltas()` before its `set()`
-- [ ] Check `src/shared/types.ts` — `AppSettings.fitPanelsThreePanelLayout` and `DEFAULT_SETTINGS.fitPanelsThreePanelLayout` still present; `src/main/settingsFile.ts` `SETTINGS_SCHEMA` has matching `'string'` entry; `arrangeSlice.ts` `fitPanelsToViewport()` still has the `n === 3` horizontal branch before the cols-selection loop
+- [ ] Check `src/shared/types.ts` — `AppSettings.fitPanelsThreePanelLayout` and `DEFAULT_SETTINGS.fitPanelsThreePanelLayout` still present; `src/main/settingsFile.ts` `SETTINGS_SCHEMA` has matching `'string'` entry; `arrangeSlice.ts` `fitPanelsToViewport()` still has the `n >= 3 && n % 2 === 1` odd-count horizontal branch before the cols-selection loop
 
 ### Testing
 - [ ] `CATE_SMOKE_TEST=1 ELECTRON_ENABLE_LOGGING=1 ./node_modules/.bin/electron .` — no errors, exits 0

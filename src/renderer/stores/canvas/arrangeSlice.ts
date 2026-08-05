@@ -225,17 +225,23 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
       const gap = 6
       const n = nodeList.length
 
-      // 3-panel horizontal bias: the "2 top + 1 full-width bottom" shape can't
-      // come out of the uniform-grid cols-loop below (bottom cell would need a
-      // different width than the top cells), so it's a dedicated branch.
-      if (n === 3 && useSettingsStore.getState().fitPanelsThreePanelLayout === 'horizontal') {
-        const topW = Math.floor((avW - gap * 3) / 2)
+      // Odd-count horizontal bias: a 2-row split (top row gets the extra panel)
+      // can't come out of the uniform-grid cols-loop below (rows would need
+      // different panel widths), so it's a dedicated branch. n=3 → 2/1,
+      // n=5 → 3/2, n=7 → 4/3, etc.
+      if (n >= 3 && n % 2 === 1 && useSettingsStore.getState().fitPanelsThreePanelLayout === 'horizontal') {
+        const topCount = Math.ceil(n / 2)
+        const bottomCount = n - topCount
         const rowH = Math.floor((avH - gap * 3) / 2)
-        const bottomW = avW - gap * 2
+        const topW = Math.floor((avW - gap * (topCount + 1)) / topCount)
+        const bottomW = Math.floor((avW - gap * (bottomCount + 1)) / bottomCount)
         const positions = [
-          { x: gap, y: gap, w: topW, h: rowH },
-          { x: gap * 2 + topW, y: gap, w: topW, h: rowH },
-          { x: gap, y: gap * 2 + rowH, w: bottomW, h: rowH },
+          ...Array.from({ length: topCount }, (_, i) => ({
+            x: gap + i * (topW + gap), y: gap, w: topW, h: rowH,
+          })),
+          ...Array.from({ length: bottomCount }, (_, i) => ({
+            x: gap + i * (bottomW + gap), y: gap * 2 + rowH, w: bottomW, h: rowH,
+          })),
         ]
 
         get().pushHistory()
