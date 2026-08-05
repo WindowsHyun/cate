@@ -9,6 +9,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { createCanvasStore } from '../canvasStore'
+import { focusedNodeId } from './selectionModel'
 import { ZOOM_MIN, PANEL_DEFAULT_SIZES } from '../../../shared/types'
 import { rectsOverlap } from '../../canvas/layoutEngine'
 
@@ -45,7 +46,7 @@ describe('beginPlacement', () => {
     // 640x400 terminal centred on the view centre (600,400) → top-left (280,200).
     expect(nodes[0].origin).toEqual({ x: 280, y: 200 })
     expect(nodes[0].size).toEqual(PANEL_DEFAULT_SIZES.terminal)
-    expect(store.getState().focusedNodeId).toBe(nodes[0].id)
+    expect(focusedNodeId(store.getState())).toBe(nodes[0].id)
     expect(onCancelled).not.toHaveBeenCalled()
   })
 
@@ -109,9 +110,15 @@ describe('beginPlacement', () => {
   })
 
   it('anchors recommendations to the last pointer position when nothing is focused', () => {
+    // The pure mirror grid only offers a spot big enough to host a full-size mirror
+    // of the seed (640x400), so give the viewport room around the seed on every
+    // side — otherwise the pointer-side region is too small for a tile and is
+    // skipped. With room, the best ghost still lands on the pointer's side.
+    const ROOMY = { width: 2600, height: 2000 }
     const make = (pointer: { x: number; y: number }) => {
       const store = createCanvasStore()
-      store.getState().setContainerSize(CONTAINER)
+      store.getState().setContainerSize(ROOMY)
+      store.getState().setZoomAndOffset(1, { x: 700, y: 500 }) // seed centred with margin
       store.getState().addNode('seed', 'terminal', { x: 0, y: 0 }, SEED_SIZE) // not focused
       store.getState().setPlacementPointer(pointer)
       store.getState().beginPlacement('p2', 'terminal')
@@ -125,6 +132,69 @@ describe('beginPlacement', () => {
     expect(towardRight.point.x).toBeGreaterThanOrEqual(640)
     expect(towardBottom.point.y).toBeGreaterThanOrEqual(400)
     expect(towardRight.point).not.toEqual(towardBottom.point)
+  })
+})
+
+describe('refreshPlacement (re-target on focus change)', () => {
+  // Two panels both kept on-screen so the picker can cluster around whichever is
+  // focused. Mirrors the real bug: ghosts are pending around A, the user clicks B.
+  const ROOMY = { width: 2400, height: 1600 }
+  const VIEW = { zoom: 1, offset: { x: 600, y: 500 } } // A and B both visible
+  function storeWithTwo() {
+    const store = createCanvasStore()
+    store.getState().setContainerSize(ROOMY)
+    const a = store.getState().addNode('a', 'terminal', { x: 0, y: 0 }, SEED_SIZE)
+    const b = store.getState().addNode('b', 'terminal', { x: 900, y: 0 }, SEED_SIZE)
+    store.getState().setZoomAndOffset(VIEW.zoom, VIEW.offset)
+    return { store, a, b }
+  }
+  const distTo = (c: { point: { x: number; y: number }; size: { width: number; height: number } }, cx: number, cy: number) =>
+    Math.hypot(c.point.x + c.size.width / 2 - cx, c.point.y + c.size.height / 2 - cy)
+
+  it('recomputes candidates around the newly focused node, preserving the transaction', () => {
+    const { store, a, b } = storeWithTwo()
+    store.getState().focusNode(a)
+    store.getState().beginPlacement('p3', 'terminal')
+    const pendingA = store.getState().pendingPlacement!
+    const bestA = pendingA.candidates[0]
+
+    // Reproduce the click on B: restore the user's view (both panels visible),
+    // then focus B and let the focus-change refresh run.
+    store.getState().setZoomAndOffset(VIEW.zoom, VIEW.offset)
+    store.getState().focusNode(b)
+    store.getState().refreshPlacement()
+
+    const pendingB = store.getState().pendingPlacement!
+    // The transaction itself is preserved — only the candidates re-target.
+    expect(pendingB.panelId).toBe('p3')
+    expect(pendingB.prevZoom).toBe(pendingA.prevZoom)
+    expect(pendingB.prevOffset).toEqual(pendingA.prevOffset)
+    expect(pendingB.hoveredIndex).toBeNull()
+    // The best ghost now hugs B (center 1220,200), not A (center 320,200).
+    const bestB = pendingB.candidates[0]
+    expect(bestB.point).not.toEqual(bestA.point)
+    expect(distTo(bestB, 1220, 200)).toBeLessThan(distTo(bestA, 1220, 200))
+    // No node was created by the re-target.
+    expect(nodeCount(store)).toBe(2)
+  })
+
+  it('is a no-op when no placement is pending', () => {
+    const { store } = storeWithTwo()
+    store.getState().refreshPlacement()
+    expect(store.getState().pendingPlacement).toBeNull()
+    expect(nodeCount(store)).toBe(2)
+  })
+
+  it('does not disturb an armed free placement', () => {
+    const { store, a } = storeWithTwo()
+    store.getState().focusNode(a)
+    store.getState().beginPlacement('p3', 'terminal')
+    store.getState().setFreeArmed(true)
+    const before = store.getState().pendingPlacement!
+
+    store.getState().refreshPlacement()
+
+    expect(store.getState().pendingPlacement).toBe(before) // untouched while armed
   })
 })
 
@@ -144,7 +214,7 @@ describe('commitPlacement', () => {
     expect(nodeCount(store)).toBe(2)
     expect(s.nodes[nodeId!].origin).toEqual(candidate.point)
     expect(s.nodes[nodeId!].size).toEqual(candidate.size)
-    expect(s.nodes[nodeId!].panelId).toBe('p2')
+    expect(s.nodes[nodeId!].dockLayout).toMatchObject({ panelIds: ['p2'] })
     // Zoom is restored to the snapshot; the offset is intentionally NOT the
     // snapshot — commit recentres the camera on the freshly placed node.
     expect(s.zoomLevel).toBe(1.5)
@@ -152,7 +222,7 @@ describe('commitPlacement', () => {
     const cy = candidate.point.y + candidate.size.height / 2
     expect(s.viewportOffset.x).toBeCloseTo(CONTAINER.width / 2 - cx * 1.5)
     expect(s.viewportOffset.y).toBeCloseTo(CONTAINER.height / 2 - cy * 1.5)
-    expect(s.focusedNodeId).toBe(nodeId)
+    expect(focusedNodeId(s)).toBe(nodeId)
     // Commit is the success path — the rollback callback must never fire.
     expect(onCancelled).not.toHaveBeenCalled()
   })
@@ -309,7 +379,7 @@ describe('free "place anywhere" mode', () => {
       ),
     ).toBe(false)
     expect(s.zoomLevel).toBe(1.5)
-    expect(s.focusedNodeId).toBe(nodeId)
+    expect(focusedNodeId(s)).toBe(nodeId)
     expect(onCancelled).not.toHaveBeenCalled()
     // Transaction is closed: a second free commit does nothing.
     expect(store.getState().commitFreePlacement({ x: 9000, y: 9000 })).toBeNull()

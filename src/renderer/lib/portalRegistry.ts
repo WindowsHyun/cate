@@ -13,12 +13,21 @@
 // subsequent commands.
 // =============================================================================
 
-/** Minimal subset of the Electron <webview> tag interface we depend on. */
+/** Minimal subset of the Electron <webview> tag interface we depend on.
+ *  BrowserPanel registers the real <webview> (a superset of this) — these are
+ *  the members the reverse-API driver (browserDriver.ts) and terminalUrlOpen
+ *  actually call. */
 export interface PortalWebview {
   getWebContentsId(): number
   getURL(): string
   getTitle(): string
   loadURL(url: string): void
+  reload(): void
+  isLoading(): boolean
+  executeJavaScript(code: string): Promise<unknown>
+  /** Real (isTrusted) input delivered to the guest webContents — unlike the
+   *  synthetic DOM events click/type dispatch. Used by `browser press`. */
+  sendInputEvent(event: { type: 'keyDown' | 'char' | 'keyUp'; keyCode: string }): Promise<void> | void
 }
 
 interface Entry {
@@ -26,6 +35,13 @@ interface Entry {
 }
 
 const byPanelId = new Map<string, Entry>()
+
+/** Per-panel navigation entry points (BrowserPanel's navigateTo), registered for
+ *  the panel's whole mounted lifetime — unlike webviews, which only exist once a
+ *  page is loaded. This is how the reverse API drives a browser panel sitting on
+ *  its start page: such a panel has NO <webview> (the start page renders in its
+ *  place), so navigating through this callback is what mounts one. */
+const navigatorByPanelId = new Map<string, (url: string) => void>()
 
 export const portalRegistry = {
   register(panelId: string, webview: PortalWebview): void {
@@ -36,5 +52,14 @@ export const portalRegistry = {
   },
   get(panelId: string): PortalWebview | null {
     return byPanelId.get(panelId)?.webview ?? null
+  },
+  registerNavigator(panelId: string, navigate: (url: string) => void): void {
+    navigatorByPanelId.set(panelId, navigate)
+  },
+  unregisterNavigator(panelId: string): void {
+    navigatorByPanelId.delete(panelId)
+  },
+  getNavigator(panelId: string): ((url: string) => void) | null {
+    return navigatorByPanelId.get(panelId) ?? null
   },
 } as const

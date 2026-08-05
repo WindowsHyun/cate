@@ -9,12 +9,13 @@ import type {
   CanvasNodeId,
   CanvasNodeState,
   DockLayoutNode,
+  PanelState,
   Point,
   Rect,
   Size,
   PanelType,
 } from '../../../shared/types'
-import type { PlacementCandidate } from '../../canvas/placement'
+import type { PlacementCandidate, PlacementTrace } from '../../canvas/placement'
 
 /** Interactive ghost placement awaiting a user-chosen spot. */
 export interface PendingPlacement {
@@ -30,9 +31,12 @@ export interface PendingPlacement {
   /** Escape hatch preview: where a free "click-anywhere" placement would land
    *  (only while `freeArmed`). */
   freeGhost: { point: Point; size: Size } | null
-  /** Resolved node size for this placement (honors the user's default-size
-   *  setting); falls back to the panel-type default when unset. */
+  /** Resolved node size for this placement (the panel type's default). */
   size: Size
+  /** Dev-only: the placement algorithm's trace from this computation, captured so
+   *  the dev visualization overlay (Cmd/Ctrl+Shift+G) can render the REAL spots.
+   *  Populated only in dev builds; undefined in production. */
+  trace?: PlacementTrace
   /** Viewport before we zoomed out to show recommendations — restored on cancel/commit. */
   prevZoom: number
   prevOffset: Point
@@ -44,8 +48,14 @@ export interface CanvasStoreState {
   nodes: Record<CanvasNodeId, CanvasNodeState>
   viewportOffset: Point
   zoomLevel: number
-  focusedNodeId: CanvasNodeId | null
-  /** Increments on every focus action — lets panels re-run focus side effects even when focusedNodeId doesn't change. */
+  /** Canonical ordered selection (lead = last). The active/keyboard-focused
+   *  node is derived from this via selectionModel.focusedNodeId — there is no
+   *  separate focused-id field, so the rendered and moved sets can't disagree. */
+  selection: CanvasNodeId[]
+  /** Whether the selection's lead is the *active* panel (halo + keyboard) vs
+   *  selected-but-not-activated (ring). Only single-node operations set it. */
+  selectionActive: boolean
+  /** Increments on every activate action — lets panels re-run focus side effects even when the active node doesn't change. */
   focusEpoch: number
   /** Per-node active worktree id, published by CanvasNode from its active tab.
    *  Read by the worktree sludge/lens layers (which live outside the per-node
@@ -62,7 +72,6 @@ export interface CanvasStoreState {
       type: 'edge' | 'center'
     }>
   }
-  selectedNodeIds: Set<string>
   /** When true, the auto-focus-largest-visible hook stands down. Set while the
    *  user is moving the canvas by keyboard (Cmd+Arrow jump / Shift+Arrow pan)
    *  so those movements don't auto-activate whatever scrolls into view; cleared
@@ -78,8 +87,13 @@ export interface CanvasStoreState {
 
 export interface CanvasHistoryEntry {
   nodes: Record<CanvasNodeId, CanvasNodeState>
-  focusedNodeId: CanvasNodeId | null
-  selectedNodeIds: Set<string>
+  selection: CanvasNodeId[]
+  selectionActive: boolean
+  /** Panel records closed by the delete that followed this snapshot. Undo
+   *  re-adds them to the workspace (so the restored nodes aren't ghosts);
+   *  redo closes them again. Carried between the history and future stacks
+   *  as the entry bounces on undo/redo. */
+  closedPanels?: { workspaceId: string; panels: PanelState[] }
 }
 
 export interface CanvasStoreActions {
@@ -135,6 +149,10 @@ export interface CanvasStoreActions {
     onCancelled?: (panelId: string) => void,
     size?: Size,
   ) => boolean
+  /** Re-rank the pending placement's ghosts around whatever node is focused NOW
+   *  (the user clicked a different panel) and re-frame the camera, keeping the
+   *  open transaction. No-op when nothing is pending or free mode is armed. */
+  refreshPlacement: () => void
   /** Commit the pending placement at the given candidate index; returns the new node id. */
   commitPlacement: (index: number) => CanvasNodeId | null
   /** Arm/disarm free "place anywhere" mode (press F). Disarming clears the ghost. */
@@ -192,7 +210,7 @@ export interface CanvasStoreActions {
   clearSelection: () => void
   selectAll: () => void
   toggleNodeSelection: (id: string) => void
-  deleteSelection: () => void
+  deleteSelection: () => Promise<void>
 
   // Bulk arrangement of the current selection
   stackSelected: (axis: 'row' | 'column', gap?: number) => void
@@ -209,6 +227,14 @@ export interface CanvasStoreActions {
   undo: () => void
   redo: () => void
   clearHistory: () => void
+  /** Open a delete transaction: snapshots the current state and suppresses all
+   *  pushHistory calls until commit, so a multi-panel delete (which removes
+   *  nodes through several paths) lands as ONE undo step. */
+  beginHistoryTransaction: () => void
+  /** Close the transaction. Pushes the begin-time snapshot as a single history
+   *  entry when nodes actually changed, annotated with the panel records the
+   *  delete closed so undo can restore them. No-op without a begin. */
+  commitHistoryTransaction: (closedPanels?: { workspaceId: string; panels: PanelState[] }) => void
 
   // Bulk reset (used when switching workspaces)
   loadWorkspaceCanvas: (

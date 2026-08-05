@@ -23,8 +23,8 @@ import {
   CaretDown,
   Sidebar as SidebarIcon,
   Gear,
+  ChatCircle,
 } from '@phosphor-icons/react'
-import { CateLogo } from '../../renderer/ui/CateLogo'
 import log from '../../renderer/lib/logger'
 import { errorMessage as toErrorMessage } from '../../renderer/lib/errorMessage'
 import type { PanelProps } from '../../renderer/panels/types'
@@ -32,9 +32,11 @@ import { useAppStore } from '../../renderer/stores/appStore'
 import { useUIStore } from '../../renderer/stores/uiStore'
 import { useStatusStore } from '../../renderer/stores/statusStore'
 import { useAgentStore } from './agentStore'
+import { agentClient } from './agentClient'
 import {
   getAgentPanelSession,
   saveAgentPanelSession,
+  disposeAgentChats,
   type OpenChat,
 } from './agentSessionRegistry'
 import { buildFileMentions, type LineRef } from './agentDrop'
@@ -44,7 +46,6 @@ import { ChatInput } from './AgentChatInput'
 import { ModelPickerDropdown } from './ModelPicker'
 import {
   ExtensionDialog,
-  ExtensionStatusBar,
   ExtensionWidget,
   QueueBadges,
   readFileAsImage,
@@ -59,10 +60,11 @@ import type {
   AgentSessionListEntry,
   AgentSlashCommand,
   AgentThinkingLevel,
-  AuthProviderStatus,
 } from '../../shared/types'
 import type { AgentMessage as StoreMessage } from './agentStore'
 import { loadDefaultModel, clearModelPrefsForProvider } from './agentModelPrefs'
+import { useAgentReadiness, useProvidersLoaded } from '../../renderer/stores/providerReadinessStore'
+import { resolveWorktree } from '../../shared/worktrees'
 
 // -----------------------------------------------------------------------------
 // Component
@@ -73,9 +75,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
   // If this panel is tagged with a worktree, prefer its path so pi spawns
   // inside that parallel checkout instead of the workspace's primary root.
   const panelState = workspace?.panels[panelId]
-  const taggedWorktree = panelState?.worktreeId
-    ? workspace?.worktrees?.find((w) => w.id === panelState.worktreeId)
-    : undefined
+  const taggedWorktree = resolveWorktree(panelState?.worktreeId, workspace?.worktrees)
   const cwd = taggedWorktree?.path ?? workspace?.rootPath ?? ''
 
   // ---------------------------------------------------------------------------
@@ -136,10 +136,13 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
   const uiRequests = slice?.uiRequests ?? []
   const currentUiRequest = uiRequests[0]
 
-  const [providerStatuses, setProviderStatuses] = useState<AuthProviderStatus[]>([])
+  // Provider connection + health come from the shared readiness store (one source
+  // of truth across the app), passed the model this chat has selected so it can
+  // live-verify that exact provider/model.
+  const readiness = useAgentReadiness(selectedModel)
   /** False until the first authStatus() round-trip — gates the stale-model
    *  reset below so an empty initial status list never wipes a valid pick. */
-  const [authLoaded, setAuthLoaded] = useState(false)
+  const authLoaded = useProvidersLoaded()
   const [availableModels, setAvailableModels] = useState<
     Array<{ provider: string; model: string; label?: string }>
   >([])
@@ -207,20 +210,8 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
   )
 
   // ---------------------------------------------------------------------------
-  // Auth/provider refresh
+  // Model list refresh (provider connection/health is owned by the readiness store)
   // ---------------------------------------------------------------------------
-
-  const refreshAuth = useCallback(async () => {
-    try {
-      const statuses = await window.electronAPI.authStatus()
-      setProviderStatuses(statuses)
-      setAuthLoaded(true)
-    } catch (err) {
-      log.warn('[AgentPanel] refreshAuth failed', err)
-    }
-  }, [])
-
-  useEffect(() => { refreshAuth() }, [refreshAuth])
 
   const refreshModels = useCallback(async () => {
     try {
@@ -235,17 +226,13 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
 
   // Credentials can change anywhere (main Settings → Providers, another window,
   // a token refresh). The main process broadcasts AUTH_CHANGED once the shared
-  // auth.json is mirrored into live sessions; re-fetch provider status + the
-  // model list so the picker and auto-pick reflect newly-connected providers
-  // without waiting for the next turn.
+  // auth.json is mirrored into live sessions; re-fetch the model list so the
+  // picker and auto-pick reflect newly-connected providers without waiting for
+  // the next turn. (The readiness store handles provider status itself.)
   useEffect(() => {
     if (!window.electronAPI?.onAuthChanged) return
-    const unsub = window.electronAPI.onAuthChanged(() => {
-      void refreshAuth()
-      void refreshModels()
-    })
-    return unsub
-  }, [refreshAuth, refreshModels])
+    return window.electronAPI.onAuthChanged(() => { void refreshModels() })
+  }, [refreshModels])
 
   // ---------------------------------------------------------------------------
   // Chat list — sourced directly from pi's on-disk sessions for this cwd.
@@ -303,7 +290,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
   ) => {
     markReady(key, false)
     try {
-      const res = await window.electronAPI.agentCreate({
+      const res = await agentClient.create({
         panelId: key,
         workspaceId,
         cwd,
@@ -329,6 +316,47 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
     }
   }, [workspaceId, cwd, refreshCommands, markReady])
 
+  // Open the most-recent on-disk session for the current cwd as the panel's sole
+  // chat (or a fresh chat if the checkout has none). Shared by the mount effect
+  // and the worktree-switch reinit below; both pass a `signal` so they can abort
+  // the in-flight startup if the panel unmounts or the cwd changes again.
+  const openInitialChat = useCallback(async (signal: { cancelled: boolean }) => {
+    const myGen = ++openGenRef.current
+    let resume: AgentSessionListEntry | null = null
+    try {
+      if (cwd) {
+        const list = await window.electronAPI.agentListSessions(cwd)
+        if (signal.cancelled || myGen !== openGenRef.current) return
+        if (list.length > 0) resume = list[0]
+      }
+    } catch { /* ignore — list failures fall through to fresh session */ }
+
+    if (signal.cancelled || myGen !== openGenRef.current) return
+    const key = newAgentKey()
+    useAgentStore.getState().init(key)
+    // Resume: prefer the chat's last-used model recorded in the session.
+    // Fresh chat: prefer the user-configured default, else fall through to
+    // the availableModels effect below.
+    const initialModel: AgentModelRef | null = resume?.lastModel
+      ? { provider: resume.lastModel.provider, model: resume.lastModel.model }
+      : loadDefaultModel()
+    if (initialModel) useAgentStore.getState().setModel(key, initialModel)
+
+    if (resume) {
+      try {
+        const transcript = await window.electronAPI.agentLoadSessionMessages(resume.path)
+        if (signal.cancelled || myGen !== openGenRef.current) return
+        useAgentStore.getState().loadMessages(key, transcript as StoreMessage[])
+      } catch (err) { log.warn('[AgentPanel] load transcript failed', err) }
+    }
+    if (signal.cancelled || myGen !== openGenRef.current) return
+    // Set state BEFORE creating pi so this key is recorded in openChats (and
+    // mirrored to the session registry) before any teardown could run.
+    setOpenChats([{ agentKey: key, sessionFile: resume?.path ?? null }])
+    setActiveAgentKey(key)
+    await createAgent(key, initialModel, resume?.path)
+  }, [cwd, newAgentKey, createAgent])
+
   // Mount: re-adopt this panel's live chats if a prior mount left them in the
   // session registry (e.g. the panel was dragged between a canvas node and a
   // dock zone, which unmounts it here and remounts it in another subtree).
@@ -353,53 +381,48 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
       return
     }
 
-    let cancelled = false
-    const myGen = ++openGenRef.current
-
-    void (async () => {
-      let resume: AgentSessionListEntry | null = null
-      try {
-        if (cwd) {
-          const list = await window.electronAPI.agentListSessions(cwd)
-          if (cancelled || myGen !== openGenRef.current) return
-          if (list.length > 0) resume = list[0]
-        }
-      } catch { /* ignore — list failures fall through to fresh session */ }
-
-      if (cancelled || myGen !== openGenRef.current) return
-      const key = newAgentKey()
-      useAgentStore.getState().init(key)
-      // Resume: prefer the chat's last-used model recorded in the session.
-      // Fresh chat: prefer the user-configured default, else fall through to
-      // the availableModels effect below.
-      const initialModel: AgentModelRef | null = resume?.lastModel
-        ? { provider: resume.lastModel.provider, model: resume.lastModel.model }
-        : loadDefaultModel()
-      if (initialModel) useAgentStore.getState().setModel(key, initialModel)
-
-      if (resume) {
-        try {
-          const transcript = await window.electronAPI.agentLoadSessionMessages(resume.path)
-          if (cancelled || myGen !== openGenRef.current) return
-          useAgentStore.getState().loadMessages(key, transcript as StoreMessage[])
-        } catch (err) { log.warn('[AgentPanel] load transcript failed', err) }
-      }
-      if (cancelled || myGen !== openGenRef.current) return
-      // Set state BEFORE creating pi so this key is recorded in openChats (and
-      // mirrored to the session registry) before any teardown could run.
-      setOpenChats([{ agentKey: key, sessionFile: resume?.path ?? null }])
-      setActiveAgentKey(key)
-      await createAgent(key, initialModel, resume?.path)
-    })()
+    const signal = { cancelled: false }
+    void openInitialChat(signal)
 
     return () => {
       // Cancel any in-flight startup; do NOT dispose pi/store here — the panel
       // may just be moving between canvas and dock. Teardown is centralized in
       // disposeAgentPanel(), called from the appStore close paths.
-      cancelled = true
+      signal.cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panelId])
+
+  // Worktree switch: pi's cwd is fixed at spawn and its sessions are cwd-scoped
+  // on disk, so re-tagging the panel's worktree (via the WorktreePill) isn't
+  // enough — the live chats still run in the old checkout. When the derived cwd
+  // changes under a live mount, dispose the old checkout's chats and reopen in
+  // the new one so the running agent actually moves with the pill.
+  const chatsCwdRef = useRef<string | null>(null)
+  useEffect(() => {
+    // A transient empty derivation (workspace/worktree briefly unresolved) must
+    // never tear down a live agent — wait for a real path.
+    if (!cwd) return
+    // First run records the cwd the mount effect spawned/adopted at; only a
+    // later change (a worktree switch) triggers a reinit.
+    if (chatsCwdRef.current === null) {
+      chatsCwdRef.current = cwd
+      return
+    }
+    if (chatsCwdRef.current === cwd) return
+    chatsCwdRef.current = cwd
+
+    // Tear down every chat bound to the old checkout, then reopen for the new.
+    disposeAgentChats(openChatsRef.current)
+    readyByKey.current = {}
+    setOpenChats([])
+    setActiveAgentKey(null)
+    setReadyTick((n) => n + 1)
+
+    const signal = { cancelled: false }
+    void openInitialChat(signal)
+    return () => { signal.cancelled = true }
+  }, [cwd, openInitialChat])
 
   // Mirror the live chat bookkeeping into the session registry so a remount
   // (canvas<->dock move) can re-adopt the same chats. Synced on every change so
@@ -449,9 +472,9 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
     setDraftImages([])
     try {
       if (isSteering) {
-        await window.electronAPI.agentSteer(activeAgentKey, text, images.length > 0 ? images : undefined)
+        await agentClient.steer(activeAgentKey, text, images.length > 0 ? images : undefined)
       } else {
-        await window.electronAPI.agentPrompt(activeAgentKey, text, images.length > 0 ? images : undefined)
+        await agentClient.prompt(activeAgentKey, text, images.length > 0 ? images : undefined)
       }
     } catch (err) {
       const msg = toErrorMessage(err)
@@ -461,7 +484,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
 
   const handleInterrupt = useCallback(async () => {
     if (!activeAgentKey) return
-    try { await window.electronAPI.agentInterrupt(activeAgentKey) }
+    try { await agentClient.interrupt(activeAgentKey) }
     catch (err) { log.warn('[AgentPanel] interrupt failed', err) }
   }, [activeAgentKey])
 
@@ -530,7 +553,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
     // Dispose pi for this chat without deleting its on-disk session file.
     // Used by the sidebar's "close" affordance on currently-open chats.
     readyByKey.current[key] = false
-    window.electronAPI.agentDispose(key).catch(() => { /* */ })
+    agentClient.dispose(key).catch(() => { /* */ })
     useAgentStore.getState().dispose(key)
     const remaining = openChatsRef.current.filter((c) => c.agentKey !== key)
     setOpenChats(remaining)
@@ -562,32 +585,26 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
   // Derived state
   // ---------------------------------------------------------------------------
 
-  const selectedProviderConnected = useMemo(() => {
-    if (!selectedModel) return true
-    const s = providerStatuses.find((s) => s.id === selectedModel.provider)
-    return !!s?.connected
-  }, [selectedModel, providerStatuses])
-
   // A model remembered from a provider the user has since cleared (saved
   // default, or a resumed session's lastModel) should reset, not prompt a
   // reconnect. Once real auth state is in, drop the stale pick — the auto-pick
   // effect above then selects from whatever providers remain, or the "no
-  // model" hint shows when none do.
+  // model" hint shows when none do. `noModel`/`noProvider` with a model set both
+  // mean the selected provider is no longer connected.
+  const selectedProviderMissing =
+    authLoaded && !!selectedModel && (readiness.kind === 'noModel' || readiness.kind === 'noProvider')
   useEffect(() => {
-    if (!authLoaded || !activeAgentKey || !selectedModel) return
-    if (selectedProviderConnected) return
+    if (!activeAgentKey || !selectedModel || !selectedProviderMissing) return
     useAgentStore.getState().setModel(activeAgentKey, null)
     clearModelPrefsForProvider(selectedModel.provider)
-  }, [authLoaded, activeAgentKey, selectedModel, selectedProviderConnected])
+  }, [activeAgentKey, selectedModel, selectedProviderMissing])
 
-  // With no model the composer is disabled and the placeholder doubles as the
-  // hint explaining why. The disconnected-provider term only matters in the
-  // window before the first authStatus() resolves — once it does, the reset
-  // effect above nulls the model and the no-model state takes over.
-  const composerDisabled = !selectedModel || !selectedProviderConnected
-  const composerPlaceholder = !selectedModel
-    ? 'No model selected or no provider is set up yet'
-    : undefined
+  // The composer is usable only once we have a connected, working provider AND a
+  // model. Anything else (no provider, no model, expired sign-in, failed probe)
+  // disables it; the banner below explains which, and the placeholder mirrors it.
+  const composerDisabled = readiness.kind !== 'ok'
+  const composerPlaceholder =
+    readiness.kind === 'ok' || readiness.kind === 'loading' ? undefined : readiness.message
 
   const filteredChats = useMemo(() => {
     if (!chatSearch.trim()) return chats
@@ -817,7 +834,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
 
   const handleTogglePlanMode = useCallback(async () => {
     if (!activeAgentKey) return
-    try { await window.electronAPI.agentPrompt(activeAgentKey, '/plan') }
+    try { await agentClient.prompt(activeAgentKey, '/plan') }
     catch (err) { log.warn('[AgentPanel] toggle plan mode failed', err) }
   }, [activeAgentKey])
 
@@ -827,7 +844,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
     try {
       // The cate-plan-mode extension clears plan mode and starts the implement
       // turn itself (via a custom message), so there's no synthetic user prompt.
-      await window.electronAPI.agentPrompt(key, '/apply-plan')
+      await agentClient.prompt(key, '/apply-plan')
     } catch (err) {
       const msg = toErrorMessage(err)
       useAgentStore.getState().appendSystem(key, `Implement failed: ${msg}`, 'error')
@@ -837,7 +854,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
   const handleRefinePlan = useCallback(async (text: string) => {
     if (!activeAgentKey) return
     const key = activeAgentKey
-    try { await window.electronAPI.agentPrompt(key, text) }
+    try { await agentClient.prompt(key, text) }
     catch (err) {
       const msg = toErrorMessage(err)
       useAgentStore.getState().appendSystem(key, `Refine failed: ${msg}`, 'error')
@@ -853,7 +870,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
       useAgentStore.getState().setCompaction(key, { active: false })
       // 'fresh' tells the extension to restate the full plan: compaction dropped
       // the original plan_complete call from context.
-      await window.electronAPI.agentPrompt(key, '/apply-plan fresh')
+      await agentClient.prompt(key, '/apply-plan fresh')
     } catch (err) {
       const msg = toErrorMessage(err)
       useAgentStore.getState().appendSystem(key, `Clear & implement failed: ${msg}`, 'error')
@@ -1003,7 +1020,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
                 onClick={() => { setModelPickerOpen((v) => { if (!v) void refreshModels(); return !v }) }}
                 className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-primary hover:bg-hover"
               >
-                <CateLogo size={12} className="text-agent-light" />
+                <ChatCircle size={12} className="text-agent-light" />
                 <span className="truncate max-w-[220px]">
                   {selectedModel ? selectedModel.model : 'Pick a model'}
                 </span>
@@ -1037,14 +1054,14 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
           />
         ) : (
         <div className="relative flex-1 flex flex-col min-h-0">
-            {!selectedModel ? (
+            {readiness.kind !== 'ok' && readiness.kind !== 'loading' ? (
               <div className="px-3 py-2 bg-agent/10 border-b border-agent/30 flex items-center gap-2 text-[12px] text-primary">
-                <span className="flex-1 truncate">
-                  No model selected or no provider is set up yet.
+                <span className="flex-1 truncate" title={readiness.error}>
+                  {readiness.message}
                 </span>
                 <button
                   onClick={() => {
-                    if (availableModels.length > 0) {
+                    if (readiness.kind === 'noModel' && availableModels.length > 0) {
                       void refreshModels()
                       setModelPickerOpen(true)
                     } else {
@@ -1053,7 +1070,11 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
                   }}
                   className="px-2 py-1 rounded-md bg-agent hover:bg-agent-light text-white text-[11px] font-medium shrink-0"
                 >
-                  {availableModels.length > 0 ? 'Pick model' : 'Set up provider'}
+                  {readiness.kind === 'noModel' && availableModels.length > 0
+                    ? 'Pick model'
+                    : readiness.kind === 'needsReauth'
+                      ? 'Reconnect'
+                      : 'Set up provider'}
                 </button>
               </div>
             ) : null}
@@ -1066,7 +1087,7 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
               <div className="flex-1 overflow-y-auto flex flex-col items-center justify-center px-6 py-8 min-h-0">
                 <div className="w-full max-w-[520px] flex flex-col items-center">
                   <div className="w-12 h-12 rounded-2xl bg-agent/15 flex items-center justify-center mb-4">
-                    <CateLogo size={22} className="text-agent-light" />
+                    <ChatCircle size={22} className="text-agent-light" />
                   </div>
                   <div className="text-[16px] font-medium text-primary mb-3 text-center">
                     What should we work on?
@@ -1153,8 +1174,6 @@ export default function AgentPanel({ panelId, workspaceId }: PanelProps) {
                 />
               </>
             )}
-
-            <ExtensionStatusBar entries={extensionStatuses} />
           </div>
         )}
       </div>

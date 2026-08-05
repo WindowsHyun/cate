@@ -337,6 +337,8 @@ The entire `companion` subsystem was renamed to `runtime`. If your fork has any 
 | Workspace group definitions (name/color) lost on every restart | Pass `workspaceGroups` to `deriveSidebarSession` in `sessionSave.ts` | `(groups-save)` |
 | `claude --resume` stops working after restart | Restore 4 missing pieces in sessionSave/Serialize/Restore split by upstream | `(claude-resume)` |
 | `claude --resume` → "No conversation found" despite session file existing | `claude --resume` is project-scoped; capture project path from `history.jsonl` and `cd` to it before resuming (Feature 19) | `(claude-resume-project)` |
+| Opening the same file repeatedly (extension-grouped opens, Feature 13) kept spawning duplicate tabs instead of focusing the existing one | `openFileAsPanel`/`openFileGrouped`/`openFileAsTextGrouped` in `fileRouting.ts` now check for an already-open panel with the same `filePath` (via new `revealOnce` export in `panelReveal.ts`) before creating a new one | `(dedup-file-open)` |
+| Unsaved scratch editor ("New" text file with no `filePath`) content looked lost after switching workspaces away and back | `EditorPanel.tsx`'s "no file open" welcome overlay is local `useState(false)` and doesn't survive the full remount a workspace switch causes (main shell is `key={selectedWorkspaceId:reloadEpoch}`); it re-showed over the still-intact `unsavedContent`. Seed the overlay's initial state from whether `unsavedContent` already exists | `(overlay-remount)` |
 
 ---
 

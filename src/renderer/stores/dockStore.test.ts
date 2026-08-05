@@ -108,6 +108,21 @@ describe('createDefaultDockState', () => {
   })
 })
 
+describe('background docking', () => {
+  it('appends without activating the new tab or opening a hidden zone', () => {
+    const store = createDockStore()
+    store.getState().dockPanel('visible', 'bottom')
+    // Hide the populated zone, then add through the background API path.
+    store.getState().toggleZone('bottom')
+    store.getState().dockPanel('background', 'bottom', undefined, false)
+
+    const stack = rootStack(store, 'bottom')
+    expect(stack.panelIds).toEqual(['visible', 'background'])
+    expect(stack.activeIndex).toBe(0)
+    expect(store.getState().zones.bottom.visible).toBe(false)
+  })
+})
+
 describe('zone visibility and sizing', () => {
   it('toggleZone flips visibility', () => {
     const store = createDockStore()
@@ -541,10 +556,8 @@ describe('snapshot round-trip', () => {
 
     const snapshot = store.getState().getSnapshot()
 
-    expect(Object.keys(snapshot.locations).sort()).toEqual(['a', 'b', 'c', 'd', 'e'])
-    for (const id of ['a', 'b', 'c', 'd', 'e']) {
-      expect(snapshot.locations[id]).toEqual(store.getState().getPanelLocation(id))
-    }
+    expect(snapshot).toEqual({ zones: store.getState().zones })
+    for (const id of ['a', 'b', 'c', 'd', 'e']) expect(store.getState().getPanelLocation(id)).toBeDefined()
   })
 
   it('restoreSnapshot reproduces the zones tree exactly in a fresh store', () => {

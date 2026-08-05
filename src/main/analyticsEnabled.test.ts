@@ -1,7 +1,6 @@
 // =============================================================================
-// Analytics gating — telemetry is always on in packaged builds (no settings
-// gate, no opt-out) and always OFF in dev/test builds. The legacy consent
-// settings must have no effect either way.
+// Analytics gating — this fork disables telemetry entirely (isEnabled() is
+// hardcoded false), regardless of packaged state or legacy consent settings.
 // =============================================================================
 
 import { describe, expect, test, vi, beforeEach } from 'vitest'
@@ -48,27 +47,21 @@ beforeEach(() => {
 
 describe('analytics gating', () => {
   test('no send in dev builds, regardless of legacy consent settings', async () => {
-    settings.telemetryConsentDecided = true
-    settings.usageAnalyticsEnabled = true
     const ok = await sendEvent('app_start')
     expect(ok).toBe(false)
     expect(netRequest).not.toHaveBeenCalled()
   })
 
-  test('sends in packaged builds with no settings at all', async () => {
+  test('no send in packaged builds either — telemetry is fully disabled in this fork', async () => {
     electronApp.isPackaged = true
-    // netRequest is a bare stub (no callbacks), so the post will fail and the
-    // event buffers — the point is the gate lets it reach the network.
-    await sendEvent('app_start')
-    expect(netRequest).toHaveBeenCalledTimes(1)
+    const ok = await sendEvent('app_start')
+    expect(ok).toBe(false)
+    expect(netRequest).not.toHaveBeenCalled()
   })
 
-  test('legacy opt-out settings do NOT disable sending in packaged builds', async () => {
+  test('legacy opt-out settings remain irrelevant — sending stays off either way', async () => {
     electronApp.isPackaged = true
-    settings.telemetryConsentDecided = false
-    settings.usageAnalyticsEnabled = false
-    settings.crashReportingEnabled = false
     await sendEvent('app_start')
-    expect(netRequest).toHaveBeenCalledTimes(1)
+    expect(netRequest).not.toHaveBeenCalled()
   })
 })

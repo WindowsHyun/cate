@@ -39,7 +39,23 @@ export interface SharedPanelDefinition {
   /** Whether a panel of this type can be placed as a canvas node. Canvas
    *  panels themselves live only in dock zones. */
   canLiveOnCanvas: boolean
+  /** Optional accent used by the panel-type switcher (fork customization). */
   switcherColor?: string
+  /** When true, a canvas node hosting this panel is exempt from viewport
+   *  culling — it stays mounted even when scrolled off-screen. Set for panels
+   *  whose live state lives in an isolated `<webview>` guest process and cannot
+   *  be reconstructed on remount (extensions hold session state in-page).
+   *  Terminals/editors leave this false: their backing state is in the main
+   *  process (PTY) or trivially rehydrated (Monaco), so culling them is safe. */
+  keepMountedOffscreen: boolean
+  /** When true, an inactive tab of this type stays mounted (hidden) in its dock
+   *  stack instead of being unmounted, so its live `<webview>` guest process
+   *  survives a tab switch. Without this, switching away from a browser/extension
+   *  tab and back reloads the page and loses all in-page state (#459).
+   *  Terminals/editors leave this false: unmounting an inactive terminal frees
+   *  its xterm/WebGL context (the PTY keeps running in main), which is the
+   *  cheaper trade-off. */
+  keepMountedWhenTabHidden: boolean
 }
 
 // -----------------------------------------------------------------------------
@@ -66,6 +82,8 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     minimumSize: { width: 320, height: 200 },
     ghostSvg: ghost('rgb(77,217,100)', '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>'),
     canLiveOnCanvas: true,
+    keepMountedOffscreen: false,
+    keepMountedWhenTabHidden: false,
   },
   browser: {
     type: 'browser',
@@ -77,6 +95,10 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     minimumSize: { width: 400, height: 300 },
     ghostSvg: ghost('rgb(74,158,255)', '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>'),
     canLiveOnCanvas: true,
+    // Browser automation must remain usable when an API caller creates the
+    // panel in the background without moving the user's camera.
+    keepMountedOffscreen: true,
+    keepMountedWhenTabHidden: true,
   },
   editor: {
     type: 'editor',
@@ -88,10 +110,12 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     minimumSize: { width: 300, height: 250 },
     ghostSvg: ghost('rgb(255,159,10)', '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>'),
     canLiveOnCanvas: true,
+    keepMountedOffscreen: false,
+    keepMountedWhenTabHidden: false,
   },
   agent: {
     type: 'agent',
-    label: 'Cate Agent',
+    label: 'Agent',
     brandColor: '#4A9EFF',
     mutedColor: '#3a7acc',
     tintClass: 'text-blue-400',
@@ -99,6 +123,8 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     minimumSize: { width: 360, height: 320 },
     ghostSvg: ghost('rgb(74,158,255)', '<path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8L12 3z"/><path d="M19 14l.9 2.1L22 17l-2.1.9L19 20l-.9-2.1L16 17l2.1-.9L19 14z"/>'),
     canLiveOnCanvas: true,
+    keepMountedOffscreen: false,
+    keepMountedWhenTabHidden: false,
   },
   document: {
     type: 'document',
@@ -110,6 +136,8 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     minimumSize: { width: 300, height: 250 },
     ghostSvg: ghost('rgb(175,82,222)', '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><circle cx="12" cy="15" r="3"/>'),
     canLiveOnCanvas: true,
+    keepMountedOffscreen: false,
+    keepMountedWhenTabHidden: false,
   },
   database: {
     type: 'database',
@@ -122,6 +150,8 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     minimumSize: { width: 400, height: 300 },
     ghostSvg: ghost('rgb(50,173,230)', '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>'),
     canLiveOnCanvas: true,
+    keepMountedOffscreen: false,
+    keepMountedWhenTabHidden: false,
   },
   canvas: {
     type: 'canvas',
@@ -133,6 +163,21 @@ export const PANEL_DEFINITIONS: Record<PanelType, SharedPanelDefinition> = {
     minimumSize: { width: 400, height: 300 },
     ghostSvg: ghost('rgb(191,90,242)', '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/>'),
     canLiveOnCanvas: false,
+    keepMountedOffscreen: false,
+    keepMountedWhenTabHidden: false,
+  },
+  extension: {
+    type: 'extension',
+    label: 'Extension',
+    brandColor: '#8E8E93',
+    mutedColor: '#6a6a6e',
+    tintClass: 'text-zinc-400',
+    defaultSize: { width: 600, height: 400 },
+    minimumSize: { width: 320, height: 200 },
+    ghostSvg: ghost('rgb(142,142,147)', '<path d="M16 4h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2 2 2 0 0 0 0 4 2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2 2 2 0 0 0-4 0 2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2 2 2 0 0 0 0-4 2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2 2 2 0 0 0 4 0 2 2 0 0 1 2-2z"/>'),
+    canLiveOnCanvas: true,
+    keepMountedOffscreen: true,
+    keepMountedWhenTabHidden: true,
   },
 }
 
@@ -142,39 +187,28 @@ export function getSharedPanelDef(type: PanelType | string): SharedPanelDefiniti
   return PANEL_DEFINITIONS[type as PanelType] ?? PANEL_DEFINITIONS.editor
 }
 
+/** True when a canvas node hosting this panel type must stay mounted even when
+ *  scrolled off-screen (its live `<webview>` state can't survive a remount).
+ *
+ *  Per-TYPE answer only. Extension panels are refined per INSTANCE in
+ *  `renderer/panels/keepMountedPanels.ts`: url-mode extensions (remote SaaS
+ *  pages) are cullable because their session lives in a persistent partition. */
+export function keepsMountedOffscreen(type: PanelType | string | undefined): boolean {
+  return !!type && getSharedPanelDef(type).keepMountedOffscreen
+}
+
+/** True when an inactive tab of this type must stay mounted (hidden) in its dock
+ *  stack rather than being unmounted — its live `<webview>` state can't survive a
+ *  remount, so unmounting on tab switch would reload the page (#459). */
+export function keepsMountedWhenTabHidden(type: PanelType | string | undefined): boolean {
+  return !!type && getSharedPanelDef(type).keepMountedWhenTabHidden
+}
+
 // -----------------------------------------------------------------------------
 // Default panel size resolution
 // -----------------------------------------------------------------------------
 
-// The factory defaults for the "Default panel width/height" setting. Mirrored
-// here (rather than imported from ./types) so this module stays at the bottom of
-// the import graph — types.ts imports PANEL_DEFINITIONS from here, so a value
-// import back into types would form a load-time cycle. A user who hasn't touched
-// the setting leaves it at these values, which we treat as "unset" so each panel
-// type keeps its own tuned default size.
-const UNSET_PANEL_WIDTH = 600
-const UNSET_PANEL_HEIGHT = 400
-
-/** Subset of AppSettings this module needs — kept narrow so panels.ts doesn't
- *  depend on the full settings shape (or its DEFAULT_SETTINGS value). */
-export interface PanelSizeSettings {
-  defaultPanelWidth?: number
-  defaultPanelHeight?: number
-}
-
-/** The size a freshly-created panel of `type` should get. Honors the user's
- *  "Default panel width/height" setting when it's been customized away from the
- *  factory default; otherwise falls back to the panel type's own default size.
- *  A non-positive override dimension is ignored (falls back per dimension). */
-export function resolvePanelSize(type: PanelType, settings?: PanelSizeSettings | null): Size {
-  const fallback = getSharedPanelDef(type).defaultSize
-  const w = settings?.defaultPanelWidth
-  const h = settings?.defaultPanelHeight
-  const customW = typeof w === 'number' && w > 0 && w !== UNSET_PANEL_WIDTH
-  const customH = typeof h === 'number' && h > 0 && h !== UNSET_PANEL_HEIGHT
-  if (!customW && !customH) return fallback
-  return {
-    width: customW ? (w as number) : fallback.width,
-    height: customH ? (h as number) : fallback.height,
-  }
+/** The fixed default size for a panel type. Panel size is no longer user-configurable. */
+export function resolvePanelSize(type: PanelType, _settings?: unknown): Size {
+  return PANEL_DEFINITIONS[type].defaultSize
 }

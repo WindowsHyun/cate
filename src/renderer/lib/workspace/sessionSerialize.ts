@@ -16,11 +16,36 @@ import type {
   WindowDockState,
 } from '../../../shared/types'
 import { toRelativePath, toAbsolutePath } from '../../../shared/pathUtils'
-import { collectPanelIds } from '../canvas/collectPanelIds'
+import { collectPanelIds } from '../../../shared/collectPanelIds'
 
 // -----------------------------------------------------------------------------
 // Project-local state builders (.cate/workspace.json + .cate/session.json)
 // -----------------------------------------------------------------------------
+
+// Panel fields that persist verbatim (no path relativization) in BOTH
+// directions between the in-memory PanelState and the on-disk ProjectPanelRef.
+// `type`/`title` are always required and `filePath` needs explicit
+// relative/absolute conversion, so they're handled separately. Enumerated ONCE
+// here — consulted by both buildWorkspaceFile and projectFilesToSnapshot — so
+// the two paths can't drift and silently drop a field on round-trip.
+const PASSTHROUGH_PANEL_FIELDS = [
+  'tabs',
+  'activeTabId',
+  'proxyUrl',
+  'documentType',
+  'extensionId',
+  'extensionPanelId',
+] as const
+
+type PassthroughPanelFields = Pick<ProjectPanelRef, (typeof PASSTHROUGH_PANEL_FIELDS)[number]>
+
+/** Copy the passthrough panel fields (see PASSTHROUGH_PANEL_FIELDS) from a
+ *  PanelState or ProjectPanelRef, normalizing null → undefined. */
+function pickPassthroughPanelFields(source: PassthroughPanelFields): PassthroughPanelFields {
+  const out: Record<string, unknown> = {}
+  for (const key of PASSTHROUGH_PANEL_FIELDS) out[key] = source[key] ?? undefined
+  return out as PassthroughPanelFields
+}
 
 export function buildWorkspaceFile(
   snapshot: SessionSnapshot,
@@ -38,9 +63,7 @@ export function buildWorkspaceFile(
         type: p.type,
         title: p.title,
         filePath: p.filePath ? toRelativePath(p.filePath, rootPath) : undefined,
-        url: p.url ?? undefined,
-        proxyUrl: p.proxyUrl ?? undefined,
-        documentType: p.documentType,
+        ...pickPassthroughPanelFields(p),
       }
     }
   }
@@ -66,12 +89,13 @@ export function buildSessionFile(
   const panels: Record<string, ProjectSessionPanel> = {}
   for (const p of Object.values(snapshot.panels ?? {})) {
     const workingDirectory = snapshot.terminalCwds?.[p.id]
-    if (!p.worktreeId && !workingDirectory && !p.unsavedContent) continue
+    if (!p.worktreeId && !workingDirectory && !p.unsavedContent && !p.agentSession) continue
     panels[p.id] = {
       panelId: p.id,
       workingDirectory,
       unsavedContent: p.unsavedContent,
       worktreeId: p.worktreeId,
+      agentSession: p.agentSession,
     }
   }
 
@@ -116,12 +140,17 @@ export function projectFilesToSnapshot(
         title: ref.title,
         isDirty: false,
         filePath: ref.filePath ? toAbsolutePath(ref.filePath, rootPath) : undefined,
-        url: ref.url,
-        proxyUrl: ref.proxyUrl,
-        documentType: ref.documentType,
+        ...pickPassthroughPanelFields(ref),
         // Re-attach the machine-local facts kept out of the committed file.
         worktreeId: sp?.worktreeId,
         unsavedContent: sp?.unsavedContent,
+        // The agent session to resume in this terminal — TerminalPanel types
+        // the resume command into the fresh shell and clears the field.
+        agentSession: sp?.agentSession,
+        // Restore the per-panel cwd (worktree path / dropped folder) so the
+        // terminal respawns there. TerminalPanel reads panel.cwd directly. The
+        // terminalCwds map below feeds the separate scrollback-restore path.
+        cwd: sp?.workingDirectory,
       }
       if (sp?.workingDirectory) terminalCwds[id] = sp.workingDirectory
     }
@@ -153,9 +182,9 @@ export function projectFilesToSnapshot(
 
 /** Collect all panel IDs referenced in a WindowDockState layout tree. */
 export function collectPanelIdsFromDockState(zones: WindowDockState): string[] {
-  const ids: string[] = []
+  const ids = new Set<string>()
   for (const zone of Object.values(zones)) {
-    for (const id of collectPanelIds(zone.layout)) ids.push(id)
+    for (const id of collectPanelIds(zone.layout)) ids.add(id)
   }
-  return ids
+  return [...ids]
 }

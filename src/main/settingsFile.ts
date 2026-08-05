@@ -33,6 +33,8 @@ const SETTINGS_SCHEMA: Record<keyof AppSettings, string> = {
   language: 'string',
   defaultShellPath: 'string',
   warnBeforeQuit: 'boolean',
+  closeWorktreePanelsOnDelete: 'boolean',
+  worktreeSymlinkPaths: 'array',
   activeThemeId: 'string',
   systemLightThemeId: 'string',
   systemDarkThemeId: 'string',
@@ -40,9 +42,8 @@ const SETTINGS_SCHEMA: Record<keyof AppSettings, string> = {
   editorFontSize: 'number',
   editorFontFamily: 'string',
   uiScale: 'number',
+  disableGpuRasterization: 'boolean',
   showMinimap: 'boolean',
-  defaultPanelWidth: 'number',
-  defaultPanelHeight: 'number',
   zoomSpeed: 'number',
   autoFocusLargestVisibleNode: 'boolean',
   canvasGridStyle: 'string',
@@ -51,6 +52,8 @@ const SETTINGS_SCHEMA: Record<keyof AppSettings, string> = {
   snapToGrid: 'boolean',
   placementPicker: 'boolean',
   showWorktreeTerritory: 'boolean',
+  defaultPanelWidth: 'number',
+  defaultPanelHeight: 'number',
   terminalFontFamily: 'string',
   terminalFontSize: 'number',
   terminalScrollback: 'number',
@@ -59,8 +62,22 @@ const SETTINGS_SCHEMA: Record<keyof AppSettings, string> = {
   terminalCursorBlink: 'boolean',
   terminalOptionIsMeta: 'boolean',
   autoSuspendIdleTerminals: 'boolean',
+  cliEnabled: 'boolean',
+  cliSkillInstallEnabled: 'boolean',
+  cliBrowserReadEnabled: 'boolean',
+  cliBrowserControlEnabled: 'boolean',
+  cliTerminalReadEnabled: 'boolean',
+  cliTerminalInputEnabled: 'boolean',
+  cliPanelReadEnabled: 'boolean',
+  cliPanelControlEnabled: 'boolean',
+  cliEditorReadEnabled: 'boolean',
+  cliEditorControlEnabled: 'boolean',
+  cliNotifyEnabled: 'boolean',
   browserHomepage: 'string',
   browserSearchEngine: 'string',
+  browserShowBookmarksBar: 'boolean',
+  browserShowTabSidebar: 'boolean',
+  browserNewTabBehavior: 'string',
   terminalLinkOpenTarget: 'string',
   sidebarTintOpacity: 'number',
   showFileExplorerOnLaunch: 'boolean',
@@ -70,18 +87,23 @@ const SETTINGS_SCHEMA: Record<keyof AppSettings, string> = {
   fitPanelsThreePanelLayout: 'string',
   notificationsEnabled: 'boolean',
   notifyOnlyWhenUnfocused: 'boolean',
-  crashReportingEnabled: 'boolean',
-  usageAnalyticsEnabled: 'boolean',
-  telemetryConsentDecided: 'boolean',
   telemetryNoticeAcknowledgedVersion: 'number',
   onboardingCompleted: 'boolean',
   betaUpdatesEnabled: 'boolean',
   // Agent / layout — structured values. 'object' accepts a plain object or null;
   // deeper validation (shape of the model ref / sidebar layout) lives in the
-  // renderer consumers, which already tolerate partial/legacy shapes.
+  // renderer consumers, which validate hand-edited partial shapes.
   agentDefaultModel: 'object',
+  agentHookInjection: 'object',
+  cateAgentModel: 'object',
+  cateAgentOrchestratorAgentId: 'string',
+  cateAgentObserveCooldownMin: 'number',
+  cateAgentMaxParallelIterations: 'number',
   sidebarLayout: 'object',
   customShortcuts: 'object',
+  enabledExtensions: 'array',
+  extensionCatalogSources: 'array',
+  extensionSideloadPaths: 'array',
 }
 
 const SETTINGS_KEYS = Object.keys(SETTINGS_SCHEMA) as Array<keyof AppSettings>
@@ -96,6 +118,15 @@ function valueMatchesSchema(key: keyof AppSettings, value: unknown): boolean {
   return typeof value === expected
 }
 
+// Array settings whose elements must all be strings. A malformed entry (non-array
+// or any non-string element) falls back to the default [] rather than poisoning
+// state with garbage that downstream consumers would have to defend against.
+const STRING_ARRAY_KEYS = new Set<keyof AppSettings>([
+  'enabledExtensions',
+  'extensionCatalogSources',
+  'extensionSideloadPaths',
+])
+
 /** Merge only known, type-correct keys from a parsed object into `target`. */
 function mergeValidatedSettings(target: AppSettings, source: Record<string, unknown>): void {
   for (const key of SETTINGS_KEYS) {
@@ -103,6 +134,10 @@ function mergeValidatedSettings(target: AppSettings, source: Record<string, unkn
     const val = source[key]
     if (!valueMatchesSchema(key, val)) {
       log.warn('Settings schema mismatch: %s expected %s, got %s', key, SETTINGS_SCHEMA[key], typeof val)
+      continue
+    }
+    if (STRING_ARRAY_KEYS.has(key) && !(val as unknown[]).every((v) => typeof v === 'string')) {
+      log.warn('Settings schema mismatch: %s expected array of strings', key)
       continue
     }
     ;(target as unknown as Record<string, unknown>)[key as string] = val

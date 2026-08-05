@@ -16,6 +16,11 @@ const strings = {
   'settings.section.providers': { en: 'Providers', ko: '공급자' },
   'settings.section.skills': { en: 'Skills', ko: '스킬' },
   'settings.section.updates': { en: 'Updates', ko: '업데이트' },
+  'settings.section.cli': { en: 'CLI', ko: 'CLI' },
+  'settings.section.worktrees': { en: 'Worktrees', ko: '워크트리' },
+  'settings.section.agentHooks': { en: 'Agent Hooks', ko: '에이전트 훅' },
+  'settings.section.cateAgent': { en: 'Cate Agent', ko: 'Cate 에이전트' },
+  'settings.section.extensions': { en: 'Extensions', ko: '확장 프로그램' },
 
   // General settings
   'general.language': { en: 'Language', ko: '언어' },

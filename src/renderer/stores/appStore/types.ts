@@ -7,7 +7,8 @@ import type {
   WorkspaceState,
   WorkspaceInfo,
   PanelState,
-  PanelType,
+  TerminalAgentSession,
+  BrowserTab,
   Point,
   Size,
   DockZonePosition,
@@ -15,6 +16,7 @@ import type {
   RemoteConnectSpec,
   RuntimeConnection,
   RuntimePhase,
+  WorkspaceGroup,
 } from '../../../shared/types'
 
 // -----------------------------------------------------------------------------
@@ -27,8 +29,12 @@ export type PanelPlacement =
    *  the workspace's primary canvas — correct for session restore and auto
    *  creates, but wrong for an interactive create on a secondary/nested canvas.
    *  `size` pins the node's size (used by layout restore to reproduce the saved
-   *  geometry exactly); without it the panel type's default size is used. */
-  | { target: 'canvas'; position?: Point; canvasPanelId?: string; size?: Size }
+   *  geometry exactly); without it the panel type's default size is used.
+   *  `focus: false` adds the node WITHOUT focusing it or moving the viewport —
+   *  for background creates (Cate Agent terminals). An off-view unfocused node
+   *  is culled, so a creator that needs it mounted (a terminal booting its pty)
+   *  must keep it exempt itself (see useVisibleNodeIds' alwaysMount). */
+  | { target: 'canvas'; position?: Point; canvasPanelId?: string; size?: Size; focus?: boolean }
   /** `stackId` docks the panel as a new tab in a SPECIFIC stack (the one the
    *  user is working in — e.g. the focused pane of a split). Without it the
    *  panel lands in the zone's default stack. A stale stackId falls back to the
@@ -55,22 +61,32 @@ export interface AppStoreState {
    *  from disk (reload / hydrate), so the main shell can remount and respawn its
    *  terminals cleanly. Defaults to 0 for any workspace not present here. */
   reloadEpochs: Record<string, number>
+  workspaceGroups: WorkspaceGroup[]
 }
 
 export interface AppStoreActions {
   // Workspace management
   addWorkspace: (name?: string, rootPath?: string, id?: string, connection?: RuntimeConnection) => string
   selectWorkspace: (id: string) => Promise<void>
+  /** Switch to the workspace `offset` steps away in list order, wrapping around
+   *  both ends. No-op with fewer than two workspaces. Backs the next/previous
+   *  workspace shortcuts. */
+  switchWorkspaceByOffset: (offset: number) => Promise<void>
   removeWorkspace: (id: string, forgetRecent?: boolean) => void
 
   // Panel creation — each adds a PanelState to the workspace AND places it
   createTerminal: (workspaceId: string, initialInput?: string, position?: Point, placement?: PanelPlacement, cwd?: string) => string
   createBrowser: (workspaceId: string, url?: string, position?: Point, placement?: PanelPlacement, proxyUrl?: string) => string
-  createEditor: (workspaceId: string, filePath?: string, position?: Point, placement?: PanelPlacement) => string
+  createEditor: (workspaceId: string, filePath?: string, position?: Point, placement?: PanelPlacement, opts?: { markdownPreview?: boolean }) => string
   createDiffEditor: (workspaceId: string, filePath: string, diffMode: 'staged' | 'working', position?: Point, placement?: PanelPlacement) => string
   createCanvas: (workspaceId: string, position?: Point, placement?: PanelPlacement) => string
   createAgent: (workspaceId: string, position?: Point, placement?: PanelPlacement) => string
   createDocument: (workspaceId: string, filePath?: string, documentType?: 'pdf' | 'docx' | 'image', position?: Point, placement?: PanelPlacement) => string
+  createDatabase: (workspaceId: string, filePath?: string, position?: Point, placement?: PanelPlacement) => string
+  /** Open an extension-hosted panel on the canvas. `extensionPanelId` selects
+   *  which panel from the extension's manifest. `title` defaults to the panel
+   *  id when omitted (a title-resolver can fill the manifest label later). */
+  createExtensionPanel: (workspaceId: string, extensionId: string, extensionPanelId: string, position?: Point, placement?: PanelPlacement, title?: string) => string
 
   // Ensure the center dock zone contains a canvas panel for the given workspace.
   // Covers session-restore and new-workspace paths where the center layout may
@@ -86,14 +102,20 @@ export interface AppStoreActions {
   /** User-initiated rename. Marks the panel as user-overridden so OSC updates
    *  no longer fight the chosen name. */
   renamePanelByUser: (workspaceId: string, panelId: string, title: string) => void
-  updatePanelUrl: (workspaceId: string, panelId: string, url: string) => void
+  updateBrowserActiveTabUrl: (workspaceId: string, panelId: string, url: string) => void
+  /** Browser panels only: persist the sole navigation authority. */
+  updatePanelTabs: (workspaceId: string, panelId: string, tabs: BrowserTab[], activeTabId: string) => void
   /** Browser panels only: set/clear the per-panel proxy. Pass undefined to
    *  revert the panel to the shared (direct) browser session. */
   updatePanelProxy: (workspaceId: string, panelId: string, proxyUrl?: string) => void
   updatePanelFilePath: (workspaceId: string, panelId: string, filePath: string) => void
   setPanelDirty: (workspaceId: string, panelId: string, dirty: boolean) => void
   setPanelMarkdownPreview: (workspaceId: string, panelId: string, preview: boolean) => void
+  /** Present-day authority for markdown editor display; `markdownPreview` above
+   *  remains only for backward-compat migration. */
+  setMarkdownViewMode: (workspaceId: string, panelId: string, mode: 'source' | 'split' | 'preview') => void
   setPanelUnsavedContent: (workspaceId: string, panelId: string, content: string | undefined) => void
+  setPanelAgentSession: (workspaceId: string, panelId: string, session: TerminalAgentSession | null) => void
   addPanel: (workspaceId: string, panel: PanelState) => void
   removePanelRecord: (workspaceId: string, panelId: string) => void
 
@@ -105,8 +127,9 @@ export interface AppStoreActions {
   setWorkspaceRootPath: (wsId: string, rootPath: string) => Promise<boolean>
   connectRemoteWorkspace: (wsId: string, spec: RemoteConnectSpec) => Promise<boolean>
   ensureWorkspaceRuntime: (wsId: string) => Promise<boolean>
-  /** Cheap relaunch of an existing connection (runtime:ensure) — for a
-   *  disconnected/unreachable runtime whose connection record is intact. */
+  /** Cheap relaunch of an existing connection — for a disconnected/unreachable
+   *  runtime. Remote/WSL re-probe via runtime:ensure; a local workspace
+   *  relaunches the built-in daemon via runtime:retry-local. */
   retryRuntime: (wsId: string) => Promise<boolean>
   /** Explicit clean install of the runtime daemon, then connect. The entry
    *  action of the `missing` phase — the only action that installs. */
@@ -125,7 +148,6 @@ export interface AppStoreActions {
   setLocalRuntimePhase: (phase: RuntimePhase) => void
   setWorkspaceColor: (wsId: string, color: string) => void
   renameWorkspace: (wsId: string, name: string) => void
-  duplicateWorkspace: (wsId: string) => string
   closeAllPanels: (wsId: string) => void
   /** Increment a workspace's reload epoch so the main shell remounts and
    *  respawns its terminals after a from-disk layout rebuild. */
@@ -135,6 +157,12 @@ export interface AppStoreActions {
    *  workspace. Used by layout restore to replace a single canvas's contents. */
   clearCanvas: (wsId: string, canvasPanelId: string) => void
   reorderWorkspaces: (fromIndex: number, toIndex: number) => void
+  addWorkspaceGroup: (name?: string, color?: string) => string
+  removeWorkspaceGroup: (groupId: string) => void
+  updateWorkspaceGroup: (groupId: string, changes: Partial<Pick<WorkspaceGroup, 'name' | 'color'>>) => void
+  toggleGroupCollapsed: (groupId: string) => void
+  moveWorkspaceToGroup: (workspaceId: string, groupId: string | null) => void
+  setWorkspaceGroups: (groups: WorkspaceGroup[]) => void
   addAdditionalRoot: (wsId: string, rootPath: string) => void
   removeAdditionalRoot: (wsId: string, rootPath: string) => void
 

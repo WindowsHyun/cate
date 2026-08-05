@@ -1,41 +1,36 @@
 // =============================================================================
 // Shell / Process Monitor IPC handlers
-// Walks the process tree to detect agent CLIs (Claude, Codex, etc.), dev-server
+// Polls each terminal's runtime ProcessHost for activity (first non-shell
+// child), the hook-registered agent pid's liveness (agentPresence.ts — the
+// falling edge behind 'finished' and the resume-stamp clear), dev-server
 // ports, and working directory. The actual ps/lsof scans run inside each
 // terminal's runtime ProcessHost (local OR remote daemon) — this module owns
 // only the polling cadence, the owner-window routing, and the cross-scan
-// carry-across that keeps tab names from flickering. For a LOCAL terminal the
-// behaviour is byte-identical to before (the local ProcessHost runs the same
-// ps/lsof); for a REMOTE terminal the scans run on the daemon host.
+// carry-across that keeps tab names from flickering.
 // =============================================================================
 
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, ipcMain } from 'electron'
 import log from '../logger'
 import {
-  SHELL_REGISTER_TERMINAL,
-  SHELL_UNREGISTER_TERMINAL,
   SHELL_ACTIVITY_UPDATE,
   SHELL_PORTS_UPDATE,
   SHELL_CWD_UPDATE,
   SHELL_AGENT_SCREEN_STATE,
 } from '../../shared/ipc-channels'
-import { getRuntimeForTerminal } from './terminal'
-import { sendToWindow, windowFromEvent, broadcastToAll } from '../windowRegistry'
+import { getRuntimeForTerminal, getTerminalIds, getTerminalOwner, onTerminalSessionsChanged } from './terminal'
+import { sendToWindow, broadcastToAll, isAnyWindowFocused } from '../windowRegistry'
 import type { Runtime, PtyActivity } from '../runtime/types'
 import type { TerminalActivity } from '../../shared/types'
-
-interface TerminalRegistration {
-  ownerWindowId: number
-}
+import { clearAgentSessionStamp, dropAgentSessionStampState } from './agentSessionStamps'
 
 interface PreviousState {
   /** Last agent name seen — carried across transient scan misses so the tab
    *  name doesn't flicker when a single scan cycle fails to spot the agent. */
   previousAgentName: string | null
+  /** Whether the last scan saw an agent — the falling edge (agent exited while
+   *  the terminal lives on) clears the persisted resume stamp. */
+  previousAgentPresent?: boolean
 }
-
-// Registered terminals for process monitoring (keyed by pty id == terminal id).
-const registeredTerminals: Map<string, TerminalRegistration> = new Map()
 
 // Track previous state for transition detection
 const previousStates: Map<string, PreviousState> = new Map()
@@ -55,7 +50,7 @@ const lastAgentPresent: Map<string, boolean> = new Map()
  */
 export function getRunningTerminals(): Array<{ processName: string | null }> {
   const out: Array<{ processName: string | null }> = []
-  for (const terminalId of registeredTerminals.keys()) {
+  for (const terminalId of getTerminalIds()) {
     const activity = lastActivity.get(terminalId)
     if (activity?.type === 'running') out.push({ processName: activity.processName })
   }
@@ -66,7 +61,7 @@ export function getRunningTerminals(): Array<{ processName: string | null }> {
  *  process. Used by the quit flow to send Ctrl+C and capture --resume UUIDs. */
 export function getClaudeTerminalIds(): string[] {
   const out: string[] = []
-  for (const terminalId of registeredTerminals.keys()) {
+  for (const terminalId of getTerminalIds()) {
     const activity = lastActivity.get(terminalId)
     if (activity?.type !== 'running') continue
     if (lastAgentPresent.get(terminalId) || activity.processName?.toLowerCase().includes('claude')) {
@@ -76,14 +71,14 @@ export function getClaudeTerminalIds(): string[] {
   return out
 }
 
-// Fast poll: process-tree scan for agent detection — drives the activity
-// indicators and the agent "needs input" / "finished" notifications. It stays
-// at 1s while a window is focused so the UI feels live, but backs off to 5s
-// when the whole app is unfocused: the activity indicators aren't visible then,
-// and agent "needs input" detection is driven by PTY title/spinner events in
-// the renderer (event-based, not this scan), so a few extra seconds of presence
-// latency costs nothing while the scan rate — the real background-CPU/battery
-// drain — drops ~5×. (Each cycle forks one `ps` snapshot per runtime.)
+// Fast poll: activity + agent-pid liveness scan — drives the activity
+// indicators and the finished/notRunning presence edges. It stays at 1s while
+// a window is focused so the UI feels live, but backs off to 5s when the
+// whole app is unfocused: the activity indicators aren't visible then, and
+// agent "needs input" detection is driven by hook events (push-based, not
+// this scan), so a few extra seconds of presence latency costs nothing while
+// the scan rate — the real background-CPU/battery drain — drops ~5×. (Each
+// cycle forks one `ps` snapshot per runtime.)
 const ACTIVITY_POLL_FOCUSED_MS = 1000
 const ACTIVITY_POLL_UNFOCUSED_MS = 5000
 let pollInterval: ReturnType<typeof setInterval> | null = null
@@ -109,9 +104,7 @@ let anyWindowFocused = true
 let focusHooksInstalled = false
 
 function refreshFocusState(): boolean {
-  anyWindowFocused = BrowserWindow.getAllWindows().some(
-    (w) => !w.isDestroyed() && w.isFocused(),
-  )
+  anyWindowFocused = isAnyWindowFocused()
   return anyWindowFocused
 }
 
@@ -145,7 +138,7 @@ function installFocusHooks(): void {
  */
 function groupByRuntime(): Map<Runtime, string[]> {
   const groups = new Map<Runtime, string[]>()
-  for (const terminalId of registeredTerminals.keys()) {
+  for (const terminalId of getTerminalIds()) {
     const runtime = getRuntimeForTerminal(terminalId)
     if (!runtime) continue
     const ids = groups.get(runtime)
@@ -183,19 +176,37 @@ async function runActivityScan(): Promise<void> {
         }
 
         for (const terminalId of toScan) {
-          const info = registeredTerminals.get(terminalId)
-          if (!info) continue
+          const ownerWindowId = getTerminalOwner(terminalId)
+          if (ownerWindowId == null) continue
           const scanned = results[terminalId]
           const prev = previousStates.get(terminalId) || { previousAgentName: null }
           const activity: TerminalActivity = scanned?.activity ?? { type: 'idle' }
           // Carry the last-seen agent name across a transient miss (no flicker).
           const agentName = scanned?.agentName ?? prev.previousAgentName
-          const agentPresent = scanned?.agentPresent ?? false
+          // An entirely-missing entry means the scan had nothing to say about
+          // this pty (SIGSTOP-suspended ptys are omitted from scanActivity
+          // results, or the scan transiently missed it) — carry the previous
+          // presence so no phantom falling edge clears the resume stamp. A
+          // genuinely dead pty resolves via terminal teardown (the sessions-
+          // changed handler below drops its previousStates entry), so a
+          // carried `true` can't outlive the terminal. An entry that IS
+          // present with agentPresent:false is a real answer (agent exited).
+          const agentPresent = scanned ? scanned.agentPresent : (prev.previousAgentPresent ?? false)
 
-          previousStates.set(terminalId, { previousAgentName: agentName })
+          const next: PreviousState = { ...prev, previousAgentName: agentName, previousAgentPresent: agentPresent }
+          previousStates.set(terminalId, next)
           lastActivity.set(terminalId, activity)
           lastAgentPresent.set(terminalId, agentPresent)
-          sendToWindow(info.ownerWindowId, SHELL_ACTIVITY_UPDATE, terminalId, activity, agentName, agentPresent)
+          sendToWindow(ownerWindowId, SHELL_ACTIVITY_UPDATE, terminalId, activity, agentName, agentPresent)
+
+          // Agent-session stamps are hook-pushed ONLY (agentSessionStamps.ts);
+          // this scan owns just the falling edge: the agent exited while the
+          // terminal lives on, so there is nothing to resume. An app quit
+          // kills the poll loop itself, leaving the last stamp persisted —
+          // exactly "what was running at save time".
+          if (!agentPresent && prev.previousAgentPresent) {
+            clearAgentSessionStamp(terminalId)
+          }
         }
       }),
     )
@@ -225,8 +236,8 @@ async function runSlowScan(): Promise<void> {
             ids.map(async (terminalId) => {
               try {
                 const cwd = await runtime.process.getCwd(terminalId)
-                const info = registeredTerminals.get(terminalId)
-                if (cwd && info) sendToWindow(info.ownerWindowId, SHELL_CWD_UPDATE, terminalId, cwd)
+                const ownerWindowId = getTerminalOwner(terminalId)
+                if (cwd && ownerWindowId != null) sendToWindow(ownerWindowId, SHELL_CWD_UPDATE, terminalId, cwd)
               } catch { /* ignore */ }
             }),
           )
@@ -242,10 +253,10 @@ async function runSlowScan(): Promise<void> {
           log.debug('[shell] scanPorts failed: %s', err instanceof Error ? err.message : String(err))
         }
         for (const terminalId of ids) {
-          const info = registeredTerminals.get(terminalId)
-          if (!info) continue
+          const ownerWindowId = getTerminalOwner(terminalId)
+          if (ownerWindowId == null) continue
           const ports = (portMap[terminalId] ?? []).slice().sort((a, b) => a - b)
-          sendToWindow(info.ownerWindowId, SHELL_PORTS_UPDATE, terminalId, ports)
+          sendToWindow(ownerWindowId, SHELL_PORTS_UPDATE, terminalId, ports)
         }
       }),
     )
@@ -261,7 +272,7 @@ async function runSlowScan(): Promise<void> {
  * correct (so a focus flip between this app's own windows doesn't churn timers).
  */
 function applyPollCadence(): void {
-  if (registeredTerminals.size === 0) return
+  if (getTerminalIds().length === 0) return
   const activityMs = anyWindowFocused ? ACTIVITY_POLL_FOCUSED_MS : ACTIVITY_POLL_UNFOCUSED_MS
   const slowMs = anyWindowFocused ? SLOW_POLL_FOCUSED_MS : SLOW_POLL_UNFOCUSED_MS
   if (pollInterval && slowPollInterval && activeActivityMs === activityMs && activeSlowMs === slowMs) {
@@ -288,50 +299,23 @@ function stopPolling(): void {
   activeSlowMs = 0
 }
 
-/**
- * Unregister all terminals owned by a specific window (called on window close).
- */
-export function unregisterTerminalsForWindow(windowId: number): void {
-  for (const [terminalId, info] of registeredTerminals) {
-    if (info.ownerWindowId === windowId) {
-      registeredTerminals.delete(terminalId)
-      previousStates.delete(terminalId)
-      lastActivity.delete(terminalId)
-      lastAgentPresent.delete(terminalId)
-    }
-  }
-  if (registeredTerminals.size === 0) {
-    stopPolling()
-  }
-}
-
 export function registerHandlers(): void {
   installFocusHooks()
-
-  ipcMain.handle(
-    SHELL_REGISTER_TERMINAL,
-    async (event, terminalId: string, _pid?: number) => {
-      // The scans are now keyed by the pty id and run inside the terminal's
-      // runtime ProcessHost (which owns the pid), so we no longer need a local
-      // pid here — only that the terminal resolves to a runtime. (The legacy
-      // `pid` arg is accepted but unused.)
-      const runtime = getRuntimeForTerminal(terminalId)
-      if (!runtime) {
-        log.warn(`[shell] No runtime found for terminal ${terminalId}`)
-        return
+  onTerminalSessionsChanged(() => {
+    const activeIds = new Set(getTerminalIds())
+    for (const terminalId of previousStates.keys()) {
+      if (!activeIds.has(terminalId)) {
+        previousStates.delete(terminalId)
+        lastActivity.delete(terminalId)
+        dropAgentSessionStampState(terminalId)
       }
-
-      const win = windowFromEvent(event)
-      const ownerWindowId = win?.id ?? -1
-
-      registeredTerminals.set(terminalId, { ownerWindowId })
-      previousStates.set(terminalId, { previousAgentName: null })
-
-      // Start (or re-confirm) polling on first registration, at the cadence
-      // matching the current focus state.
-      applyPollCadence()
-    },
-  )
+    }
+    for (const terminalId of activeIds) {
+      if (!previousStates.has(terminalId)) previousStates.set(terminalId, { previousAgentName: null })
+    }
+    if (activeIds.size === 0) stopPolling()
+    else applyPollCadence()
+  })
 
   // Renderer reports screen-derived agent state; rebroadcast so every
   // window's sidebar gets it (the sidebar in the main window won't otherwise
@@ -340,13 +324,4 @@ export function registerHandlers(): void {
     broadcastToAll(SHELL_AGENT_SCREEN_STATE, terminalId, state)
   })
 
-  ipcMain.handle(SHELL_UNREGISTER_TERMINAL, async (_event, terminalId: string) => {
-    registeredTerminals.delete(terminalId)
-    previousStates.delete(terminalId)
-    lastActivity.delete(terminalId)
-    lastAgentPresent.delete(terminalId)
-    if (registeredTerminals.size === 0) {
-      stopPolling()
-    }
-  })
 }

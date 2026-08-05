@@ -16,7 +16,7 @@ import { errorMessage } from '../errorMessage'
 import {
   registry,
   ptyToPanel,
-  pendingTransfers,
+  pendingTerminalStarts,
   failures,
   setPtyForPanel,
   notifyFailure,
@@ -33,21 +33,38 @@ import {
   effectiveCursorBlink,
 } from './terminalSettings'
 import { createTerminalLinkHandler, makeTerminalKeyEventHandler } from './terminalInput'
+import { registerOsc52ClipboardHandler } from './terminalOsc52Clipboard'
 import { createFileLinkProvider, resolveLinkRoot } from './terminalFileLinkProvider'
+import { clearWebglDisabled, releaseWebglGrant } from './terminalDom'
 import { getActiveTheme } from '../themeManager'
 import { useStatusStore } from '../../stores/statusStore'
 import { awaitWorkspaceSync, useAppStore } from '../../stores/appStore'
-import { terminalRestoreData } from './terminalRestoreData'
 import { replayTerminalLog } from '../workspace/session'
 import { extractAgentTitleSegment, shellTitleBasename } from '../agent/agentTitleParser'
-import { titleIndicatesRunning, outputShowsBodySpinner } from '../agent/agentSpinner'
-import { noteAgentTitle, noteAgentSpinnerByte } from '../agent/agentScreenDetector'
 
 interface CreateOpts {
   workspaceId: string
   cwd?: string
   initialInput?: string
+  /** Terminal session-restore: a full agent resume command (e.g.
+   *  `claude --resume <id>`) typed into the fresh shell right after spawn, via
+   *  the real PTY input path. One-shot — the persisted stamp it came from is
+   *  cleared as soon as it is written. */
+  resumeCommand?: string
 }
+
+// A freshly-spawned shell that exits cleanly (code 0) within this window WITHOUT
+// ever producing output never became an interactive session — almost always the
+// user's shell startup files exiting, or a PTY that couldn't be allocated. A bare
+// "[Process exited with code 0]" leaves the user with nothing to act on (see #401),
+// so we print a hint pointing at the usual causes. Generous threshold: a real
+// interactive shell prints its prompt within a few ms, so anything sub-second with
+// zero bytes is the failure mode, not a session the user closed.
+const INSTANT_EXIT_THRESHOLD_MS = 1000
+const INSTANT_EXIT_HINT =
+  '\x1b[33mThe shell exited immediately without starting a session. This usually means your ' +
+  'shell startup files (~/.zshrc, ~/.zprofile, ~/.bashrc) are exiting, or a PTY could not be ' +
+  'allocated. Try a different shell in Settings, or check those files for an early "exit".\x1b[0m\r\n'
 
 /** Drive the panel tab title from an OSC 0/1/2 title — plain shells only.
  *  Agent terminals keep the detected agent name (set by useProcessMonitor and
@@ -64,7 +81,7 @@ function applyOscTitleIfNoAgent(
 ): void {
   const status = useStatusStore.getState()
   const wsId = workspaceIdForPty(ptyId) ?? workspaceId
-  if (status.workspaces[wsId]?.agentName[ptyId]) return
+  if (status.workspaces[wsId]?.terminals[ptyId]?.agentName) return
   useAppStore.getState().updatePanelTitleFromAgent(workspaceId, panelId, shellTitleBasename(title))
 }
 
@@ -115,6 +132,7 @@ export function createAndConfigureXtermTerminal(opts: CreateOpts): ConfiguredTer
     altClickMovesCursor: true,
     minimumContrastRatio: getContrastRatio(),
   })
+  cleanupListeners.push(registerOsc52ClipboardHandler(terminal))
 
   // FitAddon — load before opening so fit() is available immediately
   const fitAddon = new FitAddon()
@@ -162,15 +180,24 @@ export function wireTerminalListeners(args: {
   opts: CreateOpts
   terminal: Terminal
   cleanupListeners: Array<() => void>
+  /** True only for a fresh spawn (getOrCreate). Reconnects (cross-window
+   *  transfer) adopt an already-running PTY that has produced output, so the
+   *  instant-exit diagnostic below must not fire for them. */
+  freshSpawn?: boolean
 }): void {
-  const { panelId, ptyId, opts, terminal, cleanupListeners } = args
+  const { panelId, ptyId, opts, terminal, cleanupListeners, freshSpawn = false } = args
   const { electronAPI } = window
+
+  // Instant-exit diagnostic state — see INSTANT_EXIT_HINT. Wired roughly at
+  // spawn time; `sawOutput` flips on the first byte the PTY ever emits.
+  const spawnedAt = Date.now()
+  let sawOutput = false
 
   // PTY -> xterm: incoming data
   const removeDataListener = electronAPI.onTerminalData((id: string, data: string) => {
     if (id === ptyId) {
+      sawOutput = true
       terminal.write(data)
-      if (outputShowsBodySpinner(data)) noteAgentSpinnerByte(ptyId)
     }
   })
   cleanupListeners.push(removeDataListener)
@@ -185,6 +212,9 @@ export function wireTerminalListeners(args: {
       terminal.write(
         `\r\n\x1b[90m[Process exited with code ${exitCode}]\x1b[0m\r\n`,
       )
+      if (freshSpawn && exitCode === 0 && !sawOutput && Date.now() - spawnedAt < INSTANT_EXIT_THRESHOLD_MS) {
+        terminal.write(INSTANT_EXIT_HINT)
+      }
     }
   })
   cleanupListeners.push(removeExitListener)
@@ -195,12 +225,10 @@ export function wireTerminalListeners(args: {
   const titleDisposable = terminal.onTitleChange((raw) => {
     const parsed = extractAgentTitleSegment(raw)
     if (!parsed) return
-    const running = titleIndicatesRunning(parsed)
     // Defer to a microtask so OSC sequences arriving during xterm.write()
     // (e.g. scrollback replay on attach) don't run set() inside React's
     // commit phase, which would trip "Maximum update depth".
     queueMicrotask(() => {
-      noteAgentTitle(ptyId, running)
       applyOscTitleIfNoAgent(ptyId, opts.workspaceId, panelId, parsed)
     })
   })
@@ -222,8 +250,6 @@ export function wireTerminalListeners(args: {
   })
   cleanupListeners.push(() => resizeDisposable.dispose())
 
-  // Register with shell/process monitor (best-effort)
-  electronAPI.shellRegisterTerminal(ptyId).catch((err) => log.warn('[terminal] Shell register failed:', err))
   useStatusStore.getState().registerTerminal(ptyId, opts.workspaceId)
 }
 
@@ -246,7 +272,7 @@ export async function getOrCreate(panelId: string, opts: CreateOpts): Promise<Re
       // build a fresh terminal for the requesting workspace below.
       dispose(panelId)
     } else {
-      pendingTransfers.delete(panelId) // stale transfer would hijack a future fresh mount
+      if (pendingTerminalStarts.get(panelId)?.kind === 'transfer') pendingTerminalStarts.delete(panelId)
       return existing
     }
   }
@@ -255,9 +281,9 @@ export async function getOrCreate(panelId: string, opts: CreateOpts): Promise<Re
   if (failures.delete(panelId)) notifyFailure(panelId)
 
   // Check for a pending cross-window transfer — reconnect to existing PTY
-  const transfer = pendingTransfers.get(panelId)
-  if (transfer) {
-    pendingTransfers.delete(panelId)
+  const transfer = pendingTerminalStarts.get(panelId)
+  if (transfer?.kind === 'transfer') {
+    pendingTerminalStarts.delete(panelId)
     return reconnectTerminal(panelId, transfer.ptyId, transfer.scrollback, opts)
   }
 
@@ -302,7 +328,8 @@ export async function getOrCreate(panelId: string, opts: CreateOpts): Promise<Re
     const rows = 24
 
     // Resolve cwd: prefer explicit opt, then fall back to restore data
-    const resolvedCwd = opts.cwd ?? terminalRestoreData.get(panelId)?.cwd
+    const pendingRestore = pendingTerminalStarts.get(panelId)
+    const resolvedCwd = opts.cwd ?? (pendingRestore?.kind === 'restore' ? pendingRestore.cwd : undefined)
 
     // If cwd points at a workspace rootPath that was just picked, the main
     // process may not have registered it as an allowed root yet (workspace
@@ -319,6 +346,7 @@ export async function getOrCreate(panelId: string, opts: CreateOpts): Promise<Re
       cwd: resolvedCwd,
       shell: (shell as string) || undefined,
       workspaceId: opts.workspaceId,
+      panelId,
     })
 
     // If the entry was disposed while we were waiting, dispose() couldn't kill
@@ -333,8 +361,9 @@ export async function getOrCreate(panelId: string, opts: CreateOpts): Promise<Re
     setPtyForPanel(panelId, ptyId)
 
     // 6. Wire PTY<->xterm listeners + shell registration (shared with
-    //    reconnectTerminal via wireTerminalListeners).
-    wireTerminalListeners({ panelId, ptyId, opts, terminal, cleanupListeners })
+    //    reconnectTerminal via wireTerminalListeners). freshSpawn: this is a
+    //    brand-new PTY, so the instant-exit diagnostic applies.
+    wireTerminalListeners({ panelId, ptyId, opts, terminal, cleanupListeners, freshSpawn: true })
 
     // 11. Write initialInput immediately — the PTY buffers writes until the
     //     shell is ready to consume them, so a fixed setTimeout was both
@@ -343,8 +372,20 @@ export async function getOrCreate(panelId: string, opts: CreateOpts): Promise<Re
       terminal.write(opts.initialInput)
     }
 
+    // 11b. Resume a persisted agent session: type the resume command into the
+    //      PTY (kernel type-ahead — the shell reads it at its first prompt and
+    //      echoes it like user input). Clear the stamp immediately: if the
+    //      resume succeeds the process monitor re-probes and re-stamps; if the
+    //      id is stale the CLI errors visibly and the next restore is a plain
+    //      shell. Only fresh spawns reach this line, so a remount that reuses
+    //      a live registry entry never re-injects.
+    if (opts.resumeCommand) {
+      void electronAPI.terminalWrite(ptyId, opts.resumeCommand + '\r')
+      useAppStore.getState().setPanelAgentSession(opts.workspaceId, panelId, null)
+    }
+
     // 12. Replay scrollback log if this terminal was restored from a session
-    if (terminalRestoreData.has(panelId)) {
+    if (pendingTerminalStarts.get(panelId)?.kind === 'restore') {
       replayTerminalLog(panelId).catch((err) => log.warn('[terminal] Replay log failed:', err))
     }
   } catch (err) {
@@ -477,7 +518,12 @@ export function finalizeReconnect(panelId: string): void {
  * finds the pending transfer and reconnects instead of spawning a new PTY.
  */
 export function setPendingTransfer(panelId: string, ptyId: string, scrollback?: string): void {
-  pendingTransfers.set(panelId, { ptyId, scrollback })
+  pendingTerminalStarts.set(panelId, { kind: 'transfer', ptyId, scrollback })
+}
+
+export function setPendingRestore(panelId: string, cwd?: string, replayFromId = panelId): void {
+  if (pendingTerminalStarts.get(panelId)?.kind === 'transfer') return
+  pendingTerminalStarts.set(panelId, { kind: 'restore', cwd, replayFromId })
 }
 
 /**
@@ -487,12 +533,11 @@ export function setPendingTransfer(panelId: string, ptyId: string, scrollback?: 
  */
 export function release(panelId: string): void {
   const entry = registry.get(panelId)
+  pendingTerminalStarts.delete(panelId)
   if (!entry) return
 
   registry.delete(panelId)
   if (entry.ptyId) ptyToPanel.delete(entry.ptyId)
-  pendingTransfers.delete(panelId) // stale transfer would hijack a future fresh mount
-
   teardownEntry(entry)
 }
 
@@ -539,21 +584,22 @@ function teardownEntry(entry: RegistryEntry): void {
  */
 export function dispose(panelId: string): void {
   const entry = registry.get(panelId)
+  pendingTerminalStarts.delete(panelId)
   if (!entry) return
 
   // Remove from registry first so re-entrant calls are no-ops
   registry.delete(panelId)
   if (entry.ptyId) ptyToPanel.delete(entry.ptyId)
-  pendingTransfers.delete(panelId) // stale transfer would hijack a future fresh mount
+  clearWebglDisabled(panelId)
+  releaseWebglGrant(panelId)
 
   const { ptyId } = entry
   const { electronAPI } = window
 
-  // Kill PTY and unregister from shell monitor
+  // Kill PTY and clear renderer-owned status.
   if (ptyId) {
     electronAPI.terminalKill(ptyId).catch((err) => log.warn('[terminal] Kill failed:', err))
-    electronAPI.shellUnregisterTerminal(ptyId).catch((err) => log.warn('[terminal] Shell unregister failed:', err))
-    useStatusStore.getState().unregisterTerminal(ptyId)
+    useStatusStore.getState().unregisterTerminal(ptyId, entry.workspaceId)
   }
 
   teardownEntry(entry)

@@ -71,7 +71,11 @@ function buildSnapshot(): { snapshot: SessionSnapshot; canvasSnapshot: CanvasSna
       'web-1': panel({
         id: 'web-1',
         type: 'browser',
-        url: 'http://localhost:3000',
+        tabs: [
+          { id: 'tab-1', url: 'https://docs.example', title: 'Docs' },
+          { id: 'tab-2', url: 'http://localhost:3000', title: 'App' },
+        ],
+        activeTabId: 'tab-2',
         proxyUrl: 'http://user:pass@proxy:8080',
       }),
     },
@@ -102,6 +106,9 @@ describe('workspace.json + session.json round-trip', () => {
     const sessFile = throughDisk(buildSessionFile(snapshot))
     const restored = projectFilesToSnapshot(wsFile, sessFile, ROOT)
 
+    expect(wsFile.panels!['web-1']).not.toHaveProperty('url')
+    expect(wsFile.panels!['web-1'].tabs).toEqual(snapshot.panels!['web-1'].tabs)
+
     // Identity + reconnect metadata.
     expect(restored.workspaceId).toBe('ws-uuid-1')
     expect(restored.workspaceName).toBe('My Repo')
@@ -116,7 +123,8 @@ describe('workspace.json + session.json round-trip', () => {
     expect(restored.panels!['ed-1'].filePath).toBe(`${ROOT}/src/app.ts`)
     expect(restored.panels!['ed-scratch'].unsavedContent).toBe('SCRATCH-CONTENT')
     expect(restored.panels!['term-1'].worktreeId).toBe('wt-1')
-    expect(restored.panels!['web-1'].url).toBe('http://localhost:3000')
+    expect(restored.panels!['web-1'].tabs).toEqual(snapshot.panels!['web-1'].tabs)
+    expect(restored.panels!['web-1'].activeTabId).toBe('tab-2')
     expect(restored.panels!['web-1'].proxyUrl).toBe('http://user:pass@proxy:8080')
     expect(restored.terminalCwds).toEqual({ 'term-1': WORKTREE_PATH })
 
@@ -162,6 +170,26 @@ describe('workspace.json + session.json round-trip', () => {
     expect(sessText).not.toContain('localhost:3000')
   })
 
+  it('round-trips a terminal agent-session stamp through session.json only', () => {
+    const { snapshot } = buildSnapshot()
+    const agentSession = {
+      agentId: 'claude-code',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      cwd: WORKTREE_PATH,
+    }
+    snapshot.panels!['term-1'] = { ...snapshot.panels!['term-1'], agentSession }
+
+    const wsFile = throughDisk(buildWorkspaceFile(snapshot, ROOT, ''))
+    const sessFile = throughDisk(buildSessionFile(snapshot))
+    const restored = projectFilesToSnapshot(wsFile, sessFile, ROOT)
+
+    // The stamp survives restore (TerminalPanel consumes it to type the resume
+    // command) but never reaches the committed workspace.json — session ids
+    // reference stores on this machine's runtime host.
+    expect(restored.panels!['term-1'].agentSession).toEqual(agentSession)
+    expect(JSON.stringify(wsFile)).not.toContain(agentSession.sessionId)
+  })
+
   it('a file outside the workspace root keeps its absolute path through the round trip', () => {
     const { snapshot } = buildSnapshot()
     snapshot.panels!['ed-out'] = panel({
@@ -174,6 +202,39 @@ describe('workspace.json + session.json round-trip', () => {
     const restored = projectFilesToSnapshot(wsFile, null, ROOT)
 
     expect(restored.panels!['ed-out'].filePath).toBe('/etc/hosts')
+  })
+
+  it('round-trips an extension panel so it re-binds to its extension on reload', () => {
+    // Regression: extensionId/extensionPanelId used to be dropped by
+    // buildWorkspaceFile, so a restored extension panel came back with no
+    // extension binding and rendered "Extension unavailable" — even though a
+    // freshly created one worked. They must survive the disk round-trip.
+    const { snapshot } = buildSnapshot()
+    snapshot.panels!['ext-1'] = panel({
+      id: 'ext-1',
+      type: 'extension',
+      title: 'Kitchen Sink',
+      extensionId: 'cate.kitchensink',
+      extensionPanelId: 'main',
+    })
+
+    const wsFile = throughDisk(buildWorkspaceFile(snapshot, ROOT, ''))
+    // The binding is shareable metadata — it belongs in the committed file.
+    expect(wsFile.panels!['ext-1'].extensionId).toBe('cate.kitchensink')
+    expect(wsFile.panels!['ext-1'].extensionPanelId).toBe('main')
+
+    const restored = projectFilesToSnapshot(wsFile, throughDisk(buildSessionFile(snapshot)), ROOT)
+    expect(restored.panels!['ext-1'].type).toBe('extension')
+    expect(restored.panels!['ext-1'].extensionId).toBe('cate.kitchensink')
+    expect(restored.panels!['ext-1'].extensionPanelId).toBe('main')
+  })
+
+  it('leaves the extension binding undefined for non-extension panels', () => {
+    const { snapshot } = buildSnapshot()
+    const wsFile = throughDisk(buildWorkspaceFile(snapshot, ROOT))
+    const restored = projectFilesToSnapshot(wsFile, null, ROOT)
+    expect(restored.panels!['ed-1'].extensionId).toBeUndefined()
+    expect(restored.panels!['ed-1'].extensionPanelId).toBeUndefined()
   })
 
   it('restores from workspace.json alone (no session.json) without machine-local facts', () => {
@@ -205,6 +266,7 @@ describe('workspace.json + session.json round-trip', () => {
       bounds: { x: 50, y: 60, width: 800, height: 600 },
       workspaceId: 'ws-uuid-1',
       terminalCwds: { 'term-2': ROOT },
+      canvasStates: {},
     }
 
     const sessFile = throughDisk(buildSessionFile(snapshot, [dw]))

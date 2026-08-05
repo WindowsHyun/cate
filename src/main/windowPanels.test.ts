@@ -21,10 +21,13 @@ import {
 } from './windowRegistry'
 import {
   setWindowPanels,
+  upsertWindowPanel,
+  removeWindowPanel,
   getWindowPanels,
   revealWindowPanel,
+  closeWindowPanel,
 } from './windowPanels'
-import { WINDOW_PANELS_CHANGED, REVEAL_PANEL_IN_WINDOW } from '../shared/ipc-channels'
+import { WINDOW_PANELS_CHANGED, REVEAL_PANEL_IN_WINDOW, CLOSE_PANEL_IN_WINDOW } from '../shared/ipc-channels'
 import type { WindowPanelInfo, WindowPanelReport, PanelState } from '../shared/types'
 
 // -----------------------------------------------------------------------------
@@ -39,6 +42,9 @@ interface FakeWin {
   focus: ReturnType<typeof vi.fn>
   restore: ReturnType<typeof vi.fn>
   fireClosed: () => void
+  /** Simulates a window that died WITHOUT a clean close: isDestroyed() flips
+   *  true while the union still holds its last report. */
+  destroyed: boolean
   win: never
 }
 
@@ -53,9 +59,10 @@ function makeWin(id: number): FakeWin {
     focus: vi.fn(),
     restore: vi.fn(),
     fireClosed: () => handlers['closed']?.(),
+    destroyed: false,
     win: {
       id,
-      isDestroyed: () => false,
+      isDestroyed: () => fake.destroyed,
       isMinimized: () => false,
       restore: () => fake.restore(),
       focus: () => fake.focus(),
@@ -72,7 +79,7 @@ function makeWin(id: number): FakeWin {
 }
 
 /** Register a window of `type` for `workspaceId` and track it for teardown. */
-function open(id: number, type: 'main' | 'dock' | 'panel', workspaceId?: string): FakeWin {
+function open(id: number, type: 'main' | 'dock', workspaceId?: string): FakeWin {
   const fake = makeWin(id)
   registerWindow(fake.win, type, workspaceId)
   return fake
@@ -101,7 +108,7 @@ describe('cross-window panel discovery (main)', () => {
       { panelId: 't1', type: 'terminal', title: 'Terminal 1', workspaceId: 'ws-A' },
       { panelId: 'e1', type: 'editor', title: 'file.ts', workspaceId: 'ws-A' },
     ])
-    open(102, 'panel', 'ws-B')
+    open(102, 'dock', 'ws-B')
     setWindowPanels(102, [{ panelId: 'p1', type: 'browser', title: 'Docs', workspaceId: 'ws-B' }])
     open(1, 'main', 'ws-A')
     setWindowPanels(1, [{ panelId: 'm1', type: 'terminal', title: 'Main Term', workspaceId: 'ws-A' }])
@@ -109,7 +116,7 @@ describe('cross-window panel discovery (main)', () => {
     const byId = Object.fromEntries(getWindowPanels().map((p) => [p.panelId, p]))
     expect(byId.t1).toMatchObject({ type: 'terminal', title: 'Terminal 1', workspaceId: 'ws-A', ownerWindowId: 101, ownerWindowType: 'dock' })
     expect(byId.e1).toMatchObject({ type: 'editor', ownerWindowType: 'dock' })
-    expect(byId.p1).toMatchObject({ type: 'browser', title: 'Docs', workspaceId: 'ws-B', ownerWindowId: 102, ownerWindowType: 'panel' })
+    expect(byId.p1).toMatchObject({ type: 'browser', title: 'Docs', workspaceId: 'ws-B', ownerWindowId: 102, ownerWindowType: 'dock' })
     expect(byId.m1).toMatchObject({ workspaceId: 'ws-A', ownerWindowId: 1, ownerWindowType: 'main' })
   })
 
@@ -126,6 +133,66 @@ describe('cross-window panel discovery (main)', () => {
     expect(byId.leaf2.parentCanvasId).toBe('cv')
     expect(byId.cv.parentCanvasId).toBeUndefined()
     expect(byId.top.parentCanvasId).toBeUndefined()
+  })
+
+  it('passes through list metadata used by the cross-window Cate API', () => {
+    open(142, 'dock', 'ws-A')
+    setWindowPanels(142, [
+      {
+        panelId: 'browser-docs',
+        type: 'browser',
+        title: 'Docs',
+        workspaceId: 'ws-A',
+        url: 'https://docs.example/',
+        focused: true,
+      },
+      {
+        panelId: 'editor-file',
+        type: 'editor',
+        title: 'a.ts',
+        workspaceId: 'ws-A',
+        filePath: '/workspace/a.ts',
+        focused: false,
+      },
+    ])
+
+    const byId = Object.fromEntries(getWindowPanels().map((p) => [p.panelId, p]))
+    expect(byId['browser-docs']).toMatchObject({ url: 'https://docs.example/', focused: true })
+    expect(byId['editor-file']).toMatchObject({ filePath: '/workspace/a.ts', focused: false })
+  })
+
+  it('makes one provisional panel routable until the next full renderer report', () => {
+    open(143, 'main', 'ws-A')
+    setWindowPanels(143, [report('existing', 'terminal', 'Terminal')])
+
+    upsertWindowPanel(143, {
+      panelId: 'fresh-browser',
+      type: 'browser',
+      title: 'https://example.com',
+      workspaceId: 'ws-A',
+      url: 'https://example.com',
+      focused: false,
+    })
+    expect(getWindowPanels().map((panel) => panel.panelId)).toEqual(['existing', 'fresh-browser'])
+
+    setWindowPanels(143, [report('existing', 'terminal', 'Terminal')])
+    expect(getWindowPanels().map((panel) => panel.panelId)).toEqual(['existing'])
+  })
+
+  it('evicts a closed panel immediately, before the owner\'s next full report', () => {
+    // The close-side mirror of the provisional upsert: without eviction, a
+    // close-then-list caller sees the stale union row for a whole report
+    // interval and reads the panel as still open.
+    const main = open(144, 'main', 'ws-A')
+    setWindowPanels(144, [report('keep', 'terminal', 'Terminal'), report('doomed', 'browser', 'Web')])
+
+    const before = broadcastsTo(main).length
+    removeWindowPanel('doomed')
+    expect(getWindowPanels().map((panel) => panel.panelId)).toEqual(['keep'])
+    expect(broadcastsTo(main).length).toBeGreaterThan(before)
+
+    removeWindowPanel('unknown') // absent id: no change, no broadcast
+    expect(getWindowPanels().map((panel) => panel.panelId)).toEqual(['keep'])
   })
 
   it('passes through the panel worktreeId so the overview can tint detached rows', () => {
@@ -205,6 +272,36 @@ describe('cross-window panel discovery (main)', () => {
     expect(revealWindowPanel('nope')).toBe(false)
   })
 
+  it('closes a panel by focusing its owner window and asking IT to run the close (behind its gates)', () => {
+    open(1, 'main', 'ws-A')
+    const dock = open(160, 'dock', 'ws-A')
+    setWindowPanels(160, [report('t1', 'terminal', 'Terminal 1')])
+
+    expect(closeWindowPanel('t1')).toBe(true)
+    // Focused first so the owner's confirm dialogs are visible.
+    expect(dock.focus).toHaveBeenCalled()
+    const close = dock.sent.filter((m) => m.channel === CLOSE_PANEL_IN_WINDOW)
+    expect(close).toHaveLength(1)
+    expect(close[0].args[0]).toBe('t1')
+
+    // Unknown panel → not found, nothing sent anywhere.
+    expect(closeWindowPanel('nope')).toBe(false)
+  })
+
+  it('closeWindowPanel returns false when the owning window died without a clean close', () => {
+    const dock = open(161, 'dock', 'ws-A')
+    setWindowPanels(161, [report('t2', 'terminal', 'Terminal 2')])
+    expect(getWindowPanels()).toHaveLength(1)
+
+    // The window is destroyed but 'closed' never fired, so the union still
+    // holds its stale report — closeWindowPanel must not target a dead window.
+    dock.destroyed = true
+
+    expect(closeWindowPanel('t2')).toBe(false)
+    expect(dock.sent.filter((m) => m.channel === CLOSE_PANEL_IN_WINDOW)).toHaveLength(0)
+    expect(dock.focus).not.toHaveBeenCalled()
+  })
+
   it('does NOT drive discovery from the dock session-persistence sync', () => {
     const main = open(1, 'main', 'ws-A')
     open(150, 'dock', 'ws-A')
@@ -215,6 +312,7 @@ describe('cross-window panel discovery (main)', () => {
     setDockWindowState(150, {
       dockState: { zones: {} } as never,
       panels: { t1: { id: 't1', type: 'terminal', title: 'Terminal 1', isDirty: false } as PanelState },
+      canvasStates: {},
     })
 
     expect(broadcastsTo(main).length).toBe(before)

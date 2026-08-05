@@ -11,31 +11,28 @@
 
 import { describe, it, expect, afterEach } from 'vitest'
 import {
-  registerCanvasOps,
-  unregisterCanvasOps,
   placementForActivePanel,
+  placementForBackgroundPanel,
   getActiveCanvasPanelId,
 } from './canvasAccess'
-import type { CanvasOperations } from '../canvas/canvasBridge'
 import { setActivePanel } from '../activePanel'
-
-// placementForActivePanel only consults the ops REGISTRY for the canvas-active
-// branch, so a stub is sufficient — no real canvas store needed.
-const stubOps = {} as CanvasOperations
+import { getOrCreateCanvasStoreForPanel, releaseCanvasStoreForPanel } from '../../stores/canvasStore'
+import { useAppStore } from '../../stores/appStore'
 
 const PRIMARY = 'canvas-primary'
 const SECONDARY = 'canvas-secondary'
 
 afterEach(() => {
-  unregisterCanvasOps(PRIMARY)
-  unregisterCanvasOps(SECONDARY)
+  releaseCanvasStoreForPanel(PRIMARY)
+  releaseCanvasStoreForPanel(SECONDARY)
   setActivePanel(null)
+  useAppStore.setState({ selectedWorkspaceId: '' })
 })
 
 describe('placementForActivePanel with multiple canvases', () => {
   it('pins the placement to the ACTIVE canvas, not the primary one', () => {
-    registerCanvasOps(PRIMARY, stubOps)
-    registerCanvasOps(SECONDARY, stubOps)
+    getOrCreateCanvasStoreForPanel(PRIMARY)
+    getOrCreateCanvasStoreForPanel(SECONDARY)
     setActivePanel(SECONDARY)
 
     expect(placementForActivePanel()).toEqual({
@@ -45,8 +42,8 @@ describe('placementForActivePanel with multiple canvases', () => {
   })
 
   it('pins to the primary canvas when that one is active', () => {
-    registerCanvasOps(PRIMARY, stubOps)
-    registerCanvasOps(SECONDARY, stubOps)
+    getOrCreateCanvasStoreForPanel(PRIMARY)
+    getOrCreateCanvasStoreForPanel(SECONDARY)
     setActivePanel(PRIMARY)
 
     expect(placementForActivePanel()).toEqual({
@@ -60,10 +57,34 @@ describe('placementForActivePanel with multiple canvases', () => {
   })
 
   it('getActiveCanvasPanelId resolves the active secondary canvas', () => {
-    registerCanvasOps(PRIMARY, stubOps)
-    registerCanvasOps(SECONDARY, stubOps)
+    getOrCreateCanvasStoreForPanel(PRIMARY)
+    getOrCreateCanvasStoreForPanel(SECONDARY)
     setActivePanel(SECONDARY)
 
     expect(getActiveCanvasPanelId()).toBe(SECONDARY)
+  })
+
+  it('background placement pins the active canvas without requesting focus', () => {
+    getOrCreateCanvasStoreForPanel(PRIMARY)
+    getOrCreateCanvasStoreForPanel(SECONDARY)
+    setActivePanel(SECONDARY)
+    useAppStore.setState({ selectedWorkspaceId: 'ws-active' })
+
+    expect(placementForBackgroundPanel('ws-active')).toEqual({
+      target: 'canvas',
+      canvasPanelId: SECONDARY,
+      focus: false,
+    })
+  })
+
+  it('does not pin a visible canvas that belongs to another workspace', () => {
+    getOrCreateCanvasStoreForPanel(SECONDARY)
+    setActivePanel(SECONDARY)
+    useAppStore.setState({ selectedWorkspaceId: 'ws-visible' })
+
+    expect(placementForBackgroundPanel('ws-background')).toEqual({
+      target: 'canvas',
+      focus: false,
+    })
   })
 })

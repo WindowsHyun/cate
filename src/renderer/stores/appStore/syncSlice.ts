@@ -5,6 +5,7 @@
 // =============================================================================
 
 import type { AppSet, AppGet, AppStoreActions } from './types'
+import { rememberedGroupIds } from './helpers'
 
 type SyncSliceActions = Pick<AppStoreActions, 'mergeWorkspaceInfos'>
 
@@ -34,18 +35,24 @@ export function createSyncSlice(set: AppSet, _get: AppGet): SyncSliceActions {
               color: info.color,
               rootPath: info.rootPath,
               connection: info.connection ?? existing.connection,
+              // groupId is renderer-owned (main sends none) — keep the existing
+              // assignment, falling back to the remembered one by rootPath.
+              groupId: existing.groupId || rememberedGroupIds.get(info.rootPath),
               rootPathError: null,
               isRootPathPending: false,
             })
             }
           } else {
-            // New workspace from another window — create empty local state
+            // New workspace from another window — create empty local state. Re-apply
+            // any remembered group assignment for this rootPath so a partial main
+            // broadcast that churned this row during restore doesn't drop its group.
             existingMap.set(info.id, {
               id: info.id,
               name: info.name,
               color: info.color,
               rootPath: info.rootPath,
               connection: info.connection,
+              groupId: rememberedGroupIds.get(info.rootPath),
               rootPathError: null,
               isRootPathPending: false,
               panels: {},

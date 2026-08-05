@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Check, Trash, Upload, DownloadSimple, Sparkle } from '@phosphor-icons/react'
 import { Tooltip } from '../ui/Tooltip'
 import { useSettingsStore } from '../stores/settingsStore'
-import { SettingRow, Select, NumberInput, TextInput, SearchableBlock, SecondaryButton } from './SettingsComponents'
+import { SettingRow, Select, NumberInput, TextInput, Toggle, SearchableBlock, SecondaryButton } from './SettingsComponents'
 import type { Theme } from '../../shared/types'
 import { validateTheme } from '../../shared/theme'
 import { BASE_DARK, BASE_LIGHT, BUILT_IN_THEMES } from '../../shared/themes'
@@ -193,6 +193,23 @@ export function AppearanceSettings() {
           placeholder="e.g., JetBrains Mono"
         />
       </SettingRow>
+
+      <SearchableBlock keywords="gpu rasterization rendering glyph text missing garbled corruption render acceleration restart">
+        <SettingRow
+          label="Disable GPU text rendering"
+          description="Fixes occasional missing or garbled glyphs by rasterizing text on the CPU. May slightly increase CPU use during canvas zoom. Takes effect after restarting Cate."
+          hint={
+            store.disableGpuRasterization ? (
+              <span className="text-[11px] text-amber-400">Restart Cate for this to take effect.</span>
+            ) : undefined
+          }
+        >
+          <Toggle
+            checked={store.disableGpuRasterization}
+            onChange={(v) => store.setSetting('disableGpuRasterization', v)}
+          />
+        </SettingRow>
+      </SearchableBlock>
     </div>
   )
 }
@@ -214,7 +231,7 @@ function CardShell({
       {children}
       {active && (
         <span className="absolute top-1.5 right-1.5 text-focus-blue">
-          <Check size={13} weight="bold" />
+          <Check size={13} />
         </span>
       )}
     </div>
@@ -261,7 +278,7 @@ function ThemeCard({
           <Tooltip label="Export theme">
             <button
               onClick={(e) => { e.stopPropagation(); onExport() }}
-              className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-muted hover:text-primary transition-opacity"
+              className="opacity-0 group-hover:opacity-100 p-0.5 rounded-lg text-muted hover:text-primary transition-opacity"
               aria-label="Export theme"
             >
               <DownloadSimple size={12} />
@@ -271,7 +288,7 @@ function ThemeCard({
             <Tooltip label="Remove theme">
               <button
                 onClick={(e) => { e.stopPropagation(); onDelete() }}
-                className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-muted hover:text-red-400 transition-opacity"
+                className="opacity-0 group-hover:opacity-100 p-0.5 rounded-lg text-muted hover:text-red-400 transition-opacity"
                 aria-label="Remove theme"
               >
                 <Trash size={12} />

@@ -62,7 +62,11 @@ function revealDockTab(
   return true
 }
 
-function revealOnce(workspaceId: string, panelId: string): boolean {
+/** Synchronous reveal for a panel already known to be in `workspaceId` (no
+ *  workspace switch, no retry). Exported for callers that already hold the
+ *  panel id and just need it brought to the front (e.g. a duplicate-open
+ *  check that found an existing panel for the requested file). */
+export function revealOnce(workspaceId: string, panelId: string): boolean {
   const location = resolvePanelLocation(workspaceId, panelId)
   if (!location) return false
 

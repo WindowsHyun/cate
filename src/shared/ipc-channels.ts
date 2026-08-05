@@ -13,6 +13,13 @@ export const TERMINAL_GET_CWD = 'terminal:getCwd'
 export const TERMINAL_LOG_READ = 'terminal:logRead'
 export const TERMINAL_SCROLLBACK_SAVE = 'terminal:scrollbackSave'
 export const TERMINAL_SET_VISIBILITY = 'terminal:setVisibility'
+export const TERMINAL_CLIPBOARD_WRITE = 'terminal:clipboardWrite'
+
+// WebGL context budget — process-wide cap on terminal WebGL renderers, brokered
+// by main because Chromium's live-context limit is per GPU process (shared
+// across every window). See src/main/webglBudget.ts.
+export const WEBGL_REQUEST_GRANT = 'webgl:requestGrant'
+export const WEBGL_RELEASE_GRANT = 'webgl:releaseGrant'
 
 // Filesystem
 export const FS_READ_FILE = 'fs:readFile'
@@ -41,6 +48,7 @@ export const SHELL_SHOW_IN_FOLDER = 'shell:showInFolder'
 
 // Git
 export const GIT_IS_REPO = 'git:isRepo'
+export const GIT_FIND_REPOS = 'git:findRepos'
 export const GIT_INIT = 'git:init'
 export const GIT_LS_FILES = 'git:lsFiles'
 export const GIT_BRANCH_UPDATE = 'git:branch-update'         // main -> renderer
@@ -76,14 +84,19 @@ export const GIT_STASH_POP = 'git:stashPop'
 export const GIT_DISCARD_FILE = 'git:discardFile'
 
 // Shell / Process Monitor
-export const SHELL_REGISTER_TERMINAL = 'shell:registerTerminal'
-export const SHELL_UNREGISTER_TERMINAL = 'shell:unregisterTerminal'
 export const SHELL_ACTIVITY_UPDATE = 'shell:activityUpdate' // main -> renderer
 export const SHELL_PORTS_UPDATE = 'shell:ports-update'       // main -> renderer
 export const SHELL_CWD_UPDATE = 'shell:cwd-update'           // main -> renderer
+export const SHELL_AGENT_SESSION_UPDATE = 'shell:agentSessionUpdate' // main -> renderer
 // Renderer (where the xterm buffer lives) reports the agent's screen-derived
 // state up to main; main re-broadcasts so every window's sidebar agrees.
 export const SHELL_AGENT_SCREEN_STATE = 'shell:agentScreenState'
+// Normalized push-based agent-CLI hook event (session identity / turn status /
+// permission-wait, ingested by the runtime daemon) — main -> owning window.
+export const SHELL_AGENT_HOOK_EVENT = 'shell:agentHookEvent'
+// Inspect a workspace's per-agent hook-file injection state (folder present /
+// injected) for the Settings UI — renderer -> main (invoke).
+export const AGENT_HOOKS_INSPECT = 'agentHooks:inspect'
 
 // Settings
 export const SETTINGS_GET = 'settings:get'
@@ -123,6 +136,14 @@ export const WORKSPACE_EXTERNAL_EDIT = 'project:externalEdit' // main -> rendere
 // Renderer tells main the user declined the reload prompt — resume saving so
 // the current in-app layout overwrites the external edit.
 export const WORKSPACE_EXTERNAL_EDIT_DISMISS = 'project:externalEditDismiss' // renderer -> main
+
+// Per-workspace Cate Agent enablement (.cate/cateAgent.json).
+export const PROJECT_CATE_AGENT_LOAD = 'project:cateAgentLoad' // renderer -> main
+export const PROJECT_CATE_AGENT_SAVE = 'project:cateAgentSave' // renderer -> main
+
+// Per-workspace Cate Agent chats (.cate/chats.json) — the agent's front door.
+export const PROJECT_CHATS_LOAD = 'project:chatsLoad' // renderer -> main
+export const PROJECT_CHATS_SAVE = 'project:chatsSave' // renderer -> main
 
 // Boot snapshot — a tiny JSON file (geometry, theme, last workspace id, native
 // tabs flag) written by the renderer whenever the relevant settings change.
@@ -207,6 +228,7 @@ export const DIALOG_CONFIRM_CLOSE_TERMINAL = 'dialog:confirmCloseTerminal'
 export const DIALOG_CONFIRM_CLOSE_CANVAS = 'dialog:confirmCloseCanvas'
 export const DIALOG_CONFIRM_IMPORT = 'dialog:confirmImport'
 export const DIALOG_CONFIRM_RELOAD_WORKSPACE = 'dialog:confirmReloadWorkspace'
+export const DIALOG_CONFIRM_DISCARD_JOB = 'dialog:confirmDiscardJob'
 export const DIALOG_TERMINAL_LINK_OPEN = 'dialog:terminalLinkOpen'
 
 // Canvas wallpaper — read an arbitrary image file as a data URL (the file is
@@ -237,6 +259,20 @@ export const SIDEBAR_SESSION_SET = 'sidebar-session:set'
 // cate-runtime:// workspaces, which can't use the local .cate/ files)
 export const REMOTE_PROJECTS_GET = 'remote-projects:get'
 export const REMOTE_PROJECTS_SET = 'remote-projects:set'
+
+// Browser history + bookmarks (global, shared across all workspaces/windows so
+// browser panels behave like one consistent browser; see browserStateStore)
+export const BROWSER_HISTORY_RECORD = 'browser-history:record'
+export const BROWSER_HISTORY_GET = 'browser-history:get'
+export const BROWSER_HISTORY_QUERY = 'browser-history:query'
+export const BROWSER_HISTORY_REMOVE = 'browser-history:remove'
+export const BROWSER_HISTORY_CLEAR = 'browser-history:clear'
+export const BROWSER_HISTORY_CHANGED = 'browser-history:changed' // main -> renderer broadcast
+export const BROWSER_BOOKMARKS_GET = 'browser-bookmarks:get'
+export const BROWSER_BOOKMARKS_ADD = 'browser-bookmarks:add'
+export const BROWSER_BOOKMARKS_REMOVE = 'browser-bookmarks:remove'
+export const BROWSER_BOOKMARKS_CHANGED = 'browser-bookmarks:changed' // main -> renderer broadcast
+export const BROWSER_CLEAR_DATA = 'browser:clearData' // clear shared-session cookies/cache/storage + history
 
 // Layouts
 export const LAYOUT_SAVE = 'layout:save'
@@ -278,7 +314,6 @@ export const PANEL_WINDOW_SYNC_PTY = 'panel:windowSyncPty' // renderer -> main
 // Dock-back — re-integrate a transferred panel into the main window (shared by
 // dock windows via the title-bar double-click).
 export const PANEL_WINDOW_DOCK_BACK = 'panel:dockBack'  // renderer -> main
-
 // Cross-window drag-and-drop
 export const DRAG_START = 'drag:start'
 export const DRAG_DETACH = 'drag:detach'
@@ -306,6 +341,8 @@ export const DOCK_WINDOW_FLUSH_SYNC_DONE = 'dock:windowFlushSyncDone' // rendere
 export const WINDOW_PANELS_CHANGED = 'window:panelsChanged'   // main -> renderer (broadcast)
 export const FOCUS_WINDOW_PANEL = 'window:focusPanel'         // renderer -> main
 export const REVEAL_PANEL_IN_WINDOW = 'detached:revealPanelInWindow' // main -> owning renderer
+export const CLOSE_WINDOW_PANEL = 'window:closePanel'         // renderer -> main
+export const CLOSE_PANEL_IN_WINDOW = 'detached:closePanelInWindow' // main -> owning renderer
 export const WINDOW_PANELS_REPORT = 'window:panelsReport'     // renderer -> main (this window's panels)
 
 // Cross-window drag coordination
@@ -377,6 +414,7 @@ export const SKILLS_SET_TOKEN = 'skills:setToken'             // renderer -> mai
 // Pi auth / providers
 export const AUTH_LIST_PROVIDERS = 'auth:listProviders'
 export const AUTH_STATUS = 'auth:status'
+export const AUTH_VERIFY = 'auth:verify'
 export const AUTH_OAUTH_START = 'auth:oauthStart'
 export const AUTH_OAUTH_PROMPT_REPLY = 'auth:oauthPromptReply' // renderer -> main
 export const AUTH_OAUTH_EVENT = 'auth:oauthEvent'              // main -> renderer
@@ -400,8 +438,43 @@ export const RUNTIME_INSTALL = 'runtime:install'       // renderer -> main (expl
 export const RUNTIME_DELETE = 'runtime:delete'         // renderer -> main (rm -rf the host install, keep saved auth)
 export const RUNTIME_STATUS = 'runtime:status'         // main -> renderer (broadcast)
 export const RUNTIME_LOCAL_STATUS = 'runtime:local-status' // renderer -> main (current LOCAL phase, seeds the loading blocker)
+export const RUNTIME_RETRY_LOCAL = 'runtime:retry-local' // renderer -> main (relaunch the built-in LOCAL daemon after a failed connect)
 export const RUNTIME_PICK_SSH_KEY = 'runtime:pick-ssh-key' // renderer -> main (native file picker for an SSH private key)
 
 
 // Performance profiler (only active under CATE_PERF=1)
 export const PERF_GET = 'perf:get' // renderer -> main (pull latest resource snapshot)
+
+// =============================================================================
+// Extensions
+// =============================================================================
+
+// Extension management (renderer <-> main)
+export const EXTENSION_LIST = 'extension:list'                 // renderer -> main: active manifests + enable state
+export const EXTENSION_ENABLE = 'extension:enable'             // renderer -> main
+export const EXTENSION_DISABLE = 'extension:disable'           // renderer -> main
+export const EXTENSION_ADD_SIDELOAD = 'extension:addSideload'  // renderer -> main: register a local dev folder
+export const EXTENSION_REMOVE_SIDELOAD = 'extension:removeSideload' // renderer -> main
+export const EXTENSION_CATALOG_REFRESH = 'extension:catalogRefresh' // renderer -> main: re-fetch catalog sources + cache
+export const EXTENSION_INSTALL = 'extension:install'          // renderer -> main: download + extract a catalog extension
+export const EXTENSION_UNINSTALL = 'extension:uninstall'      // renderer -> main: disable + remove an installed catalog extension from disk
+export const EXTENSION_REINSTALL = 'extension:reinstall'      // renderer -> main: re-download the installed version (repair)
+export const EXTENSION_UPDATE = 'extension:update'            // renderer -> main: install the catalog's newer version, drop the old one
+export const EXTENSION_ADD_CATALOG_SOURCE = 'extension:addCatalogSource'    // renderer -> main
+export const EXTENSION_REMOVE_CATALOG_SOURCE = 'extension:removeCatalogSource' // renderer -> main
+export const EXTENSION_CATALOG_SOURCES = 'extension:catalogSources' // renderer -> main: current source URL list
+export const EXTENSION_PROXY_URL = 'extension:proxyUrl'        // renderer -> main: resolve webview URL for (extensionId, workspaceId, panelId)
+export const EXTENSION_PANEL_CLOSED = 'extension:panelClosed'  // renderer -> main: a server-backed panel unmounted (start grace)
+export const EXTENSION_SERVER_RESTART = 'extension:serverRestart' // renderer -> main: manual restart of a crashed/errored server
+export const EXTENSIONS_CHANGED = 'extension:changed'          // main -> renderer (broadcast)
+
+// Extension reverse API ("cateHost" bridge, webview-guest <-> main)
+export const CATE_HOST_INVOKE = 'cate:invoke'        // guest -> main: { extensionId, workspaceId, panelId, method, args } -> result
+export const CATE_HOST_SUBSCRIBE = 'cate:subscribe'  // guest -> main: { extensionId, workspaceId, panelId, topic }
+export const CATE_HOST_UNSUBSCRIBE = 'cate:unsubscribe' // guest -> main
+export const CATE_HOST_EVENT = 'cate:event'          // main -> guest: { panelId, topic, payload }
+
+// Forward a reverse-API call that mutates renderer state to the guest's owner
+// window and await its reply (editor.openFile, canvas.createPanel, panel.setTitle).
+export const CATE_HOST_FORWARD = 'cate:hostAction'        // main -> renderer: { requestId, workspaceId, panelId, extensionId, method, args }
+export const CATE_HOST_FORWARD_REPLY = 'cate:hostActionReply' // renderer -> main: { requestId, ok, result?, error? }

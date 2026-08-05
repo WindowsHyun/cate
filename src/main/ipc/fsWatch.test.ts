@@ -30,10 +30,10 @@ vi.mock('../store', () => ({
 const { registerHandlers } = await import('./filesystem')
 const { addAllowedRoot, removeAllowedRoot } = await import('./pathValidation')
 const { FS_WATCH_START, FS_WATCH_STOP, FS_WATCH_EVENT } = await import('../../shared/ipc-channels')
-const { registerTestLocalRuntime } = await import('../runtime/testLocalRuntime')
+const { registerTestDaemonRuntime } = await import('../runtime/testHarness')
 
 registerHandlers()
-registerTestLocalRuntime()
+registerTestDaemonRuntime(['node_modules'])
 const watchStart = handlers.get(FS_WATCH_START)!
 const watchStop = handlers.get(FS_WATCH_STOP)!
 const fakeEvent = { sender: {} } as unknown
@@ -70,13 +70,13 @@ describe('fs watch events for nested paths', () => {
     // realpath so the registered allowed root matches validatePathStrict's
     // symlink-resolved comparison (e.g. /tmp → /private/tmp on macOS).
     root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cate-watch-')))
-    addAllowedRoot(root)
+    addAllowedRoot(root, 'local')
     sendToWindow.mockClear()
   })
 
   afterEach(async () => {
     await watchStop(fakeEvent, root)
-    removeAllowedRoot(root)
+    removeAllowedRoot(root, 'local')
     await fs.rm(root, { recursive: true, force: true })
   })
 
@@ -84,17 +84,25 @@ describe('fs watch events for nested paths', () => {
   // the workspace root never reported changes to files nested deeper than one
   // level — the editor's external-reload (and git status / explorer refresh)
   // silently missed edits to virtually every real source file.
+  //
+  // Accept either `update` or `create`: macOS's native recursive watcher
+  // (issue #398) reports a content modify of an existing file as a `rename`,
+  // which the adapter maps to `create`. Downstream that's identical to `update`
+  // (classifyExternalEvent treats create/update the same; the file tree just
+  // re-reads on-disk state), so the meaningful assertion is "a change event for
+  // this deep path is delivered at all".
   test('reports updates to a file nested several levels below the watch root', async () => {
     const nestedDir = path.join(root, 'src', 'renderer', 'panels')
     const nestedFile = path.join(nestedDir, 'deep.txt')
     await fs.mkdir(nestedDir, { recursive: true })
     await fs.writeFile(nestedFile, 'v0', 'utf8')
 
-    await watchStart(fakeEvent, root)
+    await watchStart(fakeEvent, root, 'local')
 
     let rev = 0
     const seen = await waitForWatchEvent(
-      (event) => event.type === 'update' && event.path === nestedFile,
+      (event) =>
+        (event.type === 'update' || event.type === 'create') && event.path === nestedFile,
       () => fs.writeFile(nestedFile, `v${++rev}`, 'utf8'),
     )
     expect(seen).toBe(true)
@@ -108,7 +116,7 @@ describe('fs watch events for nested paths', () => {
     await fs.writeFile(excludedFile, 'v0', 'utf8')
     await fs.writeFile(markerFile, 'v0', 'utf8')
 
-    await watchStart(fakeEvent, root)
+    await watchStart(fakeEvent, root, 'local')
 
     // Poke both files; once the marker's event arrives the watcher is provably
     // live, so the absence of the excluded file's event is meaningful.

@@ -14,6 +14,7 @@ import type {
   Point,
   DockStateSnapshot,
   RuntimeConnection,
+  WorkspaceGroup,
 } from '../../../shared/types'
 import { ACCENT_COLORS } from '../../../shared/colors'
 import { BASE_DARK, BASE_LIGHT } from '../../../shared/themes'
@@ -52,6 +53,71 @@ export async function hydrateWorkspaceFromDisk(wsId: string): Promise<void> {
 
 /** Workspace accent colors — re-exported from the shared accent palette. */
 export const WORKSPACE_COLORS = ACCENT_COLORS
+
+export const GROUP_COLORS = [
+  { label: 'Cyan', value: 'cyan' },
+  { label: 'Teal', value: 'teal' },
+  { label: 'Blue', value: 'blue' },
+  { label: 'Purple', value: 'purple' },
+  { label: 'Pink', value: 'pink' },
+  { label: 'Red', value: 'red' },
+  { label: 'Orange', value: 'orange' },
+  { label: 'Yellow', value: 'yellow' },
+  { label: 'Green', value: 'green' },
+  { label: 'Gray', value: 'gray' },
+] as const
+
+export const GROUP_COLOR_MAP: Record<string, string> = {
+  cyan:   'bg-cyan-500',
+  teal:   'bg-teal-500',
+  blue:   'bg-blue-500',
+  purple: 'bg-purple-500',
+  pink:   'bg-pink-500',
+  red:    'bg-red-500',
+  orange: 'bg-orange-500',
+  yellow: 'bg-yellow-400',
+  green:  'bg-green-500',
+  gray:   'bg-zinc-500',
+}
+
+// Renderer-owned group assignments, remembered by rootPath. main does NOT track
+// groupId, so its cross-window workspace broadcast (onWorkspaceChanged →
+// mergeWorkspaceInfos) carries none. During restore the renderer optimistically
+// creates N workspaces before main acknowledges them; main's lagging partial
+// broadcast then removes the not-yet-known rows and re-adds them as "new"
+// (groupId-less), silently unsetting groups on every multi-workspace restart.
+// This map lets the merge re-apply the correct group. Seeded from the restored
+// workspaceGroupMap and kept current by every group mutation.
+export const rememberedGroupIds = new Map<string, string>()
+export function rememberWorkspaceGroup(rootPath: string | null | undefined, groupId: string | null | undefined): void {
+  if (!rootPath) return
+  if (groupId) rememberedGroupIds.set(rootPath, groupId)
+  else rememberedGroupIds.delete(rootPath)
+}
+export function seedRememberedGroups(map: Record<string, string> | undefined): void {
+  if (!map) return
+  for (const [rootPath, groupId] of Object.entries(map)) {
+    if (typeof rootPath === 'string' && typeof groupId === 'string') rememberedGroupIds.set(rootPath, groupId)
+  }
+}
+
+/** Persist group list to sidebar.json immediately after any group mutation that
+ *  isn't covered by the session autosave (add/remove/update/toggle). */
+export function persistGroupsToSidebar(state: { workspaces: WorkspaceState[]; selectedWorkspaceId: string; workspaceGroups: WorkspaceGroup[] }): void {
+  if (typeof window === 'undefined' || !window.electronAPI) return
+  const order = state.workspaces.filter((w) => w.rootPath).map((w) => w.rootPath)
+  const selected = state.workspaces.find((w) => w.id === state.selectedWorkspaceId)?.rootPath ?? ''
+  const workspaceGroupMap: Record<string, string> = {}
+  for (const ws of state.workspaces) {
+    if (ws.rootPath && ws.groupId) workspaceGroupMap[ws.rootPath] = ws.groupId
+  }
+  window.electronAPI.sidebarSessionSet({
+    order,
+    selected,
+    groups: state.workspaceGroups.length > 0 ? state.workspaceGroups : undefined,
+    workspaceGroupMap: Object.keys(workspaceGroupMap).length > 0 ? workspaceGroupMap : undefined,
+  }).catch(() => {})
+}
 
 export function createDefaultWorkspace(
   name?: string,
@@ -106,6 +172,12 @@ export function applyWorkspaceInfo(ws: WorkspaceState, info: WorkspaceInfo): Wor
     color: info.color,
     rootPath: info.rootPath,
     connection: info.connection ?? ws.connection,
+    // groupId is RENDERER-owned — main doesn't track it and echoes back an empty
+    // string in WorkspaceInfo. `??` only guards null/undefined, so an empty-string
+    // echo would WIPE a just-assigned/just-restored group (the async create-sync
+    // response landing after restore set groupId from workspaceGroupMap). Use `||`
+    // so any falsy echo (''/undefined) preserves the renderer's groupId.
+    groupId: info.groupId || ws.groupId,
     rootPathError: null,
     isRootPathPending: false,
   }
@@ -230,7 +302,6 @@ export function pickWorktreeColor(existing: { color: string }[]): string {
 export function createCleanDockSnapshot(): DockStateSnapshot {
   return {
     zones: createDefaultDockState(),
-    locations: {},
   }
 }
 
@@ -255,7 +326,8 @@ function placePanel(
   const dockStore = getOrCreateWorkspaceDockStore(workspaceId)
   // Canvas panels go to the center dock zone, not onto a canvas as a node
   if (panelType === 'canvas') {
-    dockStore.getState().dockPanel(panelId, 'center')
+    const activate = placement?.target !== 'canvas' || placement.focus !== false
+    dockStore.getState().dockPanel(panelId, 'center', undefined, activate)
     return
   }
   if (placement?.target === 'dock') {
@@ -297,11 +369,14 @@ function placePanel(
   // panel back). When the setting is off — or for a background restore — fall
   // through and auto-place in the best spot. Explicit-position paths (drag-drop,
   // session restore, right-click "new here") always skip the picker.
-  if (isActiveWorkspace && canvasPosition == null && onGhostCancel && useSettingsStore.getState().placementPicker) {
+  // Background create (`focus: false`): never interactive — no ghost picker, no
+  // focus steal, no camera move; the node is just added at its position.
+  const focus = placement?.target !== 'canvas' || placement.focus !== false
+  if (focus && isActiveWorkspace && canvasPosition == null && onGhostCancel && useSettingsStore.getState().placementPicker) {
     const shown = ops.beginPlacement(panelId, panelType, onGhostCancel, canvasSize)
     if (shown) return
   }
-  ops.addNodeAndFocus(panelId, panelType, canvasPosition, canvasSize)
+  ops.addNodeAndFocus(panelId, panelType, canvasPosition, canvasSize, focus)
 }
 
 /** Next "<base> N" title for a panel type within a workspace, unique across ALL

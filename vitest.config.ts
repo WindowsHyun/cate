@@ -18,10 +18,13 @@ export default defineConfig({
       'electron-log/renderer': path.resolve(__dirname, 'src/test/electronLogStub.ts'),
       'electron-log/main': path.resolve(__dirname, 'src/test/electronLogStub.ts'),
       'electron-log': path.resolve(__dirname, 'src/test/electronLogStub.ts'),
+      // The vendored subagent extension runs inside pi, where pi-tui is
+      // available. Unit tests exercise its orchestration without that runtime.
+      '@earendil-works/pi-tui': path.resolve(__dirname, 'src/test/piTuiStub.ts'),
     },
   },
   test: {
-    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'scripts/**/*.test.mjs'],
     restoreMocks: true,
     environmentMatchGlobs: [
       ['**/*.test.tsx', 'jsdom'],

@@ -176,12 +176,13 @@ export function setupAutoSave(): () => void {
     for (const unsub of canvasUnsubs.values()) unsub()
     canvasUnsubs.clear()
   }
-  const unsubApp = useAppStore.subscribe((state, prevState) => {
-    // Re-wire canvas subscriptions only when the selected workspace changes,
-    // not on every panel mutation (node drag, focus, etc.).
-    if (state.selectedWorkspaceId !== prevState.selectedWorkspaceId) {
-      subscribeActive()
-    }
+  const unsubApp = useAppStore.subscribe(() => {
+    // Re-run on every appStore change, not just a workspace switch: a secondary
+    // canvas's store mounts lazily (on first render) independently of any
+    // `panels` mutation, so this is the only signal that catches it. subscribeActive
+    // itself stays cheap — it only scans the ACTIVE workspace's canvases, not all
+    // open workspaces, so this doesn't reintroduce the many-workspaces stutter.
+    subscribeActive()
     scheduleSave()
   })
   subscribeActive()

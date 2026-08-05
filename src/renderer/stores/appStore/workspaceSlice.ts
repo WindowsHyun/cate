@@ -3,10 +3,9 @@
 // =============================================================================
 
 import log from '../../lib/logger'
-import type { WorkspaceState } from '../../../shared/types'
 import { ALL_ZONES } from '../../../shared/types'
-import { generateId } from '../canvas/helpers'
 import type { AppSet, AppGet, AppStoreActions } from './types'
+import type { WorkspaceGroup } from '../../../shared/types'
 import {
   createDefaultWorkspace,
   syncCreateToMain,
@@ -14,7 +13,11 @@ import {
   syncUpdateToMain,
   applyWorkspaceInfo,
   hydrateWorkspaceFromDisk,
+  GROUP_COLORS,
+  rememberWorkspaceGroup,
+  persistGroupsToSidebar,
 } from './helpers'
+import { generateId } from '../canvas/helpers'
 import { releaseCanvasStoreForPanel } from '../canvasStore'
 import {
   getOrCreateWorkspaceDockStore,
@@ -22,7 +25,6 @@ import {
 } from '../../lib/workspace/dockRegistry'
 import {
   getWorkspaceCanvasPanelId,
-  invalidateWorkspaceCanvasCache,
 } from '../../lib/workspace/canvasAccess'
 import { setActivePanel } from '../../lib/activePanel'
 import { terminalRegistry } from '../../lib/terminal/terminalRegistry'
@@ -32,17 +34,40 @@ type WorkspaceSliceActions = Pick<
   AppStoreActions,
   | 'addWorkspace'
   | 'selectWorkspace'
+  | 'switchWorkspaceByOffset'
   | 'removeWorkspace'
   | 'ensureCenterCanvas'
   | 'setWorkspaceColor'
   | 'renameWorkspace'
-  | 'duplicateWorkspace'
   | 'reorderWorkspaces'
+  | 'addWorkspaceGroup'
+  | 'removeWorkspaceGroup'
+  | 'updateWorkspaceGroup'
+  | 'toggleGroupCollapsed'
+  | 'moveWorkspaceToGroup'
+  | 'setWorkspaceGroups'
   | 'addAdditionalRoot'
   | 'removeAdditionalRoot'
   | 'getWorkspace'
   | 'selectedWorkspace'
 >
+
+/** Resolve the workspace `offset` steps away from `currentId` in list order,
+ *  wrapping around both ends. Returns null when switching is a no-op: fewer than
+ *  two workspaces, or `currentId` isn't in the list. Ordering follows the
+ *  `workspaces` array — the same order the sidebar renders. */
+export function workspaceIdAtOffset(
+  workspaces: readonly { id: string }[],
+  currentId: string,
+  offset: number,
+): string | null {
+  if (workspaces.length < 2) return null
+  const currentIndex = workspaces.findIndex((w) => w.id === currentId)
+  if (currentIndex === -1) return null
+  const len = workspaces.length
+  const nextIndex = (((currentIndex + offset) % len) + len) % len
+  return workspaces[nextIndex].id
+}
 
 export function createWorkspaceSlice(set: AppSet, get: AppGet): WorkspaceSliceActions {
   return {
@@ -74,8 +99,23 @@ export function createWorkspaceSlice(set: AppSet, get: AppGet): WorkspaceSliceAc
       }))
       // Sync to main process
       syncCreateToMain(ws).then((result) => {
-        if (!result?.ok) {
-          log.warn('[workspace-sync] Create rejected:', result?.error?.message)
+        if (!result) return
+        if (!result.ok) {
+          log.warn('[workspace-sync] Create rejected:', result.error.message)
+          const conflictingId = result.error.conflictingWorkspaceId
+          if (ws.rootPath) {
+            window.electronAPI.recentProjectsRemove(ws.rootPath).catch((err) =>
+              log.warn('[workspace] Failed to remove rejected project from recents:', err),
+            )
+          }
+          // Never leave an optimistic workspace that main refused to register:
+          // it has no allowed-root grant and cannot safely own panels or saves.
+          if (get().workspaces.some((candidate) => candidate.id === ws.id)) {
+            get().removeWorkspace(ws.id)
+          }
+          if (conflictingId && get().workspaces.some((candidate) => candidate.id === conflictingId)) {
+            void get().selectWorkspace(conflictingId)
+          }
           return
         }
         set((state) => ({
@@ -281,7 +321,6 @@ export function createWorkspaceSlice(set: AppSet, get: AppGet): WorkspaceSliceAc
         }
       }
       releaseWorkspaceDockStore(id)
-      invalidateWorkspaceCanvasCache(id)
       terminalRegistry.disposeWorkspace(id)
 
       const wasSelected = get().selectedWorkspaceId === id
@@ -319,6 +358,12 @@ export function createWorkspaceSlice(set: AppSet, get: AppGet): WorkspaceSliceAc
       syncRemoveFromMain(id)
     },
 
+    async switchWorkspaceByOffset(offset) {
+      const state = get()
+      const targetId = workspaceIdAtOffset(state.workspaces, state.selectedWorkspaceId, offset)
+      if (targetId) await get().selectWorkspace(targetId)
+    },
+
     getWorkspace(id) {
       return get().workspaces.find((w) => w.id === id)
     },
@@ -345,29 +390,6 @@ export function createWorkspaceSlice(set: AppSet, get: AppGet): WorkspaceSliceAc
         ),
       }))
       syncUpdateToMain(wsId, { name: trimmed })
-    },
-
-    duplicateWorkspace(wsId) {
-      const ws = get().workspaces.find((w) => w.id === wsId)
-      if (!ws) return wsId
-      // Carry the fields that make the workspace point at the same project: a
-      // remote workspace must stay reconnectable (connection), and the extra repos
-      // (additionalRoots) + managed worktrees must come along — otherwise a remote
-      // duplicate degrades to a broken non-reconnectable local one and a
-      // multi-root/worktree workspace loses everything but its primary root.
-      const copy: WorkspaceState = {
-        id: generateId(),
-        name: `${ws.name} Copy`,
-        color: ws.color,
-        rootPath: ws.rootPath,
-        connection: ws.connection,
-        additionalRoots: ws.additionalRoots ? [...ws.additionalRoots] : undefined,
-        worktrees: ws.worktrees ? ws.worktrees.map((wt) => ({ ...wt })) : undefined,
-        panels: {},
-      }
-      set((state) => ({ workspaces: [...state.workspaces, copy] }))
-      syncCreateToMain(copy)
-      return copy.id
     },
 
     reorderWorkspaces(fromIndex, toIndex) {
@@ -406,6 +428,70 @@ export function createWorkspaceSlice(set: AppSet, get: AppGet): WorkspaceSliceAc
           return { ...ws, additionalRoots: current.filter((p) => p !== rootPath) }
         }),
       }))
+    },
+
+    addWorkspaceGroup(name, color) {
+      const group: WorkspaceGroup = {
+        id: generateId(),
+        name: name ?? 'Group',
+        color: color ?? GROUP_COLORS[0].value,
+        collapsed: false,
+      }
+      set((state) => ({ workspaceGroups: [...state.workspaceGroups, group] }))
+      persistGroupsToSidebar(get())
+      return group.id
+    },
+
+    removeWorkspaceGroup(groupId) {
+      // Forget the remembered assignment for every workspace in this group, so a
+      // later cross-window sync can't re-apply a now-deleted group.
+      for (const w of get().workspaces) {
+        if (w.groupId === groupId) rememberWorkspaceGroup(w.rootPath, undefined)
+      }
+      set((state) => ({
+        workspaceGroups: state.workspaceGroups.filter((g) => g.id !== groupId),
+        workspaces: state.workspaces.map((w) =>
+          w.groupId === groupId ? { ...w, groupId: undefined } : w,
+        ),
+      }))
+      persistGroupsToSidebar(get())
+    },
+
+    updateWorkspaceGroup(groupId, changes) {
+      set((state) => ({
+        workspaceGroups: state.workspaceGroups.map((g) =>
+          g.id === groupId ? { ...g, ...changes } : g,
+        ),
+      }))
+      persistGroupsToSidebar(get())
+    },
+
+    toggleGroupCollapsed(groupId) {
+      set((state) => ({
+        workspaceGroups: state.workspaceGroups.map((g) =>
+          g.id === groupId ? { ...g, collapsed: !g.collapsed } : g,
+        ),
+      }))
+      persistGroupsToSidebar(get())
+    },
+
+    moveWorkspaceToGroup(workspaceId, groupId) {
+      const ws = get().workspaces.find((w) => w.id === workspaceId)
+      if (!ws) return
+      rememberWorkspaceGroup(ws.rootPath, groupId ?? undefined)
+      set((state) => ({
+        workspaces: state.workspaces.map((w) =>
+          w.id === workspaceId ? { ...w, groupId: groupId ?? undefined } : w,
+        ),
+      }))
+      persistGroupsToSidebar(get())
+      if (ws.rootPath) {
+        window.electronAPI.workspaceUpdate(workspaceId, { groupId: groupId ?? '' }).catch(() => {})
+      }
+    },
+
+    setWorkspaceGroups(groups) {
+      set({ workspaceGroups: groups })
     },
   }
 }

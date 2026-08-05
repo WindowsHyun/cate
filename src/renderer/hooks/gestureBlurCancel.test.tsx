@@ -3,8 +3,6 @@
 // element-scoped handlers can't reach:
 //   - a pan released OUTSIDE the canvas (or interrupted by Cmd+Tab) clears
 //     isPanning, the grabbing cursor, and the refcounted body class;
-//   - a window blur mid-group-drag stops translating the selection and drops
-//     the body class;
 //   - a window blur mid-resize tears down the window listeners and unpins the
 //     forced cursor;
 //   - Escape cancels an in-flight panel drag WITHOUT clearing the canvas
@@ -31,7 +29,6 @@ import { act } from 'react-dom/test-utils'
 import type { StoreApi } from 'zustand'
 import { useCanvasInteraction } from './useCanvasInteraction'
 import { useNodeResize, type ResizeEdge } from './useNodeResize'
-import { useGroupNodeDrag } from '../canvas/useGroupNodeDrag'
 import {
   getOrCreateCanvasStoreForPanel,
   releaseCanvasStoreForPanel,
@@ -197,81 +194,7 @@ describe('pan — window-level cleanup', () => {
 })
 
 // =============================================================================
-// 2. Group drag — blur cancellation
-// =============================================================================
-
-function GroupDragProbe({
-  nodeId,
-  store,
-  wasDragged,
-}: {
-  nodeId: string
-  store: StoreApi<CanvasStore>
-  wasDragged: { current: boolean }
-}) {
-  const { startGroupDrag } = useGroupNodeDrag(nodeId, store, wasDragged)
-  return <div data-testid="group-handle" onMouseDown={(e) => startGroupDrag(e)} />
-}
-
-describe('group drag — blur cancellation', () => {
-  it('stops translating the selection and drops the body class on blur', () => {
-    const store = freshStore()
-    addNode(store, 'A', { x: 0, y: 0 }, { width: 100, height: 100 })
-    addNode(store, 'B', { x: 200, y: 0 }, { width: 100, height: 100 })
-    act(() => store.getState().selectNodes(['A', 'B'], false))
-
-    const wasDragged = { current: false }
-    act(() => root.render(<GroupDragProbe nodeId="A" store={store} wasDragged={wasDragged} />))
-    const handle = container.querySelector<HTMLElement>('[data-testid="group-handle"]')!
-
-    act(() => {
-      handle.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 50, clientY: 50, bubbles: true }))
-    })
-
-    // Move past the dead zone → both nodes translate, body class acquired.
-    act(() => window.dispatchEvent(new MouseEvent('mousemove', { clientX: 100, clientY: 80, bubbles: true })))
-    expect(store.getState().nodes['A'].origin).toEqual({ x: 50, y: 30 })
-    expect(store.getState().nodes['B'].origin).toEqual({ x: 250, y: 30 })
-    expect(document.body.classList.contains('canvas-interacting')).toBe(true)
-
-    // Cmd+Tab: window blurs. The capture listeners must detach.
-    windowBlur()
-    expect(document.body.classList.contains('canvas-interacting')).toBe(false)
-    expect(bodyClassRefCount('canvas-interacting')).toBe(0)
-
-    // A buttonless mousemove after returning must NOT keep translating.
-    const before = { ...store.getState().nodes['A'].origin }
-    act(() => window.dispatchEvent(new MouseEvent('mousemove', { clientX: 400, clientY: 400, bubbles: true })))
-    expect(store.getState().nodes['A'].origin).toEqual(before)
-  })
-
-  it('swallows wheel events while the group drag is live', () => {
-    const store = freshStore()
-    addNode(store, 'A', { x: 0, y: 0 }, { width: 100, height: 100 })
-    addNode(store, 'B', { x: 200, y: 0 }, { width: 100, height: 100 })
-    act(() => store.getState().selectNodes(['A', 'B'], false))
-
-    const wasDragged = { current: false }
-    act(() => root.render(<GroupDragProbe nodeId="A" store={store} wasDragged={wasDragged} />))
-    const handle = container.querySelector<HTMLElement>('[data-testid="group-handle"]')!
-
-    act(() => {
-      handle.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 50, clientY: 50, bubbles: true }))
-    })
-    act(() => window.dispatchEvent(new MouseEvent('mousemove', { clientX: 100, clientY: 80, bubbles: true })))
-
-    const wheel = new WheelEvent('wheel', { deltaY: 120, cancelable: true, bubbles: true })
-    act(() => window.dispatchEvent(wheel))
-    expect(wheel.defaultPrevented).toBe(true)
-
-    // Cleanup.
-    act(() => window.dispatchEvent(new MouseEvent('mouseup', { clientX: 100, clientY: 80, bubbles: true })))
-    expect(bodyClassRefCount('canvas-interacting')).toBe(0)
-  })
-})
-
-// =============================================================================
-// 3. Resize — blur cancellation
+// 2. Resize — blur cancellation
 // =============================================================================
 
 function ResizeProbe({
@@ -323,7 +246,7 @@ describe('resize — blur cancellation', () => {
 })
 
 // =============================================================================
-// 4. Escape cancels a drag without clearing the canvas selection
+// 3. Escape cancels a drag without clearing the canvas selection
 // =============================================================================
 
 describe('drag — Escape cancellation', () => {
@@ -345,7 +268,7 @@ describe('drag — Escape cancellation', () => {
     })
     const store = scene.getCanvasStore('c1')
     act(() => store.getState().selectNodes(['n1', 'n2'], false))
-    expect(store.getState().selectedNodeIds.size).toBe(2)
+    expect(store.getState().selection.length).toBe(2)
 
     // Begin and arm a drag.
     scene.mouse.downOnNode('n1')
@@ -372,7 +295,7 @@ describe('drag — Escape cancellation', () => {
     expect(scene.drag().isDragging).toBe(false)
     // The keypress was stopped before the global handler — selection intact.
     expect(reachedGlobal).toBe(false)
-    expect(store.getState().selectedNodeIds.size).toBe(2)
+    expect(store.getState().selection.length).toBe(2)
     expect(esc.defaultPrevented).toBe(true)
   })
 })

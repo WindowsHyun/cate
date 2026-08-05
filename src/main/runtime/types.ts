@@ -15,6 +15,7 @@
 // =============================================================================
 
 import type { FileTreeNode, FileSearchResult, FileSearchOptions, SearchOptions, SearchFileResult, SearchStats, TerminalActivity } from '../../shared/types'
+import type { AgentHookAgentState, AgentHookConfig, AgentHookEvent } from '../../shared/agentHooks'
 import type { RuntimeId } from './locator'
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,22 @@ export interface PtyCreateOptions {
   /** Caller-provided id. Used over the wire so the client registers its data
    *  stream before the create round-trip resolves (no early-output race). */
   id?: string
+  /** Extra env merged OVER the host's resolved shell env at spawn (e.g. the
+   *  first-party CATE_API/CATE_TOKEN vars). Rides the existing opts pass-through
+   *  (RemoteRuntime spreads opts; rpcServer forwards verbatim), so no protocol
+   *  change is needed to reach a remote host. */
+  env?: Record<string, string>
+  /** Opt this pty into agent hook injection (hook env + workspace hook files
+   *  — see src/runtime/capabilities/agentHooks.ts). Set by Cate's
+   *  terminal layer for user terminals; OFF by default so bare process.create
+   *  callers (tests, tooling) spawn untouched shells and write nothing. Rides
+   *  the same opts pass-through as `env`. */
+  agentHooks?: boolean
+  /** Per-agent injection overrides for this pty's workspace (tri-state
+   *  auto/on/off; missing agents default to 'auto'). Only meaningful with
+   *  agentHooks; gates the workspace FILE writes, not the ambient env. Rides
+   *  the same opts pass-through as `env`, so it reaches a remote host. */
+  agentHookConfig?: AgentHookConfig
 }
 
 export interface PtyHandle {
@@ -38,13 +55,19 @@ export interface PtyHandle {
   pid: number
   /** Optional notice to surface in the terminal (e.g. shell fallback warning). */
   notice?: string
+  /** The shell path the host actually spawned (after the host's own resolution).
+   *  Carried back purely for diagnostics — e.g. logging which shell a terminal
+   *  that exited immediately was running (#401). */
+  shell?: string
 }
 
-/** Per-pty process-tree-derived activity, for the shell process monitor.
- *  `activity` mirrors what shell.ts broadcasts on SHELL_ACTIVITY_UPDATE; the
- *  agent fields say whether a known agent CLI (Claude/Codex/pi/…) is a direct
- *  child and its display name. Carry-across of a transient miss + the screen-
- *  state override stay in shell.ts (session-layer concerns). */
+/** Per-pty activity for the shell process monitor. `activity` mirrors what
+ *  shell.ts broadcasts on SHELL_ACTIVITY_UPDATE (first non-shell direct
+ *  child); the agent fields report the HOOK-REGISTERED agent pid's liveness
+ *  (agentPresence.ts) — presence rises when the agent's hooks first speak and
+ *  falls when its pid leaves the process table, wherever in the tree it lives
+ *  (tmux panes included). Carry-across of a transient miss + the screen-state
+ *  override stay in shell.ts (session-layer concerns). */
 export interface PtyActivity {
   activity: TerminalActivity
   agentName: string | null
@@ -70,9 +93,10 @@ export interface ProcessHost {
   /**
    * Process-monitor scan for the given pty ids (those this host owns). Takes ONE
    * `ps` snapshot of the host's process table and derives, per id, the activity
-   * indicator + agent-CLI detection. Runs on whichever host owns the ptys, so a
-   * remote terminal's activity reflects the daemon's process tree. Ids not owned
-   * by this host are omitted. POSIX-only; returns {} where `ps` is unavailable.
+   * indicator + the hook-registered agent pid's liveness. Runs on whichever host
+   * owns the ptys, so a remote terminal's activity reflects the daemon's process
+   * tree. Ids not owned by this host are omitted. POSIX-only; returns {} where
+   * `ps` is unavailable.
    */
   scanActivity(ids: string[]): Promise<Record<string, PtyActivity>>
   /**
@@ -82,6 +106,26 @@ export interface ProcessHost {
    * omitted. POSIX-only; returns {} where `lsof` is unavailable.
    */
   scanPorts(ids: string[]): Promise<Record<string, number[]>>
+}
+
+// ---------------------------------------------------------------------------
+// Agent hook host (push-based agent-CLI hook events)
+//
+// The daemon injects hook bridges into the agent CLIs running in its PTYs
+// (ambient env / workspace files — see src/runtime/capabilities/
+// agentHooks.ts), ingests their events on a daemon-local endpoint, and
+// normalizes them (src/shared/agentHooks.ts). This host is the subscription
+// seam: events are already correlated to a pty id (CATE_TERMINAL_ID), so the
+// IPC layer routes each one to the terminal's owning window.
+// ---------------------------------------------------------------------------
+
+export interface AgentHookHost {
+  /** Subscribe to normalized agent hook events from this host's terminals.
+   *  Returns an unsubscribe. */
+  subscribe(onEvent: (event: AgentHookEvent) => void): () => void
+  /** Inspect a workspace's per-agent hook-file injection state (for the
+   *  Settings UI) on this host — correct for remote workspaces too. */
+  inspectWorkspace(cwd: string): Promise<AgentHookAgentState[]>
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +176,69 @@ export interface AgentHost {
 }
 
 // ---------------------------------------------------------------------------
+// Server host (long-lived HTTP server children for server-backed extensions)
+//
+// Spawns an extension's server process on whichever host owns the files (local
+// or daemon), allocates a loopback port for it, injects that port via env, and
+// resolves only once the server answers an HTTP ready probe. stdout/stderr +
+// exit stream back via callbacks keyed by the caller-generated id. The tunnel
+// host then proxies raw TCP bytes to the bound loopback port.
+// ---------------------------------------------------------------------------
+
+export interface ServerStartOptions {
+  id: string                      // caller-generated; stdout/stderr+exit evt stream key
+  command: string[]               // argv, e.g. ['node','dist/server.js']
+  cwd: string                     // runtime-absolute (daemon validates)
+  env: Record<string, string>
+  portEnv: string                 // daemon injects the allocated port as env[portEnv]
+  readyPath: string               // HTTP path polled until ready
+  readyTimeoutMs: number
+}
+
+export interface ServerHandle { id: string; pid: number; port: number } // port bound 127.0.0.1 on the daemon host
+
+export interface ServerHost {
+  start(
+    opts: ServerStartOptions,
+    onOutput: (id: string, stream: 'stdout' | 'stderr', chunk: string) => void,
+    onExit: (id: string, code: number | null, signal: string | null) => void,
+  ): Promise<ServerHandle>   // resolves only AFTER the ready probe passes
+  stop(id: string): void     // SIGTERM then SIGKILL
+}
+
+// ---------------------------------------------------------------------------
+// Tunnel host (raw TCP bridge to a server child's loopback port)
+//
+// Opens a TCP connection on the daemon host to 127.0.0.1:port and bridges its
+// bytes (base64) over the runtime pipe, so a server-backed extension's traffic
+// can reach a daemon-bound server from the client. Mirrors agent.start's
+// register-the-stream-before-start pattern.
+// ---------------------------------------------------------------------------
+
+export interface TunnelHost {
+  // Open a TCP connection on the daemon host to 127.0.0.1:port. connId is the evt
+  // stream key (register before open). Mirrors agent.start register-before-start.
+  open(connId: string, port: number, onData: (connId: string, chunkB64: string) => void, onClose: (connId: string) => void): Promise<void>
+  write(connId: string, chunkB64: string): void   // outbound bytes, base64
+  // Flow-control ack: the client delivered `byteCount` decoded inbound bytes to
+  // their destination, so the daemon can resume a socket it paused once its
+  // outstanding (sent-but-unacked) credit window drains. Fire-and-forget.
+  ack(connId: string, byteCount: number): void
+  close(connId: string): void
+  // Reverse tunnel (CATE_API): bind a 127.0.0.1 listener on the daemon host and
+  // bridge each inbound connection BACK over the pipe. `onConnection(connId)`
+  // fires per accepted socket; its bytes then arrive via onData/onClose keyed by
+  // that connId, and outbound bytes reuse write/close. Returns the bound port.
+  listen(
+    listenerId: string,
+    onConnection: (connId: string) => void,
+    onData: (connId: string, chunkB64: string) => void,
+    onClose: (connId: string) => void,
+  ): Promise<{ port: number }>
+  stopListen(listenerId: string): void
+}
+
+// ---------------------------------------------------------------------------
 // File host (fs/promises + chokidar)
 // ---------------------------------------------------------------------------
 
@@ -145,31 +252,45 @@ export interface FsChangeEvent {
 
 // NOTE (Phase 1, filesystem = "Model A"): every `path`/`dir` argument below is
 // an ALREADY-VALIDATED, runtime-absolute path. The IPC handler validates the
-// raw locator path via `Runtime.validate*` first, then passes the safe path
-// here. This keeps these leaf ops pure fs — directly reusable by the standalone
-// runtime daemon in Phase 3. `importEntries` is the lone exception: it computes
-// per-item destinations, so it validates each one internally (hence ownerWindowId).
+// Every operation validates and executes on the owning host in one call. The
+// optional access context carries window grants and workspace scope across RPC.
+export interface FileAccessContext {
+  ownerWindowId?: number
+  scopeId?: string
+}
+
 export interface FileHost {
-  readFile(safePath: string): Promise<string>
-  readBinary(safePath: string): Promise<Buffer>
-  writeFile(safePath: string, content: string): Promise<void>
+  readFile(safePath: string, access?: FileAccessContext): Promise<string>
+  readBinary(safePath: string, access?: FileAccessContext): Promise<Buffer>
+  /** Returns the canonical path written, used to consume mirrored one-shot grants. */
+  writeFile(safePath: string, content: string, access?: FileAccessContext): Promise<string>
   /** Write raw bytes. Used by remote upload (drag-import into a remote workspace):
    *  the source is read on the client and its bytes written here on the host. */
-  writeBinary(safePath: string, data: Buffer): Promise<void>
-  readDir(safePath: string): Promise<FileTreeNode[]>
-  stat(safePath: string): Promise<{ isDirectory: boolean; isFile: boolean }>
-  remove(safePath: string): Promise<void>
-  rename(safeOldPath: string, safeNewPath: string): Promise<void>
-  mkdir(safePath: string): Promise<void>
+  writeBinary(safePath: string, data: Buffer, access?: FileAccessContext): Promise<string>
+  readDir(safePath: string, access?: FileAccessContext): Promise<FileTreeNode[]>
+  stat(safePath: string, access?: FileAccessContext): Promise<{ isDirectory: boolean; isFile: boolean }>
+  remove(safePath: string, access?: FileAccessContext): Promise<void>
+  /** Returns the canonical destination path. */
+  rename(safeOldPath: string, safeNewPath: string, access?: FileAccessContext): Promise<string>
+  mkdir(safePath: string, access?: FileAccessContext): Promise<void>
   /** Copy into a directory, auto-naming on collision; returns the final path. */
-  copy(safeSrcPath: string, safeDestDir: string): Promise<string>
+  copy(safeSrcPath: string, safeDestDir: string, access?: FileAccessContext): Promise<string>
+  /** The host's per-host extensions install root (~/.cate/extensions), resolved
+   *  daemon-side (only the daemon knows its home dir) and registered as an
+   *  allowed root. Lets the install flow place an extension on whichever host
+   *  owns the workspace — local or remote — with no client-side path guessing. */
+  extensionsRoot(): Promise<string>
+  /** Validate + untar a host-resident, client-verified .tgz (written via
+   *  writeBinary) into `safeDestDir`, atomically; returns `safeDestDir`. The
+   *  daemon rejects unsafe (zip-slip / symlink) members and removes the .tgz. */
+  extractArtifact(safeTgzPath: string, safeDestDir: string): Promise<string>
   importEntries(
     sources: string[],
     safeDestDir: string,
     mode: 'copy' | 'move',
-    ownerWindowId?: number,
+    access?: FileAccessContext,
   ): Promise<{ created: string[]; failed: number }>
-  search(safeRoot: string, query: string, opts?: FileSearchOptions): Promise<FileSearchResult[]>
+  search(safeRoot: string, query: string, opts?: FileSearchOptions, access?: FileAccessContext): Promise<FileSearchResult[]>
   /**
    * Streaming ripgrep content search (the VS Code-style Search view). Runs on
    * whichever host owns the files — the local machine spawns its bundled
@@ -186,17 +307,16 @@ export interface FileHost {
       onBatch: (files: SearchFileResult[]) => void
       onDone: (stats: SearchStats, error?: string) => void
     },
+    access?: FileAccessContext,
   ): { cancel: () => void }
   /**
    * Subscribe to filesystem changes under `prefix`. Returns an unsubscribe fn.
-   * Matches the in-process `subscribeFsChanges` semantics (one call per event,
-   * no coalescing — the caller debounces). `type` carries the real change kind
+   * Emits one call per event with no coalescing; the caller debounces. `type`
+   * carries the real change kind
    * (create/update/delete) so consumers can prune removed entries; the git
-   * monitor ignores it. Used by the git monitor and the remote watch wrapper.
-   * The renderer-facing watch path (per-window debounce + FS_WATCH_EVENT) stays
-   * its own window-keyed wrapper in filesystem.ts for now (routed in Phase 3).
+   * monitor ignores it. Used by the git monitor and renderer watch wrapper.
    */
-  watch(prefix: string, onChange: (changedPath: string, type: FsChangeType) => void): () => void
+  watch(prefix: string, onChange: (changedPath: string, type: FsChangeType) => void, access?: FileAccessContext): () => void
 }
 
 // ---------------------------------------------------------------------------
@@ -290,50 +410,58 @@ export interface PrSummary {
 // runtime-path `cwd` and validate it internally (via validateCwd), mirroring
 // the existing handler bodies and the already-exported `createBranch`. The
 // daemon supplies its own validateCwd in Phase 3, so the functions stay
-// relocatable.
+// relocatable. Like FileHost, every method takes a trailing access context:
+// the cwd is validated against `access.scopeId` (the calling workspace), so a
+// workspace can only run git against repos under its own registered roots.
 export interface VcsHost {
-  isRepo(dir: string): Promise<boolean>
-  init(dir: string): Promise<void>
-  lsFiles(dir: string): Promise<string[]>
-  status(cwd: string): Promise<GitStatusResult>
-  diff(cwd: string, filePath?: string): Promise<string>
-  diffStaged(cwd: string, filePath?: string): Promise<string>
+  isRepo(dir: string, access?: FileAccessContext): Promise<boolean>
+  /** Discover git repos at or below `dir`, scanning at most `maxDepth` levels
+   *  (default 1) and stopping at each repo it finds. Returns absolute paths. */
+  findRepos(dir: string, maxDepth?: number, access?: FileAccessContext): Promise<string[]>
+  init(dir: string, access?: FileAccessContext): Promise<void>
+  lsFiles(dir: string, access?: FileAccessContext): Promise<string[]>
+  status(cwd: string, access?: FileAccessContext): Promise<GitStatusResult>
+  diff(cwd: string, filePath?: string, access?: FileAccessContext): Promise<string>
+  diffStaged(cwd: string, filePath?: string, access?: FileAccessContext): Promise<string>
   /** Cheap poll for the sidebar branch/dirty indicator. */
-  monitorStatus(cwd: string): Promise<MonitorStatusResult>
-  stage(cwd: string, filePath: string): Promise<void>
-  unstage(cwd: string, filePath: string): Promise<void>
-  commit(cwd: string, message: string): Promise<void>
-  push(cwd: string, remote?: string, branch?: string): Promise<void>
-  pull(cwd: string, remote?: string, branch?: string): Promise<GitPullResult>
-  fetch(cwd: string, remote?: string): Promise<void>
-  log(cwd: string, maxCount?: number): Promise<GitLogEntry[]>
-  branchList(cwd: string): Promise<GitBranchListResult>
-  branchCreate(cwd: string, name: string, startPoint?: string): Promise<void>
-  branchDelete(cwd: string, name: string, force?: boolean): Promise<void>
-  checkout(cwd: string, branch: string): Promise<void>
-  stash(cwd: string, message?: string): Promise<void>
-  stashPop(cwd: string): Promise<void>
-  discardFile(cwd: string, filePath: string): Promise<void>
-  worktreeList(cwd: string): Promise<Worktree[]>
+  monitorStatus(cwd: string, access?: FileAccessContext): Promise<MonitorStatusResult>
+  stage(cwd: string, filePath: string, access?: FileAccessContext): Promise<void>
+  unstage(cwd: string, filePath: string, access?: FileAccessContext): Promise<void>
+  commit(cwd: string, message: string, access?: FileAccessContext): Promise<void>
+  push(cwd: string, remote?: string, branch?: string, access?: FileAccessContext): Promise<void>
+  pull(cwd: string, remote?: string, branch?: string, access?: FileAccessContext): Promise<GitPullResult>
+  fetch(cwd: string, remote?: string, access?: FileAccessContext): Promise<void>
+  log(cwd: string, maxCount?: number, access?: FileAccessContext): Promise<GitLogEntry[]>
+  branchList(cwd: string, access?: FileAccessContext): Promise<GitBranchListResult>
+  branchCreate(cwd: string, name: string, startPoint?: string, access?: FileAccessContext): Promise<void>
+  branchDelete(cwd: string, name: string, force?: boolean, access?: FileAccessContext): Promise<void>
+  checkout(cwd: string, branch: string, access?: FileAccessContext): Promise<void>
+  stash(cwd: string, message?: string, access?: FileAccessContext): Promise<void>
+  stashPop(cwd: string, access?: FileAccessContext): Promise<void>
+  discardFile(cwd: string, filePath: string, access?: FileAccessContext): Promise<void>
+  worktreeList(cwd: string, access?: FileAccessContext): Promise<Worktree[]>
   worktreeAdd(
     repoCwd: string,
     branch: string,
     targetPath: string,
-    options?: { createBranch?: boolean; baseRef?: string },
+    options?: { createBranch?: boolean; baseRef?: string; symlinkPaths?: string[] },
+    access?: FileAccessContext,
   ): Promise<{ path: string; branch: string }>
   worktreeAddFromPr(
     repoCwd: string,
     prNumber: number,
     targetPath: string,
+    options?: { symlinkPaths?: string[] },
+    access?: FileAccessContext,
   ): Promise<{ path: string; branch: string }>
-  worktreeRemove(repoCwd: string, worktreePath: string, options?: { force?: boolean }): Promise<void>
-  worktreePrune(repoCwd: string): Promise<{ output: string }>
-  worktreeStatus(worktreePath: string): Promise<WorktreeStatusResult | null>
-  worktreeMergeTo(repoCwd: string, fromBranch: string, toBranch: string): Promise<MergeResult>
-  worktreeUpdateFrom(worktreePath: string, fromBranch: string): Promise<MergeResult>
-  createPr(worktreePath: string, branch: string): Promise<CreatePrResult>
-  prStatus(worktreePath: string, branch: string): Promise<PrStatusResult | null>
-  prList(repoCwd: string): Promise<PrSummary[]>
+  worktreeRemove(repoCwd: string, worktreePath: string, options?: { force?: boolean }, access?: FileAccessContext): Promise<void>
+  worktreePrune(repoCwd: string, access?: FileAccessContext): Promise<{ output: string }>
+  worktreeStatus(worktreePath: string, access?: FileAccessContext): Promise<WorktreeStatusResult | null>
+  worktreeMergeTo(repoCwd: string, fromBranch: string, toBranch: string, access?: FileAccessContext): Promise<MergeResult>
+  worktreeUpdateFrom(worktreePath: string, fromBranch: string, access?: FileAccessContext): Promise<MergeResult>
+  createPr(worktreePath: string, branch: string, access?: FileAccessContext): Promise<CreatePrResult>
+  prStatus(worktreePath: string, branch: string, access?: FileAccessContext): Promise<PrStatusResult | null>
+  prList(repoCwd: string, access?: FileAccessContext): Promise<PrSummary[]>
 }
 
 // ---------------------------------------------------------------------------
@@ -347,22 +475,30 @@ export interface Runtime {
   readonly id: RuntimeId
   readonly process: ProcessHost
   readonly agent: AgentHost
+  readonly agentHooks: AgentHookHost
   readonly file: FileHost
   readonly vcs: VcsHost
-  /** Lexical + allowed-root check; returns the normalized path. The optional
-   *  scopeId restricts the check to one workspace's roots (per-workspace
-   *  isolation); when omitted, validation falls back to the union of all roots. */
+  readonly server: ServerHost
+  readonly tunnel: TunnelHost
+  /** Lexical + allowed-root check; returns the normalized path. When scopeId is
+   *  omitted, the runtime uses its own configured root scope.
+   *  NOTE: only the DAEMON's implementation validates (it alone can realpath
+   *  its filesystem). The client-side Runtime handles (RemoteRuntime /
+   *  DeferredRuntime) are sync pass-throughs that never throw — don't call
+   *  this client-side expecting a check; every leaf op re-validates on the
+   *  daemon anyway. Use validatePathStrict for a real client-side round-trip. */
   validatePath(filePath: string, ownerWindowId?: number, scopeId?: string): string
   /** Strict (symlink-resolving) read validation; returns the real path. */
   validatePathStrict(filePath: string, ownerWindowId?: number, scopeId?: string): Promise<string>
   /** Validate a target whose parent must exist; returns the safe path. */
   validatePathForCreation(filePath: string, ownerWindowId?: number, scopeId?: string): Promise<string>
-  /** Directory validation for cwd parameters. */
+  /** Directory validation for cwd parameters. Same caveat as validatePath:
+   *  a real check only on the daemon; a pass-through on client-side handles. */
   validateCwd(cwd: string, ownerWindowId?: number, scopeId?: string): string
   /** Add/remove a path from this runtime's allowed-roots set. For the local
    *  daemon (and remote daemons), workspace roots are forwarded here so the
-   *  daemon's authoritative path checks allow them. The optional scopeId keys the
-   *  root under one workspace's scope (per-workspace isolation). */
+   *  daemon's authoritative path checks allow them. When scopeId is omitted,
+   *  the runtime uses its own configured root scope. */
   addAllowedRoot(root: string, scopeId?: string): Promise<void>
   removeAllowedRoot(root: string, scopeId?: string): Promise<void>
   /** Replace this runtime's readDir/search exclusion basenames live (the

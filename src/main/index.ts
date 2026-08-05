@@ -23,17 +23,21 @@ import { registerSqliteHandlers } from './sqlite'
 import { registerClaudeResumeHandlers } from './ipc/claudeResume'
 import { runtimes, forwardFileGrant, forwardClearFileGrantsForWindow, forwardClearScopedWriteAllowancesForWindow } from './runtime/runtimeManager'
 import { registerRuntimeHandlers } from './ipc/runtime'
-import { registerHandlers as registerFilesystemHandlers, stopWatchersForWindow } from './ipc/filesystem'
+import { registerExtensionHandlers } from './extensions/cateApiHandlers'
+import { registerHandlers as registerFilesystemHandlers } from './ipc/filesystem'
 import { registerHandlers as registerGitHandlers } from './ipc/git'
-import { registerHandlers as registerSearchHandlers, stopSearchesForWindow } from './ipc/search'
-import { registerHandlers as registerShellHandlers, unregisterTerminalsForWindow, getRunningTerminals, getClaudeTerminalIds } from './ipc/shell'
-import { registerHandlers as registerGitMonitorHandlers, stopMonitorsForWindow } from './ipc/git-monitor'
-import { registerHandlers as registerStoreHandlers, loadSettingsSyncFromDisk, readBootSnapshot, writeBootSnapshot, getSettingSync, setSettingsFromMain } from './store'
+import { registerHandlers as registerSearchHandlers } from './ipc/search'
+import { registerHandlers as registerShellHandlers, getRunningTerminals, getClaudeTerminalIds } from './ipc/shell'
+import { registerAgentHookForwarding } from './ipc/agentHookEvents'
+import { registerHandlers as registerGitMonitorHandlers } from './ipc/git-monitor'
+import { registerHandlers as registerStoreHandlers, loadSettingsSyncFromDisk, getSettingSync, setSettingsFromMain } from './store'
 import { flushPendingWritesSync as flushSettingsPendingWritesSync } from './settingsFile'
 import { flushWorkspaceStateSync } from './workspaceStateStore'
 import { registerUIStateHandlers, flushUIStateSync } from './uiStateStore'
 import { importCanvasBackgroundImage } from './canvasBackgroundStore'
 import { registerProjectStateHandlers, saveProjectStateSync } from './projectWorkspaceStore'
+import { registerProjectCateAgentHandlers } from './projectCateAgentStore'
+import { registerProjectChatsHandlers } from './projectChatsStore'
 import { releaseAllProjectLocks } from './projectLock'
 import { registerFileIconProtocol } from './fileIconProtocol'
 import { registerHandlers as registerMenuHandlers } from './ipc/menu'
@@ -42,25 +46,22 @@ import { registerAgentHandlers } from '../agent/main/ipcAgent'
 import { registerSkillHandlers } from '../skills/main/ipcSkills'
 import { registerAuthHandlers } from '../agent/main/ipcAuth'
 import { authManager } from '../agent/main/authManager'
-import { AgentManager } from '../agent/main/agentManager'
-
-// Shared singletons for pi agent + auth.
-const agentManager = new AgentManager(authManager)
+// Shared singletons for pi agent + auth (constructed at module load).
+import { agentManager } from '../agent/main/agentManager'
 import { registerWorkspaceHandlers } from './workspaceManager'
-import { addAllowedRoot, validatePath, grantFileAccess } from './ipc/pathValidation'
+import { validatePath, grantFileAccess } from './ipc/pathValidation'
 import { buildApplicationMenu, setNewMainWindowFn } from './menu'
 import { initShellEnv, getShellEnv } from './shellEnv'
 import { currentExclusionSet } from './ipc/filesystem'
 import { initAutoUpdater, isUpdatePendingInstall } from './auto-updater'
 import { initSentry, captureMainException, flushSentry } from './sentry'
 import { initAnalytics, devSimulateUpdateFrom, hasRunBefore } from './analytics'
-import { disableTrustScoping } from './featureFlags'
 import { startPerfMonitor, getLatestSnapshot } from './perf/perfMonitor'
 import { PERF_GET } from '../shared/ipc-channels'
 import { TELEMETRY_NOTICE_VERSION } from '../shared/types'
 import { installWebContentsSecurity } from './webSecurity'
 import { installProxyAuthHandler, configureBrowserProxy } from './browserProxy'
-import { installThemeSkill } from './installThemeSkill'
+import { installBundledSkill } from './installBundledSkill'
 import { isLocalLocator } from './runtime/locator'
 import { recordPersistentGrant } from './grantedPathStore'
 import { getWindowType, listDockWindowIds, sendToWindow } from './windowRegistry'
@@ -71,7 +72,6 @@ import { IS_E2E } from './windows/reveal'
 import { registerDialogHandlers } from './ipc/dialogs'
 import { registerCaptureHandlers } from './ipc/capture'
 import { registerWindowControlHandlers } from './ipc/windowControls'
-import { registerPanelWindowHandlers } from './ipc/panelWindows'
 import { registerDockWindowHandlers } from './ipc/dockWindows'
 import { registerWindowPanelHandlers } from './ipc/windowPanels'
 import { registerDragHandlers } from './ipc/dragHandlers'
@@ -117,6 +117,8 @@ function registerCriticalHandlers(): void {
   registerStoreHandlers()
   registerUIStateHandlers()
   registerProjectStateHandlers()
+  registerProjectCateAgentHandlers()
+  registerProjectChatsHandlers()
   registerWorkspaceHandlers()
   registerFilesystemHandlers()
   registerTerminalHandlers()
@@ -124,7 +126,6 @@ function registerCriticalHandlers(): void {
   registerMenuHandlers()
   registerWindowAndDialogHandlers()
   registerWindowControlHandlers()
-  registerPanelWindowHandlers()
   registerDockWindowHandlers({ createWindow })
   registerWindowPanelHandlers()
   registerDragHandlers({ createWindow })
@@ -149,6 +150,7 @@ function registerDeferredHandlers(): void {
   registerAgentHandlers(authManager, agentManager)
   registerSkillHandlers()
   registerRuntimeHandlers()
+  registerExtensionHandlers()
 }
 
 /**
@@ -625,6 +627,20 @@ log.info('Cate v%s starting (electron %s, node %s, platform %s)', app.getVersion
 // them before the async electron-store finishes initializing.
 loadSettingsSyncFromDisk()
 
+// Optional GPU-rasterization workaround (off by default). Under this app's GPU
+// load — many live xterm WebGL contexts + the worktree-territory WebGL2 renderer
+// + the canvas's `will-change: transform` compositing churn — Chromium's shared
+// GPU glyph atlas can intermittently corrupt, repainting text with random
+// missing glyphs (most visible in the file tree). Moving rasterization to the
+// CPU removes the glyph atlas from the path; WebGL still renders and composites
+// on the GPU, so terminals/territory stay accelerated. Command-line switches
+// must be set before app-ready (this runs at module load), so the toggle only
+// takes effect after a restart.
+if (getSettingSync('disableGpuRasterization')) {
+  app.commandLine.appendSwitch('disable-gpu-rasterization')
+  log.info('[gpu] GPU rasterization disabled via setting (text rendered on CPU)')
+}
+
 // Scope the onboarding tour to genuine first installs. Anyone who has launched
 // Cate before is marked past it, so an update never replays the tour. The
 // telemetry notice (WelcomeDialog) intentionally has NO such clause — every
@@ -704,6 +720,11 @@ app.whenReady().then(async () => {
   await initShellEnv()
   log.info('Shell environment resolved')
 
+  // Agent hook stream: subscribes to each runtime's normalized hook events as
+  // it connects. Armed BEFORE the LOCAL connect below so the subscription can
+  // never miss the connected event.
+  registerAgentHookForwarding()
+
   // Bring the local workspace online: provision + launch the host-target runtime
   // tarball as a local daemon, the same path remote hosts use. Done after the shell
   // env so the daemon inherits the full PATH for git/terminals. This registers a
@@ -747,26 +768,29 @@ app.whenReady().then(async () => {
   registerCriticalHandlers()
   log.info('Critical IPC handlers registered')
 
-  // Install the cate-theme authoring skill into ~/.claude/skills (copy-if-missing).
-  void installThemeSkill()
+  // Install the cate-theme skill into ~/.claude/skills (copy-if-missing) so the
+  // LOCAL Claude Code discovers theme authoring anywhere. The cate-cli skill is
+  // NOT installed globally — it is seeded per-workspace for every supported
+  // agent at workspace open (seedCateCliSkill), where the CLI actually works.
+  void installBundledSkill('cate-theme')
 
   const mainWin = createWindow({ type: 'main' })
   log.info('Main window created (id=%d)', mainWin.id)
 
-  if (disableTrustScoping()) {
-    addAllowedRoot(app.getPath('home'))
-    log.warn('[security] Trust scoping disabled via dev-only flag; home directory restored to allowed roots')
-  }
-
   // Check for a crash report from the previous session — shows an opt-in
-  // dialog if one exists. Deferred until after the window is ready so the
-  // dialog has a parent window and doesn't block startup.
-  mainWin.once('ready-to-show', () => {
+  // dialog if one exists. Deferred until the window is usable so the dialog has
+  // a parent window and doesn't block startup. did-finish-load is a fallback
+  // for hidden-window startup paths where ready-to-show never arrives.
+  let mainWindowReadyHandled = false
+  const markMainWindowReady = (reason: string): void => {
+    if (mainWindowReadyHandled || mainWin.isDestroyed()) return
+    mainWindowReadyHandled = true
+    log.info('Main window ready via %s', reason)
     setMainWindowReady(true)
     flushPendingOpenPaths()
     // Register deferred IPC handlers and start the auto-updater now that the
-    // first paint has landed. Anything not on the cold-launch critical path
-    // belongs here.
+    // first usable renderer load has landed. Anything not on the cold-launch
+    // critical path belongs here.
     registerDeferredHandlers()
     log.info('Deferred IPC handlers registered')
     initAutoUpdater()
@@ -781,7 +805,9 @@ app.whenReady().then(async () => {
           app.exit(1)
         })
     }
-  })
+  }
+  mainWin.once('ready-to-show', () => markMainWindowReady('ready-to-show'))
+  mainWin.webContents.once('did-finish-load', () => markMainWindowReady('did-finish-load'))
 })
 
 app.on('window-all-closed', () => {

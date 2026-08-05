@@ -21,8 +21,12 @@ import { ensureSkillName } from './frontmatter'
 import * as skillStore from './skillStore'
 import * as savedSkills from './savedSkills'
 import { getToken } from './skillSources'
-import { slugifySkillName, type InstalledSkill, type SkillEntry, type SkillTargetId } from '../../shared/skills'
+import {
+  isKnownSkillTarget, slugifySkillName,
+  type InstalledSkill, type SkillEntry, type SkillTargetId,
+} from '../../shared/skills'
 import { fetchSkillFiles, type SkillFile } from './githubCrawl'
+import { skillPathSegments } from './skillPath'
 
 // ---------------------------------------------------------------------------
 // Manifest (<workspace>/.cate/skills.json)
@@ -30,26 +34,65 @@ import { fetchSkillFiles, type SkillFile } from './githubCrawl'
 
 interface SkillsManifest {
   skills: InstalledSkill[]
+  /** Auto-seed markers ("<skillId>:<targetId>@<contentHash>"; older manifests
+   *  carry hash-less "<skillId>:<targetId>" markers). The hash records WHICH
+   *  bundle version was seeded, so a newer app can refresh an unedited copy
+   *  while a user uninstall still sticks and a user-edited copy is never
+   *  overwritten (see seedCateCliSkill for the policy). */
+  seeded?: string[]
 }
 
 function manifestPath(runtimeId: string, hostCwd: string): string {
   return hostJoin(runtimeId, hostCwd, '.cate', 'skills.json')
 }
 
-export async function readManifest(runtime: Runtime, runtimeId: string, hostCwd: string): Promise<InstalledSkill[]> {
+async function readManifestData(runtime: Runtime, runtimeId: string, hostCwd: string): Promise<SkillsManifest> {
   try {
     const raw = await runtime.file.readFile(manifestPath(runtimeId, hostCwd))
     const parsed = JSON.parse(raw) as SkillsManifest
-    return Array.isArray(parsed.skills) ? parsed.skills : []
+    return {
+      // Rows for targets this Cate no longer supports (e.g. `antigravity`,
+      // dropped with its agent) are filtered out on the way in: they would
+      // otherwise render as a phantom agent in the skills tree, and reaching
+      // targetInfo/skillsRootDir with one THROWS — which used to break
+      // installing any skill that had a stale row for the same skillId. The
+      // next manifest write persists the pruned list, so this self-heals.
+      // Only the tracking row goes; files already on disk are left alone.
+      skills: Array.isArray(parsed.skills)
+        ? parsed.skills.filter((s) => isKnownSkillTarget(s?.targetId))
+        : [],
+      seeded: Array.isArray(parsed.seeded) ? parsed.seeded.filter((s) => typeof s === 'string') : [],
+    }
   } catch {
-    return []
+    return { skills: [], seeded: [] }
   }
 }
 
-async function writeManifest(runtime: Runtime, runtimeId: string, hostCwd: string, skills: InstalledSkill[]): Promise<void> {
+export async function readManifest(runtime: Runtime, runtimeId: string, hostCwd: string): Promise<InstalledSkill[]> {
+  return (await readManifestData(runtime, runtimeId, hostCwd)).skills
+}
+
+async function writeManifest(runtime: Runtime, runtimeId: string, hostCwd: string, manifest: SkillsManifest): Promise<void> {
   await runtime.file.mkdir(hostJoin(runtimeId, hostCwd, '.cate'))
-  const manifest: SkillsManifest = { skills }
-  await runtime.file.writeFile(manifestPath(runtimeId, hostCwd), `${JSON.stringify(manifest, null, 2)}\n`)
+  // Omit an empty seeded list so pre-seeding manifests round-trip unchanged.
+  const out: SkillsManifest = manifest.seeded?.length ? manifest : { skills: manifest.skills }
+  await runtime.file.writeFile(manifestPath(runtimeId, hostCwd), `${JSON.stringify(out, null, 2)}\n`)
+}
+
+/** Seed markers for this workspace (see SkillsManifest.seeded). */
+export async function readSeededMarkers(runtime: Runtime, runtimeId: string, hostCwd: string): Promise<string[]> {
+  return (await readManifestData(runtime, runtimeId, hostCwd)).seeded ?? []
+}
+
+/** Record that a bundled skill was seeded for a target in this workspace,
+ *  replacing any earlier marker for the same skill+target (the part before the
+ *  optional `@<hash>` version suffix). */
+export async function setSeededMarker(runtime: Runtime, runtimeId: string, hostCwd: string, marker: string): Promise<void> {
+  const base = marker.split('@')[0]
+  const manifest = await readManifestData(runtime, runtimeId, hostCwd)
+  if (manifest.seeded?.includes(marker)) return
+  const seeded = (manifest.seeded ?? []).filter((m) => m !== base && !m.startsWith(`${base}@`))
+  await writeManifest(runtime, runtimeId, hostCwd, { ...manifest, seeded: [...seeded, marker] })
 }
 
 // ---------------------------------------------------------------------------
@@ -109,10 +152,12 @@ export async function writeSkillToWorkspace(args: WriteSkillArgs): Promise<Write
   let installedHostPath: string
 
   if (info.layout === 'folder') {
+    // Validate the complete bundle before creating directories or writing files,
+    // so a malformed source cannot escape (or partially modify) the skill root.
+    const bundle = files.map((file) => ({ file, segments: skillPathSegments(file.relPath) }))
     const dir = hostJoin(runtimeId, root, slug)
     await mkdirp(runtime, runtimeId, hostCwd, dir)
-    for (const f of files) {
-      const segs = f.relPath.split('/')
+    for (const { file: f, segments: segs } of bundle) {
       const target = hostJoin(runtimeId, dir, ...segs)
       if (segs.length > 1) {
         await mkdirp(runtime, runtimeId, hostCwd, hostJoin(runtimeId, dir, ...segs.slice(0, -1)))
@@ -141,10 +186,10 @@ export async function writeSkillToWorkspace(args: WriteSkillArgs): Promise<Write
     origin,
   }
 
-  const manifest = await readManifest(runtime, runtimeId, hostCwd)
-  const next = manifest.filter((m) => !(m.skillId === skillId && m.targetId === targetId))
+  const manifest = await readManifestData(runtime, runtimeId, hostCwd)
+  const next = manifest.skills.filter((m) => !(m.skillId === skillId && m.targetId === targetId))
   next.push(installed)
-  await writeManifest(runtime, runtimeId, hostCwd, next)
+  await writeManifest(runtime, runtimeId, hostCwd, { ...manifest, skills: next })
 
   return { installed, warnings }
 }
@@ -170,7 +215,7 @@ async function readDirRec(runtime: Runtime, runtimeId: string, dir: string, base
   return out
 }
 
-async function readWorkspaceSkillFiles(
+export async function readWorkspaceSkillFiles(
   runtime: Runtime,
   runtimeId: string,
   hostCwd: string,
@@ -236,8 +281,11 @@ export async function uninstall(
   } catch (err) {
     log.warn('[skills] remove failed for %s: %O', target, err)
   }
-  const manifest = await readManifest(runtime, runtimeId, hostCwd)
-  await writeManifest(runtime, runtimeId, hostCwd, manifest.filter((m) => !(m.skillId === skillId && m.targetId === targetId)))
+  const manifest = await readManifestData(runtime, runtimeId, hostCwd)
+  await writeManifest(runtime, runtimeId, hostCwd, {
+    ...manifest,
+    skills: manifest.skills.filter((m) => !(m.skillId === skillId && m.targetId === targetId)),
+  })
 }
 
 export async function listInstalled(cwd: string): Promise<InstalledSkill[]> {

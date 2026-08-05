@@ -4,10 +4,14 @@
 //   dist-runtime/cate-runtime-<version>-<target>.tgz
 //     runtime.cjs                       (esbuild bundle, runtime-agnostic)
 //     node_modules/node-pty/...           (with prebuilds/<target>/pty.node
-//                                          + spawn-helper — the only native dep)
+//                                          + spawn-helper)
+//     node_modules/@parcel/watcher/...     (+ @parcel/watcher-<target>/watcher.node
+//                                          — workspace-tree file watching)
 //     runtime/bin/node[.exe]              (bundled Node runtime for the target)
 //     runtime/bin/rg[.exe]                 (bundled ripgrep for content search)
 //     pi/dist/cli.js                       (bundled pi coding agent, cross-platform)
+//     cate/dist/cli.cjs                    (bundled `cate` in-terminal CLI)
+//     cate/bin/cate[.cmd]                  (launcher shims → bundled node)
 //
 // UNIFIED layout: every target keeps node + rg under runtime/bin/, just with a
 // `.exe` suffix on win32 (runtime/bin/node.exe, runtime/bin/rg.exe). The install
@@ -31,9 +35,10 @@
 // (e.g. a Mac) for local end-to-end testing before CI exists.
 // =============================================================================
 
-import { existsSync, mkdirSync, cpSync, rmSync, chmodSync, readFileSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, cpSync, rmSync, chmodSync, readFileSync, renameSync, readdirSync, openSync, readSync, closeSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -97,9 +102,11 @@ rmSync(outTar, { force: true })
 // install-dir depth (and thus the resolvers) stay identical across platforms.
 cpSync(path.join(dist, 'runtime.cjs'), path.join(stageDir, 'runtime.cjs'))
 await stageNodePty(stageDir)
+await stageParcelWatcher(stageDir)
 await stageNodeRuntime(targetPlatform, targetArch, path.join(stageDir, 'runtime', 'bin', `node${exe}`))
 await stageRipgrep(targetArg, path.join(stageDir, 'runtime', 'bin', `rg${exe}`))
 stagePi(path.join(stageDir, 'pi'))
+await stageCateCli(path.join(stageDir, 'cate'))
 signMacNatives(stageDir)
 
 // Fail loudly if anything the daemon's install-probe requires is missing, rather
@@ -111,6 +118,9 @@ const required = [
   path.join('runtime', 'bin', `node${exe}`),
   path.join('runtime', 'bin', `rg${exe}`),
   path.join('pi', 'dist', 'cli.js'),
+  path.join('cate', 'dist', 'cli.cjs'),
+  path.join('cate', 'bin', 'cate'),
+  path.join('cate', 'bin', 'cate.cmd'),
 ]
 const missing = required.filter((rel) => !existsSync(path.join(stageDir, rel)))
 if (missing.length) throw new Error(`[runtime] incomplete stage for ${targetArg}; missing: ${missing.join(', ')}`)
@@ -179,6 +189,118 @@ async function stageNodePty(outRoot) {
     chmodSync(path.join(pbDir, 'spawn-helper'), 0o755)
   }
   console.log(`[runtime] staged node-pty native for ${targetArg}`)
+}
+
+/** The @parcel/watcher platform-binary package dir name for a target. parcel
+ *  resolves `@parcel/watcher-<platform>-<arch>` at runtime (plus a `-glibc`
+ *  suffix on linux — the daemon's bundled node is an official glibc build). */
+function parcelBinaryDir(platform, arch) {
+  return `watcher-${platform}-${arch}${platform === 'linux' ? '-glibc' : ''}`
+}
+
+/**
+ * Stage @parcel/watcher (workspace-tree watching) into the daemon's node_modules:
+ * its runtime JS + dependency closure, plus the TARGET's prebuilt native package.
+ *
+ * @parcel/watcher is N-API (one prebuilt per platform/arch runs under any node
+ * ABI, so no electron-rebuild / from-source compile — unlike node-pty). At
+ * runtime its index.js does `require('@parcel/watcher-<platform>-<arch>[-glibc]')`
+ * and wrapper.js pulls picomatch/is-glob; index.js pulls detect-libc on linux. We
+ * stage exactly that closure. For a cross-target build (e.g. linux-arm64 on an
+ * x64 host) the host's npm install only has the host's binary package, so we
+ * `npm pack` the target's prebuilt package from the registry.
+ */
+async function stageParcelWatcher(outRoot) {
+  const src = path.join(repoRoot, 'node_modules', '@parcel', 'watcher')
+  if (!existsSync(src)) throw new Error('@parcel/watcher not found in node_modules — run `npm install` first')
+  const version = JSON.parse(readFileSync(path.join(src, 'package.json'), 'utf-8')).version
+
+  const nm = path.join(outRoot, 'node_modules')
+  const dest = path.join(nm, '@parcel', 'watcher')
+  mkdirSync(dest, { recursive: true })
+  // Runtime JS only (skip src/, binding.gyp, scripts/ — build-from-source inputs).
+  for (const f of ['index.js', 'wrapper.js', 'index.js.flow', 'index.d.ts', 'package.json']) {
+    if (existsSync(path.join(src, f))) cpSync(path.join(src, f), path.join(dest, f))
+  }
+  // Stage @parcel/watcher's JS dependency closure. wrapper.js requires
+  // picomatch + is-glob (→ is-extglob); index.js requires detect-libc on linux.
+  // Resolve EACH from @parcel/watcher's own resolution root rather than assuming
+  // a fixed location: npm may nest a dep under @parcel/watcher/node_modules (a
+  // version-pin conflict) OR hoist it to the top-level node_modules (no conflict)
+  // — and which one happens varies by the full install tree. A previous version
+  // copied the nested dir if present, else a hardcoded list that OMITTED
+  // picomatch; when npm hoisted picomatch the nested dir was absent AND it wasn't
+  // in the list, so it shipped missing and the daemon crashed at startup with
+  // `Cannot find module 'picomatch'` (require'd by wrapper.js). createRequire
+  // finds the exact copy node would load, at whatever depth, every time.
+  const requireFrom = createRequire(path.join(src, 'package.json'))
+  for (const dep of ['picomatch', 'is-glob', 'is-extglob', 'detect-libc']) {
+    let pkgDir
+    try {
+      pkgDir = path.dirname(requireFrom.resolve(`${dep}/package.json`))
+    } catch {
+      // detect-libc is only require'd on linux; on darwin/win it may be absent.
+      if (dep === 'detect-libc') continue
+      throw new Error(`@parcel/watcher dependency "${dep}" not resolvable from ${src} — run \`npm install\` first`)
+    }
+    // Stage into the SAME relative location node resolved it from (nested under
+    // @parcel/watcher or hoisted to the top level) so resolution matches at runtime.
+    const rel = path.relative(repoRoot, pkgDir)
+    cpSync(pkgDir, path.join(outRoot, rel), { recursive: true, dereference: true })
+  }
+  // Fail loudly if the staged tree can't resolve wrapper.js's requires — the exact
+  // crash that shipped before. Mirrors the watcher.node assert below.
+  const stagedRequire = createRequire(path.join(dest, 'wrapper.js'))
+  for (const dep of ['picomatch', 'is-glob']) {
+    try {
+      stagedRequire.resolve(dep)
+    } catch {
+      throw new Error(
+        `staged @parcel/watcher cannot resolve "${dep}" from ${path.join(dest, 'wrapper.js')}. ` +
+          'The daemon would crash at startup (MODULE_NOT_FOUND) — aborting the build.',
+      )
+    }
+  }
+
+  // The target's prebuilt native package.
+  const binDir = parcelBinaryDir(targetPlatform, targetArch)
+  const pkgName = `@parcel/${binDir}`
+  const outBinPkg = path.join(nm, '@parcel', binDir)
+  const hostTarget = `${plat(process.platform)}-${process.arch}`
+  const hostBin = path.join(repoRoot, 'node_modules', '@parcel', binDir)
+
+  if (targetArg === hostTarget && existsSync(hostBin)) {
+    cpSync(hostBin, outBinPkg, { recursive: true, dereference: true })
+  } else {
+    // Cross-target (e.g. linux-arm64 built on x64): the host install lacks this
+    // package, so pull the prebuilt from the registry. N-API → no compile needed.
+    await npmPackInto(`${pkgName}@${version}`, outBinPkg)
+  }
+
+  const watcherNode = path.join(outBinPkg, 'watcher.node')
+  if (!existsSync(watcherNode)) {
+    throw new Error(
+      `staged @parcel/watcher is missing ${pkgName}/watcher.node for ${targetArg} ` +
+        `(expected at ${watcherNode}). The daemon cannot watch files without it.`,
+    )
+  }
+  chmodSync(watcherNode, 0o755)
+  console.log(`[runtime] staged @parcel/watcher ${version} (${pkgName}) for ${targetArg}`)
+}
+
+/** `npm pack <spec>` into a temp dir and extract the package's contents into
+ *  `destDir` (npm tarballs nest everything under `package/`). */
+async function npmPackInto(spec, destDir) {
+  const tmp = path.join(os.tmpdir(), `cate-npmpack-${spec.replace(/[@/]/g, '_')}`)
+  rmSync(tmp, { recursive: true, force: true })
+  mkdirSync(tmp, { recursive: true })
+  console.log(`[runtime] npm pack ${spec} (cross-target prebuilt)…`)
+  const out = execFileSync('npm', ['pack', spec, '--silent'], { cwd: tmp, encoding: 'utf-8' })
+  const tgz = out.trim().split('\n').pop().trim()
+  execFileSync('tar', ['-xzf', tgz, '-C', tmp], { stdio: 'ignore', cwd: tmp })
+  mkdirSync(destDir, { recursive: true })
+  cpSync(path.join(tmp, 'package'), destDir, { recursive: true, dereference: true })
+  rmSync(tmp, { recursive: true, force: true })
 }
 
 /**
@@ -407,15 +529,47 @@ function stagePi(outRoot) {
   console.log(`[runtime] staged pi ${piVersion}`)
 }
 
+/** Stage the `cate` in-terminal CLI into <outRoot> (cate/dist/cli.cjs + the two
+ *  launcher shims under cate/bin/). The CLI rides in the runtime tarball exactly
+ *  like pi, so it lands on every host — local + remote/WSL — the moment the
+ *  daemon is provisioned; the env-injection layer prepends cate/bin to a shell's
+ *  PATH. Bundled to a single self-contained CJS file (node built-ins + global
+ *  fetch only), so the bundled node runs it directly. */
+async function stageCateCli(outRoot) {
+  rmSync(outRoot, { recursive: true, force: true })
+  mkdirSync(path.join(outRoot, 'dist'), { recursive: true })
+  mkdirSync(path.join(outRoot, 'bin'), { recursive: true })
+
+  await build({
+    entryPoints: [path.join(repoRoot, 'src', 'cli', 'cate.ts')],
+    outfile: path.join(outRoot, 'dist', 'cli.cjs'),
+    platform: 'node',
+    format: 'cjs',
+    bundle: true,
+    target: `node${NODE_VERSION.split('.')[0]}`,
+  })
+
+  const shimSrc = path.join(repoRoot, 'src', 'cli', 'bin')
+  cpSync(path.join(shimSrc, 'cate'), path.join(outRoot, 'bin', 'cate'))
+  chmodSync(path.join(outRoot, 'bin', 'cate'), 0o755)
+  cpSync(path.join(shimSrc, 'cate.cmd'), path.join(outRoot, 'bin', 'cate.cmd'))
+  console.log('[runtime] staged cate CLI')
+}
+
 /**
  * Codesign the bundled darwin Mach-O binaries with a Developer ID + hardened
  * runtime BEFORE they are tarred. Apple's notarytool recurses into the bundled
- * runtime-host.tgz and rejects unsigned binaries, so node, rg and node-pty's
- * pty.node/spawn-helper must be signed like the app. node also gets the
- * runtime entitlements (JIT + disable-library-validation) so it still runs and
- * can load pty.node once hardened. No-op unless we're building a darwin tarball
- * on a darwin host with CATE_MAC_SIGN_IDENTITY set (see ci-mac-signing-keychain.sh);
- * when absent the binaries stay unsigned and notarization fails loudly.
+ * runtime-host.tgz and rejects unsigned binaries, so node, rg, node-pty's
+ * pty.node/spawn-helper and @parcel/watcher's watcher.node must be signed like
+ * the app. node also gets the runtime entitlements (JIT + disable-library-
+ * validation) so it still runs and can load the native addons once hardened.
+ * The bundled pi tree (staged cross-platform, so it carries BOTH darwin arches)
+ * also ships native addons — e.g. @earendil-works/pi-tui's darwin-modifiers.node
+ * — so we discover every Mach-O .node under it and sign those too; a hard-coded
+ * list silently missed them and broke notarization when pi added the addon.
+ * No-op unless we're building a darwin tarball on a darwin host with
+ * CATE_MAC_SIGN_IDENTITY set (see ci-mac-signing-keychain.sh); when absent the
+ * binaries stay unsigned and notarization fails loudly.
  */
 function signMacNatives(stageDir) {
   const identity = process.env.CATE_MAC_SIGN_IDENTITY
@@ -427,6 +581,11 @@ function signMacNatives(stageDir) {
     path.join('runtime', 'bin', 'rg'),
     path.join(pbDir, 'pty.node'),
     path.join(pbDir, 'spawn-helper'),
+    path.join('node_modules', '@parcel', parcelBinaryDir(targetPlatform, targetArch), 'watcher.node'),
+    // pi's own native addons (both darwin arches ride in the cross-platform pi
+    // tarball). win32/linux prebuilds under the same tree are skipped: the
+    // finder keeps only Mach-O files, so codesign never sees a PE/ELF .node.
+    ...findMachONodes(path.join(stageDir, 'pi')).map((abs) => path.relative(stageDir, abs)),
   ]
   // The identity is found via the keychain search list (ci-mac-signing-keychain.sh
   // adds the signing keychain to it); codesign --keychain alone is unreliable.
@@ -442,6 +601,43 @@ function signMacNatives(stageDir) {
     execFileSync('codesign', ['--verify', '--strict', file], { stdio: 'inherit' })
   }
   console.log(`[runtime] signed darwin natives for ${targetArg} (Developer ID ${identity})`)
+}
+
+/** Recursively collect absolute paths of Mach-O `.node` addons under `root`.
+ *  Reads each candidate's 4-byte magic so win32 PE / linux ELF prebuilds that
+ *  share the tree (e.g. pi-tui's win32-console-mode.node) are skipped — only
+ *  darwin binaries that notarytool would flag get returned. Missing root → []. */
+function findMachONodes(root) {
+  const out = []
+  const walk = (dir) => {
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return // dir absent (e.g. no pi staged) — nothing to sign
+    }
+    for (const e of entries) {
+      const p = path.join(dir, e.name)
+      if (e.isDirectory()) walk(p)
+      else if (e.isFile() && e.name.endsWith('.node') && isMachO(p)) out.push(p)
+    }
+  }
+  walk(root)
+  return out
+}
+
+/** True if `file` starts with a Mach-O magic (thin 32/64-bit or fat/universal,
+ *  either byte order). Non-Mach-O binaries (PE `MZ…`, ELF `\x7fELF`) return false. */
+function isMachO(file) {
+  const MACH_O_MAGICS = new Set([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe, 0xbebafeca])
+  const fd = openSync(file, 'r')
+  try {
+    const buf = Buffer.alloc(4)
+    if (readSync(fd, buf, 0, 4, 0) < 4) return false
+    return MACH_O_MAGICS.has(buf.readUInt32BE(0))
+  } finally {
+    closeSync(fd)
+  }
 }
 
 function plat(p) {

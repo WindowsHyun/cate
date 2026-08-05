@@ -3,7 +3,9 @@ import type { PanelPlacement } from '../../stores/appStore'
 import { useAppStore } from '../../stores/appStore'
 import { getAllCanvasStoreEntries, getOrCreateCanvasStoreForPanel } from '../../stores/canvasStore'
 import { findNodeDockStore } from '../../panels/nodeDockRegistry'
-import { collectPanelIds } from '../canvas/collectPanelIds'
+import { collectPanelIds } from '../../../shared/collectPanelIds'
+import { revealOnce } from '../workspace/panelReveal'
+import type { PanelType } from '../../../shared/types'
 
 export type DocumentType = 'pdf' | 'docx' | 'image'
 
@@ -33,6 +35,24 @@ const HTML_EXTENSIONS = new Set(['.html', '.htm'])
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.mdx', '.markdown'])
 const SQLITE_EXTENSIONS = new Set(['.db', '.sqlite', '.sqlite3', '.db3'])
 
+/** An already-open panel for this exact file + type, or null. Opening the same
+ *  file again should focus its existing tab, not spawn a duplicate. */
+function findExistingPanelForFile(workspaceId: string, filePath: string, type: PanelType): string | null {
+  const ws = useAppStore.getState().workspaces.find((w) => w.id === workspaceId)
+  if (!ws) return null
+  for (const panel of Object.values(ws.panels)) {
+    if (panel.type === type && panel.filePath === filePath) return panel.id
+  }
+  return null
+}
+
+/** If `filePath` is already open as `type`, reveal it and return its id — else null. */
+function revealExistingPanelForFile(workspaceId: string, filePath: string, type: PanelType): string | null {
+  const existing = findExistingPanelForFile(workspaceId, filePath, type)
+  if (existing && revealOnce(workspaceId, existing)) return existing
+  return null
+}
+
 export function openFileAsText(
   workspaceId: string,
   filePath: string,
@@ -53,14 +73,18 @@ export function openFileAsPanel(
   const ext = dotIndex !== -1 ? filePath.slice(dotIndex).toLowerCase() : ''
   const docType = getDocumentType(filePath)
   if (docType) {
-    return store.createDocument(workspaceId, filePath, docType, position, placement)
+    return revealExistingPanelForFile(workspaceId, filePath, 'document')
+      ?? store.createDocument(workspaceId, filePath, docType, position, placement)
   }
   if (SQLITE_EXTENSIONS.has(ext)) {
-    return store.createDatabase(workspaceId, filePath, position, placement)
+    return revealExistingPanelForFile(workspaceId, filePath, 'database')
+      ?? store.createDatabase(workspaceId, filePath, position, placement)
   }
   if (HTML_EXTENSIONS.has(ext)) {
     return store.createBrowser(workspaceId, `file://${filePath}`, position, placement)
   }
+  const existingEditor = revealExistingPanelForFile(workspaceId, filePath, 'editor')
+  if (existingEditor) return existingEditor
   if (MARKDOWN_EXTENSIONS.has(ext)) {
     return store.createEditor(workspaceId, filePath, position, placement, { markdownPreview: true })
   }
@@ -101,9 +125,7 @@ function findGroupNodeForExt(
     for (const [nodeId, node] of Object.entries(store.getState().nodes)) {
       const nodeDock = findNodeDockStore(nodeId)
       if (!nodeDock) continue
-      // Check seed panel.
-      if (node.panelId && matchingPanelIds.has(node.panelId)) return { nodeId, canvasPanelId }
-      // Check all tabs in the node's live center layout.
+      // Check all tabs in the node's live center layout (which mirrors node.dockLayout).
       for (const id of collectPanelIds(nodeDock.getState().zones.center.layout)) {
         if (matchingPanelIds.has(id)) return { nodeId, canvasPanelId }
       }
@@ -118,11 +140,21 @@ export function openFileGrouped(workspaceId: string, filePath: string, position?
   const store = useAppStore.getState()
   const ext = getFileExt(filePath)
 
-  // Non-editor types: open normally (always new node).
+  // Non-editor types: open normally (always new node), unless already open.
   const docType = getDocumentType(filePath)
-  if (docType) return store.createDocument(workspaceId, filePath, docType, position)
-  if (SQLITE_EXTENSIONS.has(ext)) return store.createDatabase(workspaceId, filePath, position)
+  if (docType) {
+    return revealExistingPanelForFile(workspaceId, filePath, 'document')
+      ?? store.createDocument(workspaceId, filePath, docType, position)
+  }
+  if (SQLITE_EXTENSIONS.has(ext)) {
+    return revealExistingPanelForFile(workspaceId, filePath, 'database')
+      ?? store.createDatabase(workspaceId, filePath, position)
+  }
   if (HTML_EXTENSIONS.has(ext)) return store.createBrowser(workspaceId, `file://${filePath}`, position)
+
+  // Already open as an editor tab somewhere — focus it instead of duplicating.
+  const existingEditor = revealExistingPanelForFile(workspaceId, filePath, 'editor')
+  if (existingEditor) return existingEditor
 
   // Editor/text: try to find an existing node with the same extension.
   // ext === '' groups all extension-less files (Jenkinsfile, Makefile, etc.).
@@ -164,6 +196,10 @@ export function openFileAsTabInNode(workspaceId: string, nodeId: string, filePat
 export function openFileAsTextGrouped(workspaceId: string, filePath: string, position?: Point): string {
   const store = useAppStore.getState()
   const ext = getFileExt(filePath)
+
+  const existingEditor = revealExistingPanelForFile(workspaceId, filePath, 'editor')
+  if (existingEditor) return existingEditor
+
   const target = findGroupNodeForExt(workspaceId, ext)
   if (target) {
     const nodeDock = findNodeDockStore(target.nodeId)

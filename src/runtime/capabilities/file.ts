@@ -9,7 +9,6 @@
 
 import fs from 'fs/promises'
 import path from 'path'
-import { validatePathForCreation } from '../../main/ipc/pathValidation'
 import type { FileTreeNode, FileSearchResult, FileSearchOptions } from '../../shared/types'
 
 export async function readFile(filePath: string): Promise<string> {
@@ -20,16 +19,85 @@ export async function readBinary(filePath: string): Promise<Buffer> {
   return fs.readFile(filePath)
 }
 
-export async function writeFile(filePath: string, content: string): Promise<void> {
+/** Refuse to write THROUGH a symlink: path validation realpaths the parent
+ *  chain but the final segment may not exist yet, so an existing symlink
+ *  basename would otherwise redirect the write outside the validated location.
+ *  Mirrors statEntry/removeEntry, which likewise reject symlinks. */
+async function assertNotSymlink(filePath: string): Promise<void> {
+  const stat = await fs.lstat(filePath).catch(() => null) // missing target — fine
+  if (stat?.isSymbolicLink()) {
+    throw new Error(`Access denied: "${filePath}" is a symbolic link`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Atomic writes — every write through the runtime is tmp+rename, so a crash
+// mid-write can never leave a truncated file, on any host. This mirrors the
+// main process's writeJsonAtomic (src/main/writeJsonAtomic.ts): per-write
+// unique tmp in the same directory (rename is atomic on the same fs; unique so
+// concurrent writes can't consume each other's tmp), win32 rename retry for
+// the transient EPERM that MoveFileEx(REPLACE_EXISTING) hits when racing an
+// antivirus/indexer handle. The target's existing mode is copied onto the tmp
+// BEFORE the rename (a plain write preserves the inode's mode; a rename
+// replaces the inode — without this an editor save would strip a script's
+// executable bit).
+// ---------------------------------------------------------------------------
+
+let tmpSeq = 0
+function uniqueTmpPath(filePath: string): string {
+  tmpSeq = (tmpSeq + 1) & 0x7fffffff
+  return `${filePath}.${process.pid}.${tmpSeq}.tmp`
+}
+
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY'])
+const RENAME_MAX_RETRIES = 10
+const RENAME_RETRY_STEP_MS = 20
+
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fs.rename(from, to)
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      const retryable =
+        process.platform === 'win32' &&
+        attempt < RENAME_MAX_RETRIES &&
+        code !== undefined &&
+        RENAME_RETRY_CODES.has(code)
+      if (!retryable) throw err
+      await new Promise((r) => setTimeout(r, RENAME_RETRY_STEP_MS * (attempt + 1)))
+    }
+  }
+}
+
+async function writeAtomic(filePath: string, data: string | Buffer): Promise<void> {
+  await assertNotSymlink(filePath)
   await fs.mkdir(path.dirname(filePath), { recursive: true })
-  await fs.writeFile(filePath, content, 'utf-8')
+  const existingMode = await fs
+    .stat(filePath)
+    .then((s) => s.mode & 0o7777)
+    .catch(() => null) // no existing file — the tmp's default mode applies
+  const tmp = uniqueTmpPath(filePath)
+  try {
+    await fs.writeFile(tmp, data, 'utf-8') // encoding ignored for Buffers
+    if (existingMode !== null) {
+      await fs.chmod(tmp, existingMode).catch(() => { /* no modes on this fs */ })
+    }
+    await renameWithRetry(tmp, filePath)
+  } catch (err) {
+    await fs.unlink(tmp).catch(() => { /* never written */ })
+    throw err
+  }
+}
+
+export async function writeFile(filePath: string, content: string): Promise<void> {
+  await writeAtomic(filePath, content)
 }
 
 /** Write raw bytes (used by remote upload, where the source is read client-side
  *  and the contents are streamed in as a Buffer). Creates the parent directory. */
 export async function writeBinary(filePath: string, data: Buffer): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true })
-  await fs.writeFile(filePath, data)
+  await writeAtomic(filePath, data)
 }
 
 /** lstat + reject symlinks, returning the directory/file discriminator. */
@@ -59,60 +127,6 @@ export async function renameEntry(safeOldPath: string, safeNewPath: string): Pro
 
 export async function mkdirEntry(safePath: string): Promise<void> {
   await fs.mkdir(safePath, { recursive: true })
-}
-
-/**
- * Build a chokidar `ignored` predicate for a watcher rooted at `rootPath`.
- * chokidar v4 dropped glob support, so this must be a function, not glob
- * strings. Only the part BELOW the watch root is judged so a dotted or excluded
- * segment in the root's own absolute path (e.g. a workspace under ~/.config)
- * doesn't silence the whole tree.
- *
- * A path is ignored when, below the root: any segment is in `excluded`, OR any
- * ANCESTOR directory is hidden (leading dot), OR the leaf itself is a hidden
- * DIRECTORY. Hidden *files* (`.gitignore`, `.env`, `.prettierrc`) are NOT
- * ignored — a file the user explicitly opens in an editor must still receive
- * live change events through this one shared watcher (the editor and the file
- * tree share it). Pruning hidden directories keeps `.git`, `.cache` and our own
- * `.cate` state dir out of the watch, so a recursive watch stays cheap and the
- * app's own session writes don't echo back as external changes.
- *
- * The file-vs-directory call uses chokidar v4's `stats` argument (it invokes
- * `ignored(path, stats)`). chokidar asks once before stat-ing (stats absent) and
- * again with stats; when stats are absent we DON'T ignore the leaf, so chokidar
- * proceeds to stat it and re-asks — a hidden directory is still pruned on that
- * second call. Returning true for a directory stops chokidar descending into it.
- * Shared by the local watcher pool (main/ipc/filesystem.ts) and the daemon's
- * watch capability (runtime/capabilities/index.ts).
- */
-export function createFsIgnoreMatcher(
-  rootPath: string,
-  excluded: ReadonlySet<string>,
-): (filePath: string, stats?: { isDirectory(): boolean }) => boolean {
-  // Normalize separators up front. chokidar hands this predicate POSIX-style
-  // (forward-slash) paths even on Windows, while `rootPath` arrives OS-native
-  // (backslashes), so a raw `startsWith(rootPath)` would never match on Windows
-  // and the matcher would ignore nothing (over-watching the whole tree).
-  const root = rootPath.replace(/\\/g, '/')
-  return (filePath: string, stats?: { isDirectory(): boolean }) => {
-    const fp = filePath.replace(/\\/g, '/')
-    if (fp.length <= root.length || !fp.startsWith(root)) return false
-    if (fp.charCodeAt(root.length) !== 47 /* '/' */) return false
-    const segments = fp.slice(root.length + 1).split('/')
-    for (let i = 0; i < segments.length; i++) {
-      const segment = segments[i]
-      if (excluded.has(segment)) return true
-      if (segment.charCodeAt(0) === 46 /* '.' */) {
-        // An ancestor dotted segment is necessarily a directory → prune it.
-        if (i < segments.length - 1) return true
-        // The leaf: prune only if it's a directory (.git, .cache, .cate). A
-        // hidden file stays watched. Stats absent → defer (don't ignore);
-        // chokidar re-asks with stats and we prune the directory then.
-        if (stats?.isDirectory()) return true
-      }
-    }
-    return false
-  }
 }
 
 /**
@@ -241,7 +255,7 @@ async function nextAvailableName(destDir: string, baseName: string, intoSameDir:
 export async function copyInto(safeSrc: string, safeDestDir: string): Promise<string> {
   const intoSameDir = path.dirname(safeSrc) === safeDestDir
   const candidate = await nextAvailableName(safeDestDir, path.basename(safeSrc), intoSameDir)
-  const finalDest = await validatePathForCreation(path.join(safeDestDir, candidate))
+  const finalDest = path.join(safeDestDir, candidate)
   if (finalDest === safeSrc || finalDest.startsWith(safeSrc + path.sep)) {
     throw new Error('Cannot copy a folder into itself')
   }
@@ -253,7 +267,6 @@ export async function importEntriesInto(
   sources: string[],
   safeDestDir: string,
   mode: 'copy' | 'move',
-  ownerWindowId: number | undefined,
   onError: (src: string, error: unknown) => void,
 ): Promise<{ created: string[]; failed: number }> {
   const created: string[] = []
@@ -267,7 +280,7 @@ export async function importEntriesInto(
       }
       const intoSameDir = path.dirname(realSrc) === safeDestDir
       const candidate = await nextAvailableName(safeDestDir, path.basename(realSrc), intoSameDir)
-      const finalDest = await validatePathForCreation(path.join(safeDestDir, candidate), ownerWindowId)
+      const finalDest = path.join(safeDestDir, candidate)
 
       if (mode === 'move') {
         try {

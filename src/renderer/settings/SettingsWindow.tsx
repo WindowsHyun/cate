@@ -20,13 +20,18 @@ import { AppearanceSettings } from './AppearanceSettings'
 import { CanvasSettings } from './CanvasSettings'
 import { TerminalSettings } from './TerminalSettings'
 import { BrowserSettings } from './BrowserSettings'
+import { CliSettings } from './CliSettings'
 import { SidebarSettings } from './SidebarSettings'
 import { FileExplorerSettings } from './FileExplorerSettings'
+import { WorktreeSettings } from './WorktreeSettings'
 import { ShortcutSettings } from './ShortcutSettings'
 import { NotificationSettings } from './NotificationSettings'
 import { UpdatesSettings } from './UpdatesSettings'
 import { ProvidersSettings } from './ProvidersSettings'
+import { AgentHooksSettings } from './AgentHooksSettings'
+import { CanvasCateAgentSettings } from './CanvasCateAgentSettings'
 import { SkillsSettings } from './SkillsSettings'
+import { ExtensionsSettings } from './ExtensionsSettings'
 import { SettingsSearchContext } from './SettingsSearchContext'
 import { TextInput } from './SettingsComponents'
 import { useTranslation } from '../hooks/useTranslation'
@@ -39,11 +44,16 @@ const SECTIONS: { titleKey: StringKey; id: string; component: ComponentType }[] 
   { titleKey: 'settings.section.canvas', id: 'canvas', component: CanvasSettings },
   { titleKey: 'settings.section.terminal', id: 'terminal', component: TerminalSettings },
   { titleKey: 'settings.section.browser', id: 'browser', component: BrowserSettings },
+  { titleKey: 'settings.section.cli', id: 'cli', component: CliSettings },
   { titleKey: 'settings.section.sidebar', id: 'sidebar', component: SidebarSettings },
   { titleKey: 'settings.section.fileExplorer', id: 'file-explorer', component: FileExplorerSettings },
+  { titleKey: 'settings.section.worktrees', id: 'worktrees', component: WorktreeSettings },
   { titleKey: 'settings.section.notifications', id: 'notifications', component: NotificationSettings },
   { titleKey: 'settings.section.providers', id: 'providers', component: ProvidersSettings },
+  { titleKey: 'settings.section.agentHooks', id: 'agent-hooks', component: AgentHooksSettings },
+  { titleKey: 'settings.section.cateAgent', id: 'cate-agent', component: CanvasCateAgentSettings },
   { titleKey: 'settings.section.skills', id: 'skills', component: SkillsSettings },
+  { titleKey: 'settings.section.extensions', id: 'extensions', component: ExtensionsSettings },
   { titleKey: 'settings.section.updates', id: 'updates', component: UpdatesSettings },
   { titleKey: 'settings.section.shortcuts', id: 'shortcuts', component: ShortcutSettings },
 ]

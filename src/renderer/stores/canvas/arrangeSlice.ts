@@ -305,7 +305,7 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
     stackSelected(axis, gap = 16) {
       get().pushHistory()
       set((state) => {
-        const selected = Object.values(state.nodes).filter((n) => state.selectedNodeIds.has(n.id))
+        const selected = Object.values(state.nodes).filter((n) => state.selection.includes(n.id))
         if (selected.length < 2) return state
 
         const row = axis === 'row'
@@ -330,7 +330,7 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
     tidyGridSelected(gap = 16) {
       get().pushHistory()
       set((state) => {
-        const selected = Object.values(state.nodes).filter((n) => state.selectedNodeIds.has(n.id))
+        const selected = Object.values(state.nodes).filter((n) => state.selection.includes(n.id))
         if (selected.length < 2) return state
 
         const n = selected.length
@@ -362,7 +362,7 @@ export function createArrangeSlice(set: CanvasSet, get: CanvasGet): ArrangeActio
     alignSelected(axis) {
       get().pushHistory()
       set((state) => {
-        const selected = Object.values(state.nodes).filter((n) => state.selectedNodeIds.has(n.id))
+        const selected = Object.values(state.nodes).filter((n) => state.selection.includes(n.id))
         if (selected.length < 2) return state
         const minX = Math.min(...selected.map((n) => n.origin.x))
         const minY = Math.min(...selected.map((n) => n.origin.y))

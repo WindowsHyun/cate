@@ -14,6 +14,8 @@ import remarkGfm from 'remark-gfm'
 import type { EditorPanelProps } from './types'
 import { useAppStore } from '../stores/appStore'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useOptionalCanvasStoreContext } from '../stores/CanvasStoreContext'
+import { focusedNodeId } from '../stores/canvas/selectionModel'
 import {
   registerEditorSave,
   unregisterEditorSave,
@@ -287,8 +289,8 @@ function reconstructOriginalFromDiff(currentContent: string, diff: string): stri
 export default function EditorPanel({
   panelId,
   workspaceId,
-  nodeId,
   filePath,
+  nodeId,
 }: EditorPanelProps) {
   useRenderCount('EditorPanel')
   const containerRef = useRef<HTMLDivElement>(null)
@@ -325,6 +327,26 @@ export default function EditorPanel({
       useAppStore.getState().setMarkdownViewMode(workspaceId, panelId, mode),
     [workspaceId, panelId],
   )
+
+  // When this panel becomes the focused canvas node, move keyboard focus into
+  // the editor so typing works without a second click — matching TerminalPanel
+  // and BrowserPanel. (A panel with no CanvasStoreProvider — e.g. docked in a
+  // detached window — reads as not-focused.) Retries across a few frames because
+  // the Monaco instance is created asynchronously and may not exist yet when
+  // focus first lands. Skipped in markdown-preview mode (no text surface).
+  const isFocused = useOptionalCanvasStoreContext((s) => focusedNodeId(s) === nodeId, false)
+  useEffect(() => {
+    if (!isFocused || markdownPreview) return
+    let raf = 0
+    let tries = 0
+    const tryFocus = (): void => {
+      const editor = editorRef.current ?? diffEditorRef.current
+      if (editor) { editor.focus(); return }
+      if (tries++ < 10) raf = requestAnimationFrame(tryFocus)
+    }
+    raf = requestAnimationFrame(tryFocus)
+    return () => cancelAnimationFrame(raf)
+  }, [isFocused, markdownPreview])
   const rootPath = ws?.rootPath
   const isMarkdown = !!filePath && /\.(md|mdx|markdown)$/i.test(filePath)
 
@@ -417,8 +439,8 @@ export default function EditorPanel({
         let originalContent = ''
         try {
           const diff = diffMode === 'staged'
-            ? await window.electronAPI.gitDiffStaged(rootPath, relativePath)
-            : await window.electronAPI.gitDiff(rootPath, relativePath)
+            ? await window.electronAPI.gitDiffStaged(rootPath, relativePath, workspaceId)
+            : await window.electronAPI.gitDiff(rootPath, relativePath, workspaceId)
           originalContent = reconstructOriginalFromDiff(modifiedContent, diff)
         } catch {
           originalContent = modifiedContent
@@ -805,7 +827,13 @@ export default function EditorPanel({
   const showPreview = isMarkdown && (markdownViewMode === 'preview' || markdownViewMode === 'split')
   const isSplit = isMarkdown && markdownViewMode === 'split'
 
-  const [overlayDismissed, setOverlayDismissed] = useState(false)
+  // Seed dismissed when this scratch panel already has unsaved content (a
+  // remount after a workspace switch, or a session restore) — otherwise the
+  // welcome overlay masks the still-intact unsavedContent underneath, making
+  // it look like the typed text was lost even though it's fully preserved.
+  const [overlayDismissed, setOverlayDismissed] = useState(() =>
+    !!useAppStore.getState().workspaces.find((w) => w.id === workspaceId)?.panels[panelId]?.unsavedContent,
+  )
   // Re-show overlay if filePath transitions from defined → undefined (panel cleared)
   const prevFilePathRef = useRef(filePath)
   useEffect(() => {
@@ -946,7 +974,7 @@ function MarkdownCodeBlock({ children }: { children: ReactNode }) {
             window.setTimeout(() => setCopied(false), 1200)
           }}
           aria-label="Copy code"
-          className={`absolute top-1.5 right-1.5 p-1 rounded-md bg-surface-3 text-muted transition-opacity hover:text-primary hover:bg-hover-strong ${
+          className={`absolute top-1.5 right-1.5 p-1 rounded-[10px] bg-surface-3 text-muted transition-opacity hover:text-primary hover:bg-hover-strong ${
             copied ? 'opacity-100 text-primary' : 'opacity-0 group-hover:opacity-100'
           }`}
         >

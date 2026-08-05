@@ -22,7 +22,11 @@ vi.mock('node-pty', () => ({
 
 // Captured ipcMain.handle map so tests can invoke a handler directly.
 const handlers = new Map<string, (...args: unknown[]) => unknown>()
+const clipboardWriteText = vi.fn()
 vi.mock('electron', () => ({
+  clipboard: {
+    writeText: clipboardWriteText,
+  },
   ipcMain: {
     handle: vi.fn((channel: string, fn: (...args: unknown[]) => unknown) => {
       handlers.set(channel, fn)
@@ -57,13 +61,39 @@ vi.mock('../windowRegistry', () => {
   }
 })
 vi.mock('../shellEnv', () => ({ getShellEnv: () => ({}) }))
-vi.mock('../shellResolver', () => ({ resolveShell: () => ({ path: '/bin/sh', fallback: false }) }))
-vi.mock('../logger', () => ({ default: { warn: () => {}, info: () => {}, error: () => {}, debug: () => {} } }))
+vi.mock('../../runtime/capabilities/shellResolver', () => ({ resolveShell: () => ({ path: '/bin/sh', fallback: false }) }))
+
+// Hoisted spies shared with the module mocks below (vi.mock factories are
+// hoisted above all other code, so the spies they reference must be too).
+const diag = vi.hoisted(() => ({ warn: vi.fn(), ptyCreate: vi.fn() }))
+vi.mock('../logger', () => ({ default: { warn: diag.warn, info: () => {}, error: () => {}, debug: () => {} } }))
+
+// First-party CATE_API endpoint provider. spawnTerminal awaits
+// workspaceCateApi.ensureEndpoint(workspaceId) and, when it returns an endpoint,
+// injects CATE_API/CATE_TOKEN into the spawned PTY env. Mock it so the env
+// tests can drive both the endpoint-present and gated (null) paths.
+const cateApi = vi.hoisted(() => ({ ensureEndpoint: vi.fn() }))
+vi.mock('../extensions/workspaceCateApi', () => ({
+  workspaceCateApi: { ensureEndpoint: cateApi.ensureEndpoint },
+}))
+
+// A fake runtime whose process.create is the hoisted spy, so the instant-exit
+// tests can drive onData/onExit deterministically through the real spawnTerminal.
+vi.mock('../runtime/runtimeManager', () => ({
+  runtimes: {
+    resolve: () => ({ validateCwd: (p: string) => p, process: { create: diag.ptyCreate } }),
+    disposeAll: () => Promise.resolve(),
+  },
+}))
+vi.mock('../runtime/locator', () => ({ parseLocator: (cwd: string) => ({ runtimeId: 'local', path: cwd }) }))
 
 // --- terminalLifecycle (renderer) deps, stubbed so getOrCreate/dispose run
 //     without a real xterm/DOM/store stack. registryState is left REAL so the
 //     dispose-during-creation path exercises the actual registry bookkeeping.
 const makeFakeTerminal = () => ({
+  parser: {
+    registerOscHandler: () => ({ dispose: () => {} }),
+  },
   loadAddon: () => {},
   registerLinkProvider: () => ({ dispose: () => {} }),
   write: () => {},
@@ -74,6 +104,7 @@ vi.mock('@xterm/addon-fit', () => ({ FitAddon: vi.fn(() => ({ dispose: () => {} 
 vi.mock('@xterm/addon-search', () => ({ SearchAddon: vi.fn(() => ({})) }))
 vi.mock('@xterm/addon-serialize', () => ({ SerializeAddon: vi.fn(() => ({ dispose: () => {} })) }))
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: vi.fn(() => ({})) }))
+vi.mock('@xterm/addon-webgl', () => ({ WebglAddon: class { onContextLoss() {} dispose() {} } }))
 vi.mock('../../renderer/lib/logger', () => ({ default: { warn: () => {}, info: () => {}, error: () => {}, debug: () => {} } }))
 vi.mock('../../renderer/lib/terminal/terminalSettings', () => ({
   getTerminalFontFamily: () => 'mono',
@@ -295,6 +326,26 @@ describe('scrollback IPC async fs round-trip', () => {
   })
 })
 
+describe('terminal clipboard IPC', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    handlers.clear()
+    clipboardWriteText.mockClear()
+  })
+
+  it('writes terminal clipboard text through Electron clipboard', async () => {
+    const { TERMINAL_CLIPBOARD_WRITE } = await import('../../shared/ipc-channels')
+    await import('./terminal').then((m) => m.registerHandlers())
+
+    const writeClipboard = handlers.get(TERMINAL_CLIPBOARD_WRITE)
+    if (!writeClipboard) throw new Error('clipboard IPC handler was not registered')
+
+    await writeClipboard({}, 'copied from remote tmux')
+
+    expect(clipboardWriteText).toHaveBeenCalledWith('copied from remote tmux')
+  })
+})
+
 describe('terminalLifecycle dispose-during-creation', () => {
   beforeEach(() => {
     vi.resetModules()
@@ -313,7 +364,6 @@ describe('terminalLifecycle dispose-during-creation', () => {
       settingsGet: vi.fn(() => Promise.resolve('/bin/zsh')),
       terminalCreate: vi.fn(() => createPromise),
       terminalKill,
-      shellUnregisterTerminal: vi.fn(() => Promise.resolve()),
     }
     ;(globalThis as unknown as { window: unknown }).window = { electronAPI }
 
@@ -336,5 +386,121 @@ describe('terminalLifecycle dispose-during-creation', () => {
     await pending
 
     expect(terminalKill).toHaveBeenCalledWith('pty-freshly-created')
+  })
+})
+
+// ===========================================================================
+// Instant-exit diagnostics (#401): a fresh shell that exits 0 immediately with
+// no output never became a session. spawnTerminal logs it with the resolved
+// shell so the cause is captured for the next report.
+// ===========================================================================
+describe('instant-exit diagnostics (#401)', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    diag.warn.mockClear()
+    diag.ptyCreate.mockReset()
+  })
+
+  // Spawn through the real TERMINAL_CREATE handler; return the captured PTY
+  // callbacks so the test fires data/exit deterministically (after create
+  // resolves, so the resolved shell is recorded).
+  async function spawn(shell = '/bin/zsh'): Promise<{
+    onData: (id: string, d: string) => void
+    onExit: (id: string, c: number) => void
+  }> {
+    let cbs!: { onData: (id: string, d: string) => void; onExit: (id: string, c: number) => void }
+    diag.ptyCreate.mockImplementation(async (_opts: unknown, onData: never, onExit: never) => {
+      cbs = { onData, onExit }
+      return { id: 'pty-x', pid: 123, shell }
+    })
+    const mod = await import('./terminal')
+    mod.registerHandlers()
+    await handlers.get('terminal:create')!({}, { cols: 80, rows: 24 })
+    return cbs
+  }
+
+  it('warns (with the resolved shell) when a fresh terminal exits 0 immediately with no output', async () => {
+    const { onExit } = await spawn('/bin/zsh')
+    onExit('pty-x', 0)
+    expect(diag.warn).toHaveBeenCalled()
+    expect(diag.warn.mock.calls[0].join(' ')).toContain('/bin/zsh')
+  })
+
+  it('does not warn when the shell produced output before exiting 0', async () => {
+    const { onData, onExit } = await spawn()
+    onData('pty-x', 'prompt$ ')
+    onExit('pty-x', 0)
+    expect(diag.warn).not.toHaveBeenCalled()
+  })
+
+  it('does not warn for a non-zero exit code', async () => {
+    const { onExit } = await spawn()
+    onExit('pty-x', 1)
+    expect(diag.warn).not.toHaveBeenCalled()
+  })
+})
+
+// ===========================================================================
+// CATE_API env injection: the wiring that makes the `cate` CLI reachable from a
+// spawned terminal. When a terminal is created WITH a workspaceId and the
+// first-party endpoint is up, spawnTerminal must inject CATE_API/CATE_TOKEN into
+// the PTY env. It must fail CLOSED — inject nothing — when there's no workspace
+// or when ensureEndpoint returns null (CLI setting disabled / listener failed).
+// ===========================================================================
+describe('CATE_API env injection into spawned terminals', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    diag.ptyCreate.mockReset()
+    cateApi.ensureEndpoint.mockReset()
+  })
+
+  // Spawn through the real TERMINAL_CREATE handler and return the env object
+  // that spawnTerminal passed down to runtime.process.create (the PTY env).
+  async function spawnAndGetEnv(
+    options: { cols: number; rows: number; cwd?: string; shell?: string; workspaceId?: string; panelId?: string },
+  ): Promise<Record<string, string> | undefined> {
+    diag.ptyCreate.mockResolvedValue({ id: 'pty-env', pid: 123, shell: '/bin/zsh' })
+    const mod = await import('./terminal')
+    mod.registerHandlers()
+    await handlers.get('terminal:create')!({}, options)
+    const createOpts = diag.ptyCreate.mock.calls[0][0] as { env?: Record<string, string> }
+    return createOpts.env
+  }
+
+  it('injects CATE_API/CATE_TOKEN when a workspace endpoint is available', async () => {
+    cateApi.ensureEndpoint.mockResolvedValue({ port: 9876, token: 'tok-abc' })
+
+    const env = await spawnAndGetEnv({ cols: 80, rows: 24, workspaceId: 'ws-1' })
+
+    expect(cateApi.ensureEndpoint).toHaveBeenCalledWith('ws-1')
+    expect(env).toEqual({ CATE_API: 'http://127.0.0.1:9876', CATE_TOKEN: 'tok-abc' })
+  })
+
+  it('injects CATE_PANEL_ID when the PTY belongs to a Cate terminal panel', async () => {
+    cateApi.ensureEndpoint.mockResolvedValue({ port: 9876, token: 'tok-abc' })
+
+    const env = await spawnAndGetEnv({ cols: 80, rows: 24, workspaceId: 'ws-1', panelId: 'panel-123' })
+
+    expect(env).toEqual({
+      CATE_API: 'http://127.0.0.1:9876',
+      CATE_TOKEN: 'tok-abc',
+      CATE_PANEL_ID: 'panel-123',
+    })
+  })
+
+  it('injects nothing (fail closed) when there is no workspaceId — ensureEndpoint is never consulted', async () => {
+    const env = await spawnAndGetEnv({ cols: 80, rows: 24 })
+
+    expect(cateApi.ensureEndpoint).not.toHaveBeenCalled()
+    expect(env).toBeUndefined()
+  })
+
+  it('injects nothing (fail closed) when ensureEndpoint returns null (CLI disabled)', async () => {
+    cateApi.ensureEndpoint.mockResolvedValue(null)
+
+    const env = await spawnAndGetEnv({ cols: 80, rows: 24, workspaceId: 'ws-1' })
+
+    expect(cateApi.ensureEndpoint).toHaveBeenCalledWith('ws-1')
+    expect(env).toBeUndefined()
   })
 })

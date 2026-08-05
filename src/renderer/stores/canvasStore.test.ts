@@ -11,10 +11,12 @@
 // =============================================================================
 
 import { describe, it, expect } from 'vitest'
-import { createCanvasStore } from './canvasStore'
+import { createCanvasStore, selectVisibleNodeIds, __keepAliveNodeIdsForTest } from './canvasStore'
+import { focusedNodeId } from './canvas/selectionModel'
 import { recommendPlacements, nudgeToFree } from '../canvas/placement'
 import { CANVAS_GRID_SIZE } from '../canvas/layoutEngine'
 import type { CanvasNodeState, CanvasNodeId } from '../../shared/types'
+import { collectPanelIds } from '../../shared/collectPanelIds'
 
 describe('canvasStore.addNode panelId dedup invariant', () => {
   it('single addNode produces exactly one node for that panelId', () => {
@@ -22,7 +24,7 @@ describe('canvasStore.addNode panelId dedup invariant', () => {
     store.getState().addNode('panel-X', 'editor', { x: 0, y: 0 }, { width: 100, height: 80 })
 
     const nodes = Object.values(store.getState().nodes)
-    const matching = nodes.filter((n) => n.panelId === 'panel-X')
+    const matching = nodes.filter((n) => collectPanelIds(n.dockLayout).includes('panel-X'))
     expect(matching).toHaveLength(1)
   })
 
@@ -32,7 +34,7 @@ describe('canvasStore.addNode panelId dedup invariant', () => {
     store.getState().addNode('panel-X', 'editor', { x: 200, y: 200 }, { width: 100, height: 80 })
 
     const nodes = Object.values(store.getState().nodes)
-    const matching = nodes.filter((n) => n.panelId === 'panel-X')
+    const matching = nodes.filter((n) => collectPanelIds(n.dockLayout).includes('panel-X'))
     // Today this produces 2; post-fix it should be 1.
     expect(matching).toHaveLength(1)
   })
@@ -64,8 +66,8 @@ describe('canvasStore.addNode panelId dedup invariant', () => {
     expect(idA).not.toBe(idB)
     const nodes = Object.values(store.getState().nodes)
     expect(nodes).toHaveLength(2)
-    expect(nodes.some((n) => n.panelId === 'panel-A')).toBe(true)
-    expect(nodes.some((n) => n.panelId === 'panel-B')).toBe(true)
+    expect(nodes.some((n) => collectPanelIds(n.dockLayout).includes('panel-A'))).toBe(true)
+    expect(nodes.some((n) => collectPanelIds(n.dockLayout).includes('panel-B'))).toBe(true)
   })
 })
 
@@ -79,6 +81,118 @@ describe('canvasStore.addNode — canvas-on-canvas is rejected', () => {
     const result = store.getState().addNode('panel-canvas-1', 'canvas', { x: 10, y: 10 }, { width: 400, height: 300 })
     expect(result).toBe('')
     expect(Object.keys(store.getState().nodes)).toHaveLength(0)
+  })
+})
+
+// Viewport culling unmounts off-screen nodes to free terminal/editor resources.
+// Webview-backed nodes (extensions) hold non-reconstructible in-page state, so
+// they must stay mounted even off-screen — otherwise panning away resets them.
+// selectVisibleNodeIds is the pure cull core; `keepMountedPanelIds` is the set of
+// panel ids whose type must stay mounted off-screen (derived by the caller).
+describe('canvasStore.selectVisibleNodeIds — keep-mounted webview nodes', () => {
+  // A viewport that places nothing on-screen: far-away nodes are culled unless
+  // exempt. zoom 1, 800x600 → margin-expanded rect is x:[-800,1600] y:[-600,1200].
+  const offscreen = (store: ReturnType<typeof createCanvasStore>) => {
+    store.getState().setContainerSize({ width: 800, height: 600 })
+    store.setState({ zoomLevel: 1, viewportOffset: { x: 0, y: 0 }, selection: [], selectionActive: false })
+  }
+
+  it('culls an off-screen editor but keeps an off-screen extension', () => {
+    const store = createCanvasStore()
+    const editorId = store.getState().addNode('p-editor', 'editor', { x: 5000, y: 5000 }, { width: 100, height: 80 })
+    const extId = store.getState().addNode('p-ext', 'extension', { x: 5000, y: 6000 }, { width: 100, height: 80 })
+    offscreen(store)
+
+    // Only the extension panel keeps mounted off-screen.
+    const keepMounted = new Set(['p-ext'])
+    const visible = selectVisibleNodeIds(store.getState(), keepMounted)
+
+    expect(visible).toContain(extId)
+    expect(visible).not.toContain(editorId)
+  })
+
+  it('without a keep-mounted set, the extension is culled like any other node', () => {
+    const store = createCanvasStore()
+    const extId = store.getState().addNode('p-ext', 'extension', { x: 5000, y: 6000 }, { width: 100, height: 80 })
+    offscreen(store)
+
+    // No keep-mounted set → no exemption → pure geometric cull.
+    expect(selectVisibleNodeIds(store.getState())).not.toContain(extId)
+  })
+
+  it('keeps an extension node keep-alive (regression: keep-mounted membership)', () => {
+    const store = createCanvasStore()
+    const editorId = store.getState().addNode('p-editor', 'editor', { x: 0, y: 0 }, { width: 100, height: 80 })
+    const extId = store.getState().addNode('p-ext', 'extension', { x: 0, y: 0 }, { width: 100, height: 80 })
+
+    const keepAlive = __keepAliveNodeIdsForTest(store.getState().nodes, new Set(['p-ext']))
+    expect(keepAlive.has(extId)).toBe(true)
+    expect(keepAlive.has(editorId)).toBe(false)
+  })
+
+  it('does not recompute the keep-alive set when a stable set is reused (title churn)', () => {
+    const store = createCanvasStore()
+    store.getState().addNode('p-ext', 'extension', { x: 0, y: 0 }, { width: 100, height: 80 })
+    const nodes = store.getState().nodes
+
+    // The caller's equality-checked selector hands back the SAME set object when
+    // only unrelated panel state (e.g. a title) changed. The cache is keyed on
+    // that identity, so the memoized set is returned without a rebuild.
+    const stableSet = new Set(['p-ext'])
+    const first = __keepAliveNodeIdsForTest(nodes, stableSet)
+    const second = __keepAliveNodeIdsForTest(nodes, stableSet)
+    expect(second).toBe(first) // same object → not recomputed
+
+    // A genuinely different set object forces a fresh computation.
+    const third = __keepAliveNodeIdsForTest(nodes, new Set(['p-ext']))
+    expect(third).not.toBe(first)
+  })
+
+  it('rebuilds the keep-alive set when a node is added later (async-restore ordering)', () => {
+    const store = createCanvasStore()
+    const keepMounted = new Set(['p-ext']) // stable set identity across both calls
+    // Set computed BEFORE the extension node exists (panel restored first).
+    const before = __keepAliveNodeIdsForTest(store.getState().nodes, keepMounted)
+    expect(before.size).toBe(0)
+
+    // Extension node lands afterwards — node count changes, so the cache rebuilds
+    // even though the keep-mounted set identity is unchanged.
+    const extId = store.getState().addNode('p-ext', 'extension', { x: 0, y: 0 }, { width: 100, height: 80 })
+    const after = __keepAliveNodeIdsForTest(store.getState().nodes, keepMounted)
+    expect(after.has(extId)).toBe(true)
+  })
+
+  it('rebuilds when a keep-mounted panel moves between two existing nodes (count unchanged)', () => {
+    // Regression: dragging a keep-mounted extension tab from one existing node's
+    // dockLayout into another changes neither the node count nor the keep-mounted
+    // set identity, so a count-keyed cache returned a stale set naming the OLD
+    // node — culling then destroyed the extension webview on the destination.
+    const tabs = (panelIds: string[]) => ({
+      type: 'tabs' as const,
+      id: `stack-${panelIds.join('-')}`,
+      panelIds,
+      activeIndex: 0,
+    })
+    const store = createCanvasStore()
+    const nodeA = store.getState().addNode('p-ext', 'extension', { x: 0, y: 0 }, { width: 100, height: 80 })
+    const nodeB = store.getState().addNode('p-b', 'editor', { x: 0, y: 0 }, { width: 100, height: 80 })
+    // Node A hosts the keep-mounted tab alongside another; Node B hosts only its own.
+    store.getState().setNodeDockLayout(nodeA, tabs(['p-ext', 'p-a']))
+    store.getState().setNodeDockLayout(nodeB, tabs(['p-b']))
+
+    const keepMounted = new Set(['p-ext']) // stable identity across both calls
+    const before = __keepAliveNodeIdsForTest(store.getState().nodes, keepMounted)
+    expect(before.has(nodeA)).toBe(true)
+    expect(before.has(nodeB)).toBe(false)
+
+    // Move the keep-mounted tab A → B. Node count stays 2, set identity unchanged;
+    // only the two nodes' dockLayout objects change.
+    store.getState().setNodeDockLayout(nodeA, tabs(['p-a']))
+    store.getState().setNodeDockLayout(nodeB, tabs(['p-b', 'p-ext']))
+
+    const after = __keepAliveNodeIdsForTest(store.getState().nodes, keepMounted)
+    expect(after.has(nodeB)).toBe(true)
+    expect(after.has(nodeA)).toBe(false)
   })
 })
 
@@ -103,7 +217,7 @@ describe('canvasStore — focusEpoch bumps on focus actions', () => {
 
     expect(afterFirst).toBe(before + 1)
     expect(afterSecond).toBe(before + 2)
-    expect(store.getState().focusedNodeId).toBe(id)
+    expect(focusedNodeId(store.getState())).toBe(id)
   })
 
   it('focusAndCenter increments focusEpoch', () => {
@@ -114,7 +228,7 @@ describe('canvasStore — focusEpoch bumps on focus actions', () => {
     const before = store.getState().focusEpoch
     store.getState().focusAndCenter(id)
     expect(store.getState().focusEpoch).toBe(before + 1)
-    expect(store.getState().focusedNodeId).toBe(id)
+    expect(focusedNodeId(store.getState())).toBe(id)
   })
 
   it('focusAndCenter bumps focusEpoch even when called twice on the same node', () => {
@@ -170,7 +284,7 @@ describe('canvasStore.navigateDirection', () => {
     const nav = (dir: 'up' | 'down' | 'left' | 'right') => {
       store.getState().focusNode(c)
       store.getState().navigateDirection(dir)
-      return store.getState().focusedNodeId
+      return focusedNodeId(store.getState())
     }
     expect(nav('right')).toBe(r)
     expect(nav('left')).toBe(l)
@@ -182,7 +296,7 @@ describe('canvasStore.navigateDirection', () => {
     const { store, r } = setup()
     store.getState().focusNode(r) // rightmost node
     store.getState().navigateDirection('right')
-    expect(store.getState().focusedNodeId).toBe(r)
+    expect(focusedNodeId(store.getState())).toBe(r)
   })
 })
 
@@ -207,7 +321,7 @@ describe('canvasStore.navigateSelect', () => {
     const nav = (dir: 'up' | 'down' | 'left' | 'right') => {
       store.getState().selectNodes([c])
       store.getState().navigateSelect(dir)
-      return [...store.getState().selectedNodeIds]
+      return [...store.getState().selection]
     }
     expect(nav('right')).toEqual([r])
     expect(nav('left')).toEqual([l])
@@ -219,15 +333,15 @@ describe('canvasStore.navigateSelect', () => {
     const { store, c, r } = setup()
     store.getState().focusNode(c)
     store.getState().navigateSelect('right')
-    expect(store.getState().focusedNodeId).toBeNull()
-    expect([...store.getState().selectedNodeIds]).toEqual([r])
+    expect(focusedNodeId(store.getState())).toBeNull()
+    expect([...store.getState().selection]).toEqual([r])
   })
 
   it('uses the focused node as the reference when nothing is selected', () => {
     const { store, c, r } = setup()
     store.getState().focusNode(c)
     store.getState().navigateSelect('right')
-    expect([...store.getState().selectedNodeIds]).toEqual([r])
+    expect([...store.getState().selection]).toEqual([r])
   })
 
   it('chains: jumping again continues from the newly selected node', () => {
@@ -235,16 +349,16 @@ describe('canvasStore.navigateSelect', () => {
     const rr = store.getState().addNode('rr', 'editor', { x: 950, y: -40 }, { width: 100, height: 80 })
     store.getState().selectNodes([c])
     store.getState().navigateSelect('right')
-    expect([...store.getState().selectedNodeIds]).toEqual([r])
+    expect([...store.getState().selection]).toEqual([r])
     store.getState().navigateSelect('right')
-    expect([...store.getState().selectedNodeIds]).toEqual([rr])
+    expect([...store.getState().selection]).toEqual([rr])
   })
 
   it('is a no-op when no node lies in the requested direction', () => {
     const { store, r } = setup()
     store.getState().selectNodes([r]) // rightmost
     store.getState().navigateSelect('right')
-    expect([...store.getState().selectedNodeIds]).toEqual([r])
+    expect([...store.getState().selection]).toEqual([r])
   })
 
   it('suppresses auto-focus on jump, and resumes it on explicit focus or manual pan', () => {
@@ -287,8 +401,8 @@ describe('canvasStore.panViewport', () => {
     expect(store.getState().viewportOffset.y).toBeGreaterThan(0)
 
     // No selection/focus side effects.
-    expect(store.getState().focusedNodeId).toBeNull()
-    expect(store.getState().selectedNodeIds.size).toBe(0)
+    expect(focusedNodeId(store.getState())).toBeNull()
+    expect(store.getState().selection.length).toBe(0)
   })
 
   it('left and right pan by equal and opposite amounts', () => {
@@ -350,7 +464,7 @@ describe('canvasStore.recommendPlacements', () => {
 
   function node(id: string, x: number, y: number, w = 200, h = 150, creationIndex = 0): CanvasNodeState {
     return {
-      id, panelId: `panel-${id}`, origin: { x, y }, size: { width: w, height: h },
+      id, dockLayout: { type: 'tabs', id: `stack-${id}`, panelIds: [`panel-${id}`], activeIndex: 0 }, origin: { x, y }, size: { width: w, height: h },
       zOrder: 0, creationIndex,
     }
   }
@@ -397,13 +511,31 @@ describe('canvasStore.recommendPlacements', () => {
     expect(three.length).toBeLessThanOrEqual(3)
   })
 
-  it('sizes candidates from sizeOverride when given (honors the default-size setting)', () => {
+  it('mirrors the neighbor (and placed ghosts) over sizeOverride wherever a neighbor is adjacent', () => {
     const override = { width: 900, height: 700 }
-    const cands = recommendPlacements(toMap(node('a', 0, 0)), 'a', 'terminal', VIEWPORT, null, 6, override)
+    const node0 = node('a', 0, 0) // 200x150
+    const cands = recommendPlacements(toMap(node0), 'a', 'terminal', VIEWPORT, null, 6, override)
     expect(cands.length).toBeGreaterThan(0)
+    // Mirror rule: a candidate adjacent to the node OR to an already-placed ghost
+    // takes that neighbor's FULL size, clamped to [MIN,MAX] (200x150 → MIN
+    // 280x180). Because placed ghosts also act as neighbors, the grid tiles
+    // outward and EVERY candidate around the single node mirrors at 280x180 —
+    // the override never wins where a neighbor exists.
     cands.forEach((c) => {
-      expect(c.size).toEqual(override)
+      expect(c.size, `every candidate mirrors the node (MIN-clamped): ${JSON.stringify(c)}`)
+        .toEqual({ width: 280, height: 180 })
     })
+  })
+
+  it('drives the default (best) spot from sizeOverride on an empty canvas, where there is no neighbor to mirror', () => {
+    const override = { width: 900, height: 700 }
+    const cands = recommendPlacements({}, null, 'terminal', VIEWPORT, { x: 500, y: 400 }, 6, override)
+    expect(cands.length).toBeGreaterThan(0)
+    // On a blank area the picker offers SIZE choices: the best/first spot uses
+    // the override; the others are distinct scaled variants of it.
+    expect(cands[0].size).toEqual(override)
+    const sizeKeys = cands.map((c) => `${c.size.width}x${c.size.height}`)
+    expect(new Set(sizeKeys).size).toBe(cands.length)
   })
 
   it('biases the best recommendation toward the anchor (mouse) when given', () => {
@@ -486,56 +618,81 @@ describe('canvasStore.recommendPlacements', () => {
     })
   })
 
-  it('STANDARD SIZE: recommendations use the default size, not the active node size', () => {
-    // An unusually-shaped (tall) focused node → recommendations are still the
-    // standard 640×400, not the node's shape.
-    const std = recommendPlacements({}, null, 'terminal', VIEWPORT, null)[0].size
+  it('MIRRORED SIZE: a side slot mirrors the node on BOTH axes (height capped at MAX), no shrunken sliver', () => {
+    // An unusually-shaped (tall) focused node (600x1000). On the LEFT/RIGHT the
+    // free slot is tall enough to host the node's full height, so the mirror copies
+    // the node's full size onto the candidate, clamped to [MIN,MAX] — width 600,
+    // height capped at PLACEMENT_MAX_H (900). The mirror is never a shrunken sliver.
     const a = node('a', 200, 200, 600, 1000)
     const cands = recommendPlacements(toMap(a), 'a', 'terminal', VIEWPORT, null)
     expect(cands.length).toBeGreaterThanOrEqual(1)
-    expect(cands[0].size).toEqual(std)
+    // A side slot mirrors the node: width 600, height clamped to MAX_H (900).
+    const sideSlot = cands.find((c) => c.size.width === 600 && c.size.height === 900)
+    expect(sideSlot, `expected a side mirror capped at MAX_H: ${JSON.stringify(cands)}`).toBeTruthy()
+    // Every mirror (width 600) sits at the MAX_H cap — no shrunken stacked sliver.
+    cands
+      .filter((c) => c.size.width === 600)
+      .forEach((c) => {
+        expect(c.size.height, `no shrunken sliver: ${JSON.stringify(c)}`).toBe(900)
+      })
   })
 
-  it('STANDARD PREFERRED: a gap a standard panel fits gets a standard ghost (not oversized)', () => {
-    // Two tall nodes with a wide gap between them — a standard panel fits, so the
-    // ghost in the gap is standard, hugging the active node (no oversized custom).
-    const std = recommendPlacements({}, null, 'terminal', VIEWPORT, null)[0].size
+  it('MIRROR GRID: a bounded gap mirrors the neighbor size, never grows to fill', () => {
+    // Two tall nodes with a wide gap between them. Under the pure mirror grid the
+    // gap mirrors a neighbor's FULL size (400x800) rather than growing to fill the
+    // 900px gap — no over-wide tile. The mirrored height (800) is clamped to MAX_H.
     const a = node('a', 0, 0, 400, 800)
     const b = node('b', 1300, 0, 400, 800, 1)
     const cands = recommendPlacements(toMap(a, b), 'a', 'terminal', VIEWPORT, null)
     const inGap = cands.find((c) => c.point.x >= 400 && c.point.x + c.size.width <= 1300)
     expect(inGap).toBeDefined()
-    expect(inGap!.size).toEqual(std)
+    // Mirrors the neighbor width (400) — NOT an 820-wide grow-to-fill tile.
+    expect(inGap!.size.width).toBe(400)
+    // Height mirrored the neighbor (800), within MAX_H.
+    expect(inGap!.size.height).toBe(800)
+    // No candidate is wider than the neighbor — uniform grid, no fill.
+    cands.forEach((c) => expect(c.size.width).toBeLessThanOrEqual(400))
   })
 
-  it('GAP-FILL: a sub-standard gap between nodes gets a custom-sized recommendation', () => {
-    // Two standard (640×400) nodes with a ~460px horizontal gap — too narrow for
-    // a standard panel, but wide enough for a custom one.
+  it('GAP-FILL: a sub-standard gap is SKIPPED under the mirror grid — no custom tile', () => {
+    // Two standard (640×400) nodes with a ~460px horizontal gap — too narrow for a
+    // mirror of the 640-wide neighbor. Under the pure mirror grid the gap mirrors a
+    // 640 neighbor, which does not fit 460, so it is SKIPPED rather than filled with
+    // a custom sliver. Every candidate mirrors the neighbor's full size.
     const a = node('a', 0, 0, 640, 400)
     const b = node('b', 1100, 0, 640, 400, 1)
     const cands = recommendPlacements(toMap(a, b), 'a', 'terminal', VIEWPORT, null)
+    // No custom-sized tile squeezes into the 460px gap.
     const custom = cands.find((c) => c.size.width !== 640 || c.size.height !== 400)
-    expect(custom).toBeDefined()
-    // It sits inside the gap and overlaps neither neighbour.
-    expect(custom!.point.x).toBeGreaterThanOrEqual(640)
-    expect(custom!.point.x + custom!.size.width).toBeLessThanOrEqual(1100)
-    expect(rectsOverlap(rectOf(custom!), { origin: a.origin, size: a.size })).toBe(false)
-    expect(rectsOverlap(rectOf(custom!), { origin: b.origin, size: b.size })).toBe(false)
-    // Custom size respects the minimums.
-    expect(custom!.size.width).toBeGreaterThanOrEqual(280)
-    expect(custom!.size.height).toBeGreaterThanOrEqual(180)
+    expect(custom, `no custom sliver expected: ${JSON.stringify(cands)}`).toBeUndefined()
+    cands.forEach((c) => expect(c.size).toEqual({ width: 640, height: 400 }))
   })
 
-  it('GAP-FILL: a staggered layout yields a custom ghost filling an irregular hole', () => {
-    // Two diagonally-offset nodes leave an L-shaped empty region a pairwise
-    // gap check would miss — the rectangle finder fills its holes.
+  it('GAP-FILL: a staggered layout tiles the irregular hole with neighbor-sized ghosts', () => {
+    // Two diagonally-offset, equal-sized nodes leave an L-shaped empty region a
+    // pairwise gap check would miss — the rectangle finder fills its holes. With
+    // placed ghosts acting as mirror neighbors the region tiles UNIFORMLY at the
+    // node size (400x300) instead of producing an odd custom box, but a ghost
+    // still lands in the hole, clear of both nodes and on the grid.
     const a = node('a', 0, 0, 400, 300)
     const b = node('b', 600, 360, 400, 300, 1)
     const cands = recommendPlacements(toMap(a, b), 'a', 'terminal', VIEWPORT, null)
-    const custom = cands.find((c) => c.size.width !== 400 || c.size.height !== 300)
-    expect(custom).toBeDefined()
-    expect(rectsOverlap(rectOf(custom!), { origin: a.origin, size: a.size })).toBe(false)
-    expect(rectsOverlap(rectOf(custom!), { origin: b.origin, size: b.size })).toBe(false)
+    // Every ghost mirrors the (equal) node size — the grid is uniform.
+    cands.forEach((c) =>
+      expect(c.size, `mirrors the node size: ${JSON.stringify(c)}`).toEqual({ width: 400, height: 300 }),
+    )
+    // A ghost fills the hole region (within the bounding box of the two nodes),
+    // overlapping neither node.
+    const filler = cands.find(
+      (c) =>
+        c.point.x >= 0 && c.point.x + c.size.width <= 1000 &&
+        c.point.y >= 0 && c.point.y + c.size.height <= 660,
+    )
+    expect(filler, `expected a hole-filling ghost: ${JSON.stringify(cands)}`).toBeDefined()
+    expect(rectsOverlap(rectOf(filler!), { origin: a.origin, size: a.size })).toBe(false)
+    expect(rectsOverlap(rectOf(filler!), { origin: b.origin, size: b.size })).toBe(false)
+    expect(filler!.point.x % CANVAS_GRID_SIZE).toBe(0)
+    expect(filler!.point.y % CANVAS_GRID_SIZE).toBe(0)
   })
 
   it('GAP-FILL: a gap below the minimum gets no recommendation', () => {
@@ -678,7 +835,7 @@ describe('canvasStore.recommendPlacements', () => {
 describe('canvasStore.nudgeToFree', () => {
   const size = { width: 200, height: 150 }
   const node = (id: string, x: number, y: number) => ({
-    id, panelId: `p-${id}`, origin: { x, y }, size, zOrder: 0, creationIndex: 0,
+    id, dockLayout: { type: 'tabs' as const, id: `stack-${id}`, panelIds: [`p-${id}`], activeIndex: 0 }, origin: { x, y }, size, zOrder: 0, creationIndex: 0,
   })
   const toMap = (...ns: ReturnType<typeof node>[]) => Object.fromEntries(ns.map((n) => [n.id, n]))
   const overlaps = (a: { origin: { x: number; y: number }; size: { width: number; height: number } }, p: { x: number; y: number }) =>
@@ -722,6 +879,18 @@ describe('canvasStore ghost placement actions', () => {
     expect(pending!.candidates.length).toBeGreaterThanOrEqual(1)
   })
 
+  it('beginPlacement captures the dev placement trace on pendingPlacement', () => {
+    // Vitest runs with import.meta.env.DEV truthy, so the dev-only trace capture
+    // is active here. (Verified: import.meta.env.DEV === true under vitest.)
+    const store = setup()
+    store.getState().beginPlacement('p1', 'terminal')
+    const pending = store.getState().pendingPlacement
+    expect(pending).not.toBeNull()
+    expect(pending!.trace).toBeDefined()
+    expect(pending!.trace!.steps.length).toBeGreaterThan(0)
+    expect(pending!.trace!.guides).toBeDefined()
+  })
+
   it('beginPlacement on an empty canvas skips the picker and drops the panel at the camera centre', () => {
     const store = createCanvasStore()
     store.getState().setContainerSize({ width: 1000, height: 800 })
@@ -731,7 +900,7 @@ describe('canvasStore ghost placement actions', () => {
     expect(store.getState().pendingPlacement).toBeNull()
     const nodes = Object.values(store.getState().nodes)
     expect(nodes).toHaveLength(1)
-    expect(nodes[0].panelId).toBe('p1')
+    expect(nodes[0].dockLayout).toMatchObject({ panelIds: ['p1'] })
     // Centred on the viewport (1000x800 at zoom 1, offset 0,0 → canvas centre 500,400).
     const { origin, size } = nodes[0]
     expect(origin.x + size.width / 2).toBeCloseTo(500)
@@ -749,11 +918,11 @@ describe('canvasStore ghost placement actions', () => {
     expect(nodeId).toBeTruthy()
     expect(store.getState().pendingPlacement).toBeNull()
     const node = store.getState().nodes[nodeId!]
-    expect(node.panelId).toBe('p1')
+    expect(node.dockLayout).toMatchObject({ panelIds: ['p1'] })
     expect(node.origin).toEqual(target.point)
     expect(node.size).toEqual(target.size)
-    expect(Object.values(store.getState().nodes).filter((n) => n.panelId === 'p1')).toHaveLength(1)
-    expect(store.getState().focusedNodeId).toBe(nodeId)
+    expect(Object.values(store.getState().nodes).filter((n) => collectPanelIds(n.dockLayout).includes('p1'))).toHaveLength(1)
+    expect(focusedNodeId(store.getState())).toBe(nodeId)
   })
 
   it('beginPlacement only ever zooms out, and cancel restores the viewport', () => {
@@ -837,8 +1006,8 @@ describe('canvasStore ghost placement actions', () => {
     expect(nodeId).toBeTruthy()
     expect(store.getState().pendingPlacement).toBeNull()
     const node = store.getState().nodes[nodeId!]
-    expect(node.panelId).toBe('p1')
+    expect(node.dockLayout).toMatchObject({ panelIds: ['p1'] })
     expect(Math.abs(node.origin.x + node.size.width / 2 - 650)).toBeLessThanOrEqual(CANVAS_GRID_SIZE / 2)
-    expect(store.getState().focusedNodeId).toBe(nodeId)
+    expect(focusedNodeId(store.getState())).toBe(nodeId)
   })
 })

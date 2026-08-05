@@ -27,6 +27,10 @@ export interface WslOptions {
   root: string
   id: string
   exclusions?: string[]
+  /** Idle-suspend of backgrounded terminals (the user's setting); appended as
+   *  `--idle-suspend` to the daemon launch args when true — same flag the
+   *  local transport passes, so a WSL host honors the setting identically. */
+  idleSuspend?: boolean
 }
 
 export class WslTransport implements RuntimeTransport {
@@ -150,10 +154,12 @@ export class WslTransport implements RuntimeTransport {
     const nodeBin = `${this.installDir}/runtime/bin/node`
     const args = ['-d', this.opts.distro, '-e', nodeBin, `${this.installDir}/runtime.cjs`, '--root', this.opts.root, '--id', this.opts.id]
     if (this.opts.exclusions?.length) args.push('--exclude', this.opts.exclusions.join(','))
+    if (this.opts.idleSuspend) args.push('--idle-suspend')
     const child = spawn('wsl.exe', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    child.stdin?.on('error', () => { /* EPIPE after daemon exit is reported via close */ })
     this.child = child
     return {
-      write: (line) => { child.stdin?.write(line) },
+      write: (line) => { writeToChildStdin(child, line) },
       onData: (cb) => { child.stdout?.on('data', cb) },
       onStderr: (cb) => { child.stderr?.on('data', cb) },
       onClose: (cb) => { child.on('close', (code) => cb({ code })) },
@@ -165,4 +171,12 @@ export class WslTransport implements RuntimeTransport {
     this.child?.kill()
     this.child = null
   }
+}
+
+function writeToChildStdin(child: ChildProcess, line: string): void {
+  const stdin = child.stdin
+  if (!stdin || stdin.destroyed || stdin.writableEnded || child.exitCode !== null || child.signalCode !== null) {
+    throw new Error('Runtime stdin is closed')
+  }
+  stdin.write(line)
 }

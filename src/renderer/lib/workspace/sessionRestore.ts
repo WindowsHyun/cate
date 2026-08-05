@@ -20,8 +20,8 @@ import {
 import { getOrCreateCanvasStoreForPanel } from '../../stores/canvasStore'
 import { deferredSnapshots, setDeferredRestoreHandler } from './deferredRestore'
 import { beginRestoreQuiescence } from './sessionAutosave'
-import { terminalRestoreData } from '../terminal/terminalRestoreData'
 import { terminalRegistry } from '../terminal/terminalRegistry'
+import { pendingTerminalStarts } from '../terminal/registryState'
 import { collectPanelIdsFromDockState, projectFilesToSnapshot } from './sessionSerialize'
 import { dockWindowsFromSession } from './sessionLoad'
 import type {
@@ -294,13 +294,7 @@ async function restoreSessionHydrate(snapshot: SessionSnapshot, workspaceId: str
   // TerminalPanel mounts. Scrollback is keyed by the (restore-stable) panel id.
   for (const panel of Object.values(snapshot.panels ?? {})) {
     if (panel.type !== 'terminal') continue
-    if (terminalRestoreData.has(panel.id)) continue
-    terminalRestoreData.set(panel.id, {
-      cwd: snapshot.terminalCwds?.[panel.id],
-      replayFromId: panel.id,
-      claudeResumeId: snapshot.claudeResumeIds?.[panel.id],
-      claudeResumeProject: snapshot.claudeResumeProjects?.[panel.id],
-    })
+    terminalRegistry.setPendingRestore(panel.id, snapshot.terminalCwds?.[panel.id])
   }
 
   // Safety net: guarantee the center zone has a canvas panel after restore.
@@ -320,12 +314,12 @@ async function restoreSessionHydrate(snapshot: SessionSnapshot, workspaceId: str
 // -----------------------------------------------------------------------------
 
 export async function replayTerminalLog(panelId: string): Promise<void> {
-  const data = terminalRestoreData.get(panelId)
-  if (!data?.replayFromId) return
+  const data = pendingTerminalStarts.get(panelId)
+  if (data?.kind !== 'restore') return
 
   const entry = terminalRegistry.getEntry(panelId)
   if (!entry) {
-    terminalRestoreData.delete(panelId)
+    pendingTerminalStarts.delete(panelId)
     return
   }
 
@@ -338,16 +332,16 @@ export async function replayTerminalLog(panelId: string): Promise<void> {
     entry.terminal.write('\r\n\x1b[90m--- restored session ---\x1b[0m\r\n')
   }
 
-  // Determine resume id: use quit-time capture if available, else scan filesystem.
+  // Determine the resume id by scanning the filesystem for a recent session.
   // The filesystem scan matches by CWD only, which can't tell which of several
   // terminals in the same project actually ran claude — so only attempt it when
   // THIS terminal's own scrollback shows claude was invoked here. Without that
   // gate, a plain shell sharing a cwd with a claude terminal gets --resume'd too.
   // ponytail: substring check, not process-tree replay; false positive only if
   // scrollback happens to mention the word "claude" without running it.
-  let resumeId = data.claudeResumeId
-  let resumeProject = data.claudeResumeProject
-  if (!resumeId && data.cwd && logData && /claude/i.test(logData)) {
+  let resumeId: string | undefined
+  let resumeProject: string | undefined
+  if (data.cwd && logData && /claude/i.test(logData)) {
     const found = await window.electronAPI.claudeFindResumeId(data.cwd).catch(() => undefined) ?? undefined
     if (found) {
       resumeId = found.sessionId
@@ -366,7 +360,7 @@ export async function replayTerminalLog(panelId: string): Promise<void> {
     window.electronAPI.terminalWrite(entry.ptyId, cmd).catch(() => {})
   }
 
-  terminalRestoreData.delete(panelId)
+  pendingTerminalStarts.delete(panelId)
 }
 
 // -----------------------------------------------------------------------------

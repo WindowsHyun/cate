@@ -9,7 +9,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRenderCount } from '../lib/perf/perfClient'
 import type { StoreApi } from 'zustand'
-import type { NodeActivityState, DockLayoutNode, PanelType } from '../../shared/types'
+import type { NodeActivityState, DockTabStack as DockTabStackNode, PanelType } from '../../shared/types'
 import { isMaximized as checkMaximized } from '../../shared/types'
 import { useCanvasStoreContext, useCanvasStoreApi } from '../stores/CanvasStoreContext'
 import { useAppStore, useSelectedWorkspace } from '../stores/appStore'
@@ -18,7 +18,7 @@ import { useDragStore, useDragSourceVisibility } from '../drag'
 import { useNodeResize } from '../hooks/useNodeResize'
 import { useCanvasNodeStyle } from './useCanvasNodeStyle'
 import { useCanvasNodeDrag } from './useCanvasNodeDrag'
-import { useGroupNodeDrag } from './useGroupNodeDrag'
+import { isSelected as isNodeSelected, isGroupDragMember } from '../stores/canvas/selectionModel'
 import { useNodeResizeCursor } from './useNodeResizeCursor'
 import { NodeResizeOverlay } from './NodeResizeOverlay'
 import type { DockStore } from '../stores/dockStore'
@@ -28,12 +28,17 @@ import { activeLeafPanelId, findNodeDockStore } from '../panels/nodeDockRegistry
 import { openFileAsTabInNode } from '../lib/fs/fileRouting'
 import { setActivePanel } from '../lib/activePanel'
 import { Tooltip } from '../ui/Tooltip'
-import DockSplitContainer from '../docking/DockSplitContainer'
+import DockLayoutRenderer from '../docking/DockLayoutRenderer'
 import { confirmCloseDirtyPanels } from '../lib/confirmCloseDirty'
 import { confirmCloseRunningTerminals } from '../lib/confirmCloseTerminal'
-import { collectPanelIds } from '../lib/canvas/collectPanelIds'
+import { collectPanelIds } from '../../shared/collectPanelIds'
 import { ArrowsOutSimple, ArrowsInSimple, X, Lock, LockOpen } from '@phosphor-icons/react'
 import { PANEL_DEFINITIONS } from '../../shared/panels'
+import { captureRendererException } from '../lib/sentry'
+
+// Node ids already reported for missing geometry, so a bad node that keeps
+// re-rendering warns/reports once instead of spamming.
+const warnedMissingGeometry = new Set<string>()
 
 // When the Hand tool is active, a left-press on a node must pan
 // the canvas instead of dragging/resizing the node. These handlers bail out
@@ -152,6 +157,9 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
   const nodeRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
   const [isAnimatingLayout, setIsAnimatingLayout] = useState(false)
+  // True while a file/panel drag is hovering an unfocused node, so the dim
+  // overlay lets the drop fall through to the panel content that owns it.
+  const [fileDragOver, setFileDragOver] = useState(false)
   const animationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const node = useCanvasStoreContext(
@@ -174,7 +182,7 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
   const focusNode = useCanvasStoreContext((s) => s.focusNode)
   const removeNode = useCanvasStoreContext((s) => s.removeNode)
   const toggleMaximize = useCanvasStoreContext((s) => s.toggleMaximize)
-  const isSelected = useCanvasStoreContext((s) => s.selectedNodeIds.has(nodeId))
+  const isSelected = useCanvasStoreContext((s) => isNodeSelected(s, nodeId))
   const isDockDragging = useDragStore((s) => s.isDragging)
   const { hidden: isWholeNodeDragSource } = useDragSourceVisibility(nodeId)
 
@@ -188,17 +196,18 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
     wasDragged,
   } = useCanvasNodeDrag(nodeId, dockStoreApi, canvasApi)
 
-  // Group move: when this node is part of a multi-selection, dragging it moves
-  // the whole selection together instead of running the single-node dock drag.
-  const { startGroupDrag } = useGroupNodeDrag(nodeId, canvasApi, wasDragged)
-
   // Wrap node-drag with the tab-vs-window routing. The tab bar uses this for
   // both empty-area mousedown (panelId undefined → whole node drag) and
   // individual tab mousedown (panelId set → detach that tab when the mini-dock
-  // has multiple panels, else whole-node drag).
+  // has multiple panels, else whole-node drag). When this node is part of a
+  // multi-selection, `handleDragStart` carries the group so the whole selection
+  // moves together — so grabbing a grouped tab moves the group, never detaches.
   const handleHeaderMouseDown = useCallback((e: React.MouseEvent, panelId?: string) => {
     if (handToolPanShouldWin(e)) return
-    if (startGroupDrag(e)) return
+    if (isGroupDragMember(canvasApi.getState().selection, nodeId)) {
+      handleDragStart(e)
+      return
+    }
     if (panelId) {
       const total = collectPanelIds(dockStoreApi.getState().zones.center.layout).length
       if (total > 1) {
@@ -207,7 +216,7 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
       }
     }
     handleDragStart(e)
-  }, [handleDragStart, handleTabDetachStart, dockStoreApi, startGroupDrag])
+  }, [handleDragStart, handleTabDetachStart, dockStoreApi, canvasApi, nodeId])
 
   const maximized = node ? checkMaximized(node) : false
 
@@ -462,9 +471,7 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
 
   const rootIsTabs = layout?.type === 'tabs'
 
-  const renderLayoutNodeRef = useRef<(node: DockLayoutNode, isRoot: boolean) => React.ReactNode>(null!)
-  renderLayoutNodeRef.current = (layoutNode: DockLayoutNode, isRoot: boolean): React.ReactNode => {
-    if (layoutNode.type === 'tabs') {
+  const renderTabs = (layoutNode: DockTabStackNode, isRoot: boolean): React.ReactNode => {
       const isHeaderHost = isRoot && rootIsTabs
       return (
         <DockTabStack
@@ -483,33 +490,20 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
           dropDisabled={isWholeNodeDragSource}
         />
       )
-    }
-    return (
-      <DockSplitContainer
-        node={layoutNode}
-        renderNode={(n) => renderLayoutNodeRef.current(n, false)}
-      />
-    )
   }
-  const renderLayoutNode = useCallback(
-    (layoutNode: DockLayoutNode) => renderLayoutNodeRef.current(layoutNode, true),
-    // intentionally no deps — the ref is rebound on every render
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  )
 
   // --- Event handlers --------------------------------------------------------
 
   // Focus this node AND point the canonical active-panel pointer at its active
-  // leaf (the visible dock tab), not the node's seed panelId. This is the bridge
+  // leaf (the visible dock tab). This is the bridge
   // that makes terminal-focus detection (and Cmd+T placement) correct for a node
   // whose mini-dock holds several panels. The subscription below re-asserts it on
   // every tab switch while focused; this covers the initial focus.
   const focusThisNode = useCallback(() => {
     focusNode(nodeId)
     const leaf = activeLeafPanelId(dockStoreApi.getState().zones.center.layout)
-    setActivePanel(leaf ?? node?.panelId ?? null)
-  }, [focusNode, nodeId, dockStoreApi, node?.panelId])
+    setActivePanel(leaf)
+  }, [focusNode, nodeId, dockStoreApi])
 
   // Authoritative writer for the active panel while this node is focused: any
   // center-layout change (tab switch, split, close) re-points activePanelId at
@@ -545,7 +539,13 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
         canvasApi.getState().toggleNodeSelection(nodeId)
         return
       }
-      canvasApi.getState().selectNodes([nodeId])
+      // A plain click collapses any multi-selection to just this node and
+      // activates it. focusThisNode() → focusNode() does both (selection =
+      // [nodeId], selectionActive = true). Don't precede it with selectNodes():
+      // that sets selectionActive = false, and on an already-focused node we'd
+      // skip focusThisNode() and leave the node selected-but-inactive — the
+      // blue ring + lost mouse focus on the second click. An already-active
+      // node is already the sole selection, so it needs no change.
       if (!isFocused) {
         focusThisNode()
       }
@@ -565,10 +565,9 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
         handleToggleMaximize()
         return
       }
-      if (startGroupDrag(e)) return
       handleDragStart(e)
     },
-    [handleDragStart, handleToggleMaximize, startGroupDrag],
+    [handleDragStart, handleToggleMaximize],
   )
 
   const handleGrabStripContextMenu = useCallback(
@@ -626,7 +625,22 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
     worktreeDim,
   })
 
+  // A node must carry geometry to render. Reading `node.size`/`node.origin` below
+  // would throw and tear down the whole renderer, so skip the malformed node. The
+  // load path (sanitizeLoadedCanvasNodes) already repairs/drops geometry-invalid
+  // nodes on restore, so a node that EXISTS here but lacks geometry means an
+  // in-memory writer produced a bad node — surface that loudly (once, only for the
+  // has-node-but-missing-geometry case) instead of silently hiding the bug.
   if (!node) return null
+  if (!node.size || !node.origin) {
+    if (!warnedMissingGeometry.has(nodeId)) {
+      warnedMissingGeometry.add(nodeId)
+      const err = new Error(`CanvasNode ${nodeId} has no geometry (origin/size); skipping render`)
+      console.warn(err.message, { origin: node.origin, size: node.size })
+      captureRendererException(err, { nodeId, origin: node.origin, size: node.size })
+    }
+    return null
+  }
 
   return (
     <>
@@ -741,15 +755,11 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
       <div
         data-panel-content
         onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-            const overlay = e.currentTarget.querySelector<HTMLElement>('[data-unfocused-overlay]')
-            if (overlay && !isFocused) overlay.style.pointerEvents = 'auto'
-          }
+          // Left the panel entirely (not just moving between children): the
+          // overlay goes back to blocking so an unfocused node stays click-to-focus.
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setFileDragOver(false)
         }}
-        onDrop={() => {
-          const el = nodeRef.current?.querySelector<HTMLElement>('[data-unfocused-overlay]')
-          if (el && !isFocused) el.style.pointerEvents = 'auto'
-        }}
+        onDrop={() => setFileDragOver(false)}
         style={{
           position: 'relative',
           height: rootIsTabs ? '100%' : `calc(100% - ${GRAB_STRIP_HEIGHT}px)`,
@@ -763,6 +773,10 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
             if (isFocused || e.button !== 0) return
             if (handToolPanShouldWin(e)) return
             e.stopPropagation()
+            // In a multi-selection no node is active, so the press lands on this
+            // dim overlay rather than the title bar. handleDragStart carries the
+            // group when this node is part of a multi-selection, so grabbing any
+            // selected panel moves the whole group instead of collapsing to one.
             handleDragStart(e)
           }}
           onClick={(e) => {
@@ -777,11 +791,13 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
             focusThisNode()
           }}
           onDragEnter={(e) => {
+            // Let a file/panel drag fall through to the panel content (which owns
+            // the drop) instead of landing on this blocking overlay.
             if (
               e.dataTransfer.types.includes('Files') ||
               e.dataTransfer.types.includes('application/cate-file')
             ) {
-              ;(e.currentTarget as HTMLElement).style.pointerEvents = 'none'
+              setFileDragOver(true)
             }
           }}
           style={{
@@ -791,7 +807,7 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
             right: 0,
             bottom: 0,
             backgroundColor: 'var(--node-dim-overlay)',
-            pointerEvents: isFocused || isDockDragging ? 'none' : 'auto',
+            pointerEvents: isFocused || isDockDragging || fileDragOver ? 'none' : 'auto',
             cursor: isFocused ? undefined : 'default',
             zIndex: 1,
             opacity: isFocused || isDockDragging ? 0 : 1,
@@ -805,10 +821,18 @@ const CanvasNode: React.FC<CanvasNodeProps> = ({
             style={{ position: 'relative', zIndex: 0, width: '100%', height: '100%' }}
             onMouseDownCapture={(e) => {
               if (e.button !== 0 || isFocused) return
+              // When this node is part of a live multi-selection, a press on it
+              // starts a GROUP drag (the bubble-phase handlers call handleDragStart,
+              // which carries the selection). Focusing here would run first
+              // (capture beats bubble) and collapse the selection to just this
+              // node — so the drag would then read a single-node selection and
+              // move only this one. Bail and leave it to the drag path; a no-drag
+              // click still focuses via handleClick.
+              if (isGroupDragMember(canvasApi.getState().selection, nodeId)) return
               focusThisNode()
             }}
           >
-            {layout ? renderLayoutNode(layout) : (
+            {layout ? <DockLayoutRenderer layout={layout} renderTabs={renderTabs} /> : (
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)', fontSize: 12 }}>
                 Empty
               </div>

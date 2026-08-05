@@ -36,12 +36,32 @@ export class RuntimeManager {
   /** Dedupe concurrent connects to the same id (mirrors AgentManager.withLock). */
   private readonly connecting = new Map<RuntimeId, Promise<Runtime>>()
   private statusListener: ((id: RuntimeId, state: RuntimePhase, message?: string) => void) | null = null
+  /** Fired when a runtime reaches the fully-`connected` step (a live
+   *  RemoteRuntime). Used to eagerly provision enabled extensions onto a newly
+   *  reachable host. Separate from the single statusListener so it can have many
+   *  subscribers without contending with the IPC status broadcast. */
+  private readonly connectedListeners = new Set<(id: RuntimeId, runtime: Runtime) => void>()
+  /** Fired when a runtime is REMOVED on transport close (a live drop — crash /
+   *  network / daemon exit), for both remote and the LOCAL path. Mirrors
+   *  connectedListeners so subscribers can release any per-runtime state that
+   *  became stale (extension server sessions, reverse endpoints, provisioned
+   *  caches) instead of stranding it against a dead handle. */
+  private readonly disconnectedListeners = new Set<(id: RuntimeId) => void>()
   /** The opts the LOCAL daemon was launched with, kept so a crash can be
    *  re-provisioned + relaunched identically. Set by ensureLocalRuntime. */
   private localOpts: { root: string; exclusions?: string[]; env?: NodeJS.ProcessEnv; idleSuspend?: boolean } | null = null
   /** Pending LOCAL auto-reconnect timer — guards against stacking reconnects on
    *  a crash loop (one backoff in flight at a time). */
   private localReconnectTimer: ReturnType<typeof setTimeout> | null = null
+  /** Consecutive failed LOCAL starts/crashes since the last successful connect.
+   *  Drives the reconnect backoff, the force-reextract escalation, and the
+   *  give-up cap so a permanently-broken daemon can't tight-loop forever. Reset
+   *  to 0 once LOCAL connects. */
+  private localRetryCount = 0
+  /** Stop auto-retrying LOCAL after this many consecutive failures. A daemon that
+   *  can never start (e.g. a corrupt runtime bundle) would otherwise loop forever;
+   *  past the cap we leave `unreachable` so the UI's Retry is the way forward. */
+  private static readonly LOCAL_MAX_RETRIES = 4
   /** Last status emitted for the LOCAL runtime, so a window that subscribes to
    *  RUNTIME_STATUS after the startup connect already finished can still seed
    *  its loading blocker. Defaults to `connecting` — ensureLocalRuntime runs at
@@ -70,7 +90,10 @@ export class RuntimeManager {
    * fails, connect() drops the deferred and this emits `unreachable`, so every
    * local op fails with a clear error until fixed.
    */
-  ensureLocalRuntime(opts: { root: string; exclusions?: string[]; env?: NodeJS.ProcessEnv; idleSuspend?: boolean }): void {
+  ensureLocalRuntime(
+    opts: { root: string; exclusions?: string[]; env?: NodeJS.ProcessEnv; idleSuspend?: boolean },
+    { force = false }: { force?: boolean } = {},
+  ): void {
     // Remember the launch opts so a crash can re-provision + relaunch identically
     // (see the LOCAL auto-reconnect in doConnect's onClose handler).
     this.localOpts = opts
@@ -102,13 +125,15 @@ export class RuntimeManager {
 
     // install:true — the local daemon self-installs (extracts the bundled tarball)
     // on first run; a remote host installs only on an explicit user action. That
-    // flag is the ONLY thing distinguishing this from a remote connect. Fire-and-
-    // forget: connect() already registered the deferred synchronously (so the
-    // window paints), so we just log the eventual outcome. connect() drops the
-    // deferred on failure, so resolve(LOCAL) then fails clearly until fixed.
-    void this.connect(LOCAL_RUNTIME_ID, transport, { install: true })
+    // flag is the ONLY thing distinguishing this from a remote connect. `force`
+    // (set by the retry escalation) re-extracts the bundle, repairing a corrupt /
+    // partial install. Fire-and-forget: connect() already registered the deferred
+    // synchronously (so the window paints), so we just log the eventual outcome.
+    // connect() drops the deferred on failure, so resolve(LOCAL) then fails clearly.
+    void this.connect(LOCAL_RUNTIME_ID, transport, { install: true, force })
       .then(() => {
         log.info('[runtime] local workspace running on the daemon tarball')
+        this.localRetryCount = 0 // a clean connect resets the retry budget
       })
       .catch((err) => {
         const detail = err instanceof Error ? err.message : String(err)
@@ -116,31 +141,119 @@ export class RuntimeManager {
         // doConnect already emitted a step-specific status (unreachable/missing);
         // re-emit unreachable with the local-specific hint for the UI.
         this.emitStatus(LOCAL_RUNTIME_ID, 'unreachable', `Local runtime failed to start: ${detail}${hint}`)
+        // A failed START (daemon died before the handshake) never armed the
+        // onClose crash-reconnect — that only fires after a successful connect.
+        // Schedule the retry here so a transient startup failure (or a corrupt
+        // extract, repaired by the forced re-extract) recovers without a manual
+        // Retry click. A permanently-broken bundle is bounded by LOCAL_MAX_RETRIES.
+        this.scheduleLocalReconnect()
       })
   }
 
   /**
-   * Re-provision + relaunch the LOCAL daemon after a crash, using the opts it was
-   * started with. Backs off briefly to avoid a tight crash loop and never stacks
-   * (one pending timer at a time; the `connecting` map dedupes the connect once it
-   * fires). Emits `connecting` so the UI reflects the in-flight retry.
+   * Re-provision + relaunch the LOCAL daemon after a crash OR a failed start,
+   * using the opts it was started with. Never stacks (one pending timer at a time;
+   * the `connecting` map dedupes the connect once it fires) and emits `connecting`
+   * so the UI reflects the in-flight retry. Three guards keep a permanently-broken
+   * daemon from tight-looping forever:
+   *   - exponential backoff (1s → 8s) scaled by the consecutive-failure count;
+   *   - a forced re-extract from the 2nd retry on, to repair a corrupt/partial
+   *     install (a genuinely broken bundle still fails, but a truncated extract
+   *     recovers);
+   *   - a hard cap (LOCAL_MAX_RETRIES); past it we stop and leave the last
+   *     `unreachable` status, so the UI's Retry button is the way forward.
+   * The retry count resets to 0 on any successful connect (see ensureLocalRuntime).
    */
   private scheduleLocalReconnect(): void {
     if (this.localReconnectTimer) return // a reconnect is already pending
     if (!this.localOpts) return // never came up; nothing to relaunch
-    this.emitStatus(LOCAL_RUNTIME_ID, 'connecting', 'Local runtime crashed, reconnecting…')
+    if (this.localRetryCount >= RuntimeManager.LOCAL_MAX_RETRIES) {
+      log.error(
+        '[runtime] local daemon failed %d consecutive times; stopping auto-retry (use Retry to try again)',
+        this.localRetryCount,
+      )
+      return // leave the prior `unreachable` status in place
+    }
+    this.localRetryCount++
+    // Re-extract from the 2nd attempt on — the first retry assumes a transient
+    // failure (don't churn a healthy install), later ones suspect a bad extract.
+    const force = this.localRetryCount >= 2
+    const delay = Math.min(8000, 500 * 2 ** this.localRetryCount)
+    this.emitStatus(
+      LOCAL_RUNTIME_ID,
+      'connecting',
+      `Local runtime restarting (attempt ${this.localRetryCount}/${RuntimeManager.LOCAL_MAX_RETRIES})…`,
+    )
     this.localReconnectTimer = setTimeout(() => {
       this.localReconnectTimer = null
       // ensureLocalRuntime short-circuits if LOCAL is already registered, never
       // throws, and re-emits its own status; localOpts is non-null here.
-      void this.ensureLocalRuntime(this.localOpts!)
-    }, 1000)
+      void this.ensureLocalRuntime(this.localOpts!, { force })
+    }, delay)
     if (this.localReconnectTimer.unref) this.localReconnectTimer.unref()
+  }
+
+  /**
+   * Re-attempt the LOCAL connect on demand — the renderer's Retry path after the
+   * startup connect (or a crash relaunch) failed and left every local op dying
+   * with "No runtime registered". Reuses the opts from startup; a live
+   * runtime or in-flight connect is reused, never duplicated. Resolves once
+   * the connect settles, so the caller can re-run the op that failed.
+   */
+  async retryLocal(): Promise<{ ok: boolean; error?: string }> {
+    if (this.isConnected(LOCAL_RUNTIME_ID)) return { ok: true }
+    if (!this.localOpts) return { ok: false, error: 'The local runtime has not been initialised yet.' }
+    this.ensureLocalRuntime(this.localOpts)
+    // ensureLocalRuntime kicks connect() synchronously, so the attempt (this
+    // one's, or an in-flight one it deduped onto) is observable here.
+    const inFlight = this.connecting.get(LOCAL_RUNTIME_ID)
+    if (!inFlight) {
+      // No attempt could even start (no tarball/target for this platform);
+      // ensureLocalRuntime already emitted `unreachable` with the reason.
+      return { ok: false, error: this.lastLocalStatus.message ?? 'The local runtime is unavailable.' }
+    }
+    try {
+      await inFlight
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
   }
 
   /** Wire a status sink (the IPC layer broadcasts these to the renderer). */
   setStatusListener(fn: (id: RuntimeId, state: RuntimePhase, message?: string) => void): void {
     this.statusListener = fn
+  }
+
+  /** Subscribe to runtime `connected` events (live RemoteRuntime). Fires for
+   *  LOCAL's real connect and every remote/WSL connect. Returns an unsubscribe. */
+  onConnected(cb: (id: RuntimeId, runtime: Runtime) => void): () => void {
+    this.connectedListeners.add(cb)
+    return () => { this.connectedListeners.delete(cb) }
+  }
+
+  private emitConnected(id: RuntimeId, runtime: Runtime): void {
+    for (const cb of this.connectedListeners) {
+      try { cb(id, runtime) } catch { /* a subscriber must not break connect */ }
+    }
+  }
+
+  /** Subscribe to runtime `disconnected` events (a live transport drop removed
+   *  the runtime). Fires exactly once per drop, for LOCAL and remote alike.
+   *  Returns an unsubscribe. */
+  onDisconnected(cb: (id: RuntimeId) => void): () => void {
+    this.disconnectedListeners.add(cb)
+    return () => { this.disconnectedListeners.delete(cb) }
+  }
+
+  private emitDisconnected(id: RuntimeId): void {
+    for (const cb of this.disconnectedListeners) {
+      // A subscriber must never throw into the channel close handler (that runs
+      // synchronously from the transport). Isolate + log each failure.
+      try { cb(id) } catch (err) {
+        log.warn('[runtime] onDisconnected subscriber for %s failed: %O', id, err)
+      }
+    }
   }
 
   private emitStatus(id: RuntimeId, state: RuntimePhase, message?: string): void {
@@ -395,6 +508,12 @@ export class RuntimeManager {
       if (this.connections.get(id) !== conn) return
       this.connections.delete(id)
       this.runtimes.delete(id)
+      // Notify subscribers the runtime is gone (both LOCAL and remote reach
+      // here). Fires exactly once per live drop — the intentional-teardown case
+      // returned above (disposeConnection removed the connection first). Lets the
+      // extension layer release the stranded server sessions / reverse endpoints
+      // that were bound to this now-dead runtime handle.
+      this.emitDisconnected(id)
       // The LOCAL workspace runs as a daemon subprocess. A remote drop is the
       // user's to reconnect, but a LOCAL crash leaves the whole workspace dead
       // (resolve(LOCAL) throws) until app restart — so auto-reconnect it. The
@@ -411,6 +530,7 @@ export class RuntimeManager {
     this.connections.set(id, conn)
     log.info('[runtime] connected %s (%s) node=%s', id, transport.kind, hello.node.version)
     this.emitStatus(id, 'connected')
+    this.emitConnected(id, runtime)
     return runtime
   }
 

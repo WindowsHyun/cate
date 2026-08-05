@@ -1,5 +1,5 @@
 // =============================================================================
-// Dock Store — Zustand state for dock zone layout and panel locations.
+// Dock Store — Zustand state for dock zone layouts.
 // Manages VS Code-style dock zones (left, right, bottom) with split and tab support.
 // =============================================================================
 
@@ -13,13 +13,14 @@ import type {
   WindowDockState,
   PanelLocation,
   DockDropTarget,
-  Point,
+  DockStateSnapshot,
 } from '../../shared/types'
-import { SIDE_ZONES, ALL_ZONES } from '../../shared/types'
+import { ALL_ZONES } from '../../shared/types'
 import {
   findTabStack,
   findZoneForStack,
   findStackContainingPanelAcrossZones,
+  findFirstTabStack,
 } from './dockTreeUtils'
 import { clearActivePanelIfMatches } from '../lib/activePanel'
 import { generateId } from './canvas/helpers'
@@ -62,7 +63,7 @@ export function createDefaultDockState(): WindowDockState {
 
 
 /** Remove a panel from a tab stack in the layout tree. Returns updated tree or null if stack is now empty. */
-function removePanelFromTree(node: DockLayoutNode, panelId: string): DockLayoutNode | null {
+export function removePanelFromTree(node: DockLayoutNode, panelId: string): DockLayoutNode | null {
   if (node.type === 'tabs') {
     const idx = node.panelIds.indexOf(panelId)
     if (idx === -1) return node
@@ -175,7 +176,9 @@ interface DockStoreActions {
   setZoneSize: (position: DockZonePosition, size: number) => void
 
   // Panel placement
-  dockPanel: (panelId: string, zone: DockZonePosition, target?: DockDropTarget) => void
+  /** `activate: false` appends in the background without selecting the new tab
+   * or opening a hidden zone (used by host-API creates). */
+  dockPanel: (panelId: string, zone: DockZonePosition, target?: DockDropTarget, activate?: boolean) => void
   undockPanel: (panelId: string) => void
 
   // Tab management within a stack
@@ -191,8 +194,8 @@ interface DockStoreActions {
   getPanelLocation: (panelId: string) => PanelLocation | undefined
 
   // Serialization
-  getSnapshot: () => { zones: WindowDockState; locations: Record<string, PanelLocation> }
-  restoreSnapshot: (snapshot: { zones: WindowDockState; locations: Record<string, PanelLocation> }) => void
+  getSnapshot: () => DockStateSnapshot
+  restoreSnapshot: (snapshot: DockStateSnapshot) => void
 }
 
 export type DockStore = DockStoreState & DockStoreActions
@@ -201,7 +204,7 @@ export type DockStore = DockStoreState & DockStoreActions
 // Store factory — each dock window gets its own independent store instance
 // -----------------------------------------------------------------------------
 
-export function createDockStore(initialState?: { zones: WindowDockState; locations: Record<string, PanelLocation> }) {
+export function createDockStore(initialState?: DockStateSnapshot) {
   return create<DockStore>((set, get) => ({
   zones: initialState?.zones ?? createDefaultDockState(),
 
@@ -234,7 +237,7 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
 
   // --- Panel placement ---
 
-  dockPanel(panelId, zone, target) {
+  dockPanel(panelId, zone, target, activate = true) {
     set((state) => {
       const zoneState = state.zones[zone]
       let newLayout = zoneState.layout
@@ -257,7 +260,7 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
           const updatedStack: DockTabStack = {
             ...stack,
             panelIds: newPanelIds,
-            activeIndex: insertIndex,
+            activeIndex: activate ? insertIndex : stack.activeIndex,
           }
           newLayout = newLayout
             ? replaceInTree(newLayout, stack.id, updatedStack)
@@ -312,7 +315,7 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
           newLayout = {
             ...newLayout,
             panelIds: [...newLayout.panelIds, panelId],
-            activeIndex: newLayout.panelIds.length,
+            activeIndex: activate ? newLayout.panelIds.length : newLayout.activeIndex,
           }
         } else {
           // Root is a split — find the first tab stack and append there
@@ -321,7 +324,7 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
             const updatedStack: DockTabStack = {
               ...firstStack,
               panelIds: [...firstStack.panelIds, panelId],
-              activeIndex: firstStack.panelIds.length,
+              activeIndex: activate ? firstStack.panelIds.length : firstStack.activeIndex,
             }
             newLayout = replaceInTree(newLayout, firstStack.id, updatedStack)
           }
@@ -333,7 +336,7 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
           ...state.zones,
           [zone]: {
             ...zoneState,
-            visible: true, // auto-show zone when docking
+            visible: activate ? true : zoneState.visible,
             layout: newLayout,
           },
         },
@@ -521,16 +524,8 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
   },
 
   // --- Serialization ---
-  // `locations` is a derived projection of the zones tree, emitted only for
-  // on-disk/cross-window snapshot back-compat; it is not stored live and is
-  // re-derived (ignored) on restore.
-
   getSnapshot() {
-    const state = get()
-    return {
-      zones: state.zones,
-      locations: deriveLocations(state.zones),
-    }
+    return { zones: get().zones }
   },
 
   restoreSnapshot(snapshot) {
@@ -541,44 +536,9 @@ export function createDockStore(initialState?: { zones: WindowDockState; locatio
 }))
 }
 
-/** Global singleton dock store — used by the main window */
-export const useDockStore = createDockStore()
-
 // -----------------------------------------------------------------------------
 // Internal helpers
 // -----------------------------------------------------------------------------
-
-function findFirstTabStack(node: DockLayoutNode): DockTabStack | null {
-  if (node.type === 'tabs') return node
-  for (const child of node.children) {
-    const found = findFirstTabStack(child)
-    if (found) return found
-  }
-  return null
-}
-
-/** Derive the {panelId -> dock location} map from the zones tree. Used only to
- *  fill the `locations` field of a snapshot for on-disk/cross-window
- *  back-compat; live code derives single lookups via getPanelLocation. */
-function deriveLocations(zones: WindowDockState): Record<string, PanelLocation> {
-  const out: Record<string, PanelLocation> = {}
-  for (const pos of ALL_ZONES) {
-    const layout = zones[pos].layout
-    if (!layout) continue
-    const walk = (node: DockLayoutNode) => {
-      if (node.type === 'tabs') {
-        for (const panelId of node.panelIds) {
-          out[panelId] = { type: 'dock', zone: pos, stackId: node.id }
-        }
-      } else {
-        for (const child of node.children) walk(child)
-      }
-    }
-    walk(layout)
-  }
-  return out
-}
-
 
 function updateSplitRatios(
   node: DockLayoutNode,
@@ -602,4 +562,3 @@ function updateSplitRatios(
 // -----------------------------------------------------------------------------
 // Selectors
 // -----------------------------------------------------------------------------
-

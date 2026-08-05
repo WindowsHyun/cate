@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react'
 import { CaretDoubleDown, CaretDoubleUp, Plus, FolderPlus } from '@phosphor-icons/react'
 import { useAppStore, useWorkspaceList } from '../stores/appStore'
+import { removeWorkspacesWithConfirm } from '../lib/closePanelWithConfirm'
 import { WorkspaceTab } from './WorkspaceTab'
 import { WorkspaceGroupRow } from './WorkspaceGroupRow'
 import { SidebarSectionHeader, SidebarHeaderButton } from './SidebarSectionHeader'
@@ -11,7 +12,6 @@ export const ProjectList: React.FC = () => {
   const selectedWorkspaceId = useAppStore((s) => s.selectedWorkspaceId)
   const addWorkspace = useAppStore((s) => s.addWorkspace)
   const selectWorkspace = useAppStore((s) => s.selectWorkspace)
-  const removeWorkspace = useAppStore((s) => s.removeWorkspace)
   const workspaceGroups = useAppStore((s) => s.workspaceGroups)
   const addWorkspaceGroup = useAppStore((s) => s.addWorkspaceGroup)
   const moveWorkspaceToGroup = useAppStore((s) => s.moveWorkspaceToGroup)
@@ -64,20 +64,20 @@ export const ProjectList: React.FC = () => {
     selectWorkspace(wsId)
   }, [workspaces, selectWorkspace])
 
-  const handleBulkDelete = useCallback(() => {
+  const handleBulkDelete = useCallback(async () => {
     if (multiSelected.size === 0) return
-    const idsToRemove = [...multiSelected]
+    // Same confirm-gated close as a single workspace / panel close — one
+    // aggregate dialog for dirty editors + running terminals across the
+    // selection. Keep the selection when the user cancels.
+    if (!(await removeWorkspacesWithConfirm([...multiSelected]))) return
     setMultiSelected(new Set())
     lastClickedIndexRef.current = null
-    for (const id of idsToRemove) {
-      useAppStore.getState().removeWorkspace(id, true)
-    }
   }, [multiSelected])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if ((e.key === 'Delete' || e.key === 'Backspace') && multiSelected.size > 0) {
       e.preventDefault()
-      handleBulkDelete()
+      void handleBulkDelete()
     }
     if (e.key === 'Escape' && multiSelected.size > 0) {
       e.preventDefault()
@@ -96,7 +96,7 @@ export const ProjectList: React.FC = () => {
     ]
     const id = await window.electronAPI.showContextMenu(items)
     if (id === 'delete-selected') {
-      handleBulkDelete()
+      void handleBulkDelete()
     }
     return true
   }, [multiSelected, handleBulkDelete])
@@ -151,6 +151,7 @@ export const ProjectList: React.FC = () => {
     >
       <SidebarSectionHeader
         title="Workspace"
+        large
         actions={
           <>
             <SidebarHeaderButton
@@ -166,7 +167,7 @@ export const ProjectList: React.FC = () => {
               </SidebarHeaderButton>
             ) : null}
             <SidebarHeaderButton onClick={handleNewWorkspace} title="New Workspace">
-              <Plus size={14} weight="bold" />
+              <Plus size={14} />
             </SidebarHeaderButton>
           </>
         }
@@ -227,7 +228,6 @@ export const ProjectList: React.FC = () => {
                         isExpanded={expandedIds.has(ws.id)}
                         onToggleExpand={() => toggleExpanded(ws.id)}
                         onClick={(e) => handleWorkspaceClick(flatIndex, ws.id, e)}
-                        onClose={() => removeWorkspace(ws.id, true)}
                         onBulkContextMenu={(e) => handleBulkContextMenu(e, ws.id)}
                       />
                     </div>
@@ -289,7 +289,6 @@ export const ProjectList: React.FC = () => {
                   isExpanded={expandedIds.has(ws.id)}
                   onToggleExpand={() => toggleExpanded(ws.id)}
                   onClick={(e) => handleWorkspaceClick(index, ws.id, e)}
-                  onClose={() => removeWorkspace(ws.id, true)}
                   onBulkContextMenu={(e) => handleBulkContextMenu(e, ws.id)}
                 />
               </div>

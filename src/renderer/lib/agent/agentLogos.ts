@@ -8,16 +8,16 @@
 import { AGENTS, type AgentId } from '../../../shared/agents'
 import claudeLogo from '../../assets/agentLogos/claude.svg?url'
 import codexLogo from '../../assets/agentLogos/codex.svg?url'
-import antigravityLogo from '../../assets/agentLogos/antigravity.svg?url'
 import cursorLogo from '../../assets/agentLogos/cursor.svg?url'
+import grokLogo from '../../assets/agentLogos/grok.svg?url'
 import opencodeLogo from '../../assets/agentLogos/opencode.svg?url'
 import piLogo from '../../assets/agentLogos/pi.svg?url'
 
 const LOGO_BY_ID: Partial<Record<AgentId, string>> = {
   'claude-code': claudeLogo,
   codex: codexLogo,
-  antigravity: antigravityLogo,
   cursor: cursorLogo,
+  grok: grokLogo,
   opencode: opencodeLogo,
   pi: piLogo,
 }
@@ -33,4 +33,9 @@ const LOGO_BY_DISPLAY_NAME: Record<string, string> = Object.fromEntries(
 export function getAgentLogo(displayName: string | null | undefined): string | null {
   if (!displayName) return null
   return LOGO_BY_DISPLAY_NAME[displayName] ?? null
+}
+
+export function getAgentLogoById(id: AgentId | null | undefined): string | null {
+  if (!id) return null
+  return LOGO_BY_ID[id] ?? null
 }

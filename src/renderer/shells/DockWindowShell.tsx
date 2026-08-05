@@ -12,25 +12,24 @@ import { registerWorkspaceDockStore } from '../lib/workspace/dockRegistry'
 import DockZone from '../docking/DockZone'
 import { setupCrossWindowDragListeners } from '../drag'
 import { createRemoteDropHandler } from '../drag/crossWindow'
+import { useFileDropTracker, FileDropOverlay } from '../drag/fileDropTarget'
 import { captureTerminalScrollbacks } from './dockWindowSyncScrollback'
-import { terminalRestoreData } from '../lib/workspace/session'
+import { terminalRegistry } from '../lib/terminal/terminalRegistry'
 import { getOrCreateCanvasStoreForPanel } from '../stores/canvasStore'
 import { ensurePanelsInAppStore } from '../lib/canvas/applyCanvasChildPanels'
 import { hydrateReceivedPanel, hydrateCanvasState } from '../lib/panelTransfer'
-import { removePanelFromWindow } from '../lib/panels/removePanelFromWindow'
 import { useAppStore } from '../stores/appStore'
-import { confirmCloseDirtyPanels } from '../lib/confirmCloseDirty'
-import { confirmCloseRunningTerminals } from '../lib/confirmCloseTerminal'
+import { closeDockWindowPanel } from './dockWindowClosePanel'
 import { isDockEmpty } from './dockEmpty'
 import { shouldCloseDockWindow } from './shouldCloseDockWindow'
 import WindowControls from './WindowControls'
 import { useWindowRuntime } from '../lib/hooks/useWindowRuntime'
 import WindowChrome from './WindowChrome'
+import { TRAFFIC_LIGHTS_WIDTH } from './MacWindowChrome'
+import { useWindowFullscreen } from '../lib/useWindowFullscreen'
 
-import { renderPanelComponent, PANEL_REGISTRY } from '../panels/registry'
-import { PanelSuspense } from '../panels/PanelSuspense'
+import { PanelHost } from '../panels/PanelHost'
 import { IS_MAC } from '../lib/platform'
-const CanvasPanel = PANEL_REGISTRY.canvas.Component
 
 interface DockWindowShellProps {
   workspaceId?: string
@@ -52,8 +51,17 @@ export default function DockWindowShell({ workspaceId: initialWorkspaceId }: Doc
   const [wsId, setWsId] = useState(initialWorkspaceId ?? '')
   const [ready, setReady] = useState(false)
   const dockStore = useMemo(() => createDockStore(), [])
+  // Native chrome (macOS traffic lights / frameless window controls) only exists
+  // in windowed mode — the OS hides it in fullscreen, so we drop the tab bar's
+  // reservation and the controls overlay to reclaim the row (mirrors the main
+  // window's MacWindowChrome / TitlebarStrip fullscreen collapse).
+  const isFullscreen = useWindowFullscreen()
   const syncTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const hadPanelsRef = useRef(false)
+
+  // Track file drags so docked extension panels can arm their webview drop overlay
+  // (mirrors the main window — App.tsx installs the same tracker there).
+  useFileDropTracker()
 
   // The detached window's own appStore is the single in-window source of truth
   // for panels: transferred panels are merged into a stub workspace (see
@@ -105,10 +113,7 @@ export default function DockWindowShell({ workspaceId: initialWorkspaceId }: Doc
       if (payload.restore) {
         for (const panel of Object.values(payload.panels)) {
           if (panel.type !== 'terminal') continue
-          terminalRestoreData.set(panel.id, {
-            cwd: payload.terminalCwds?.[panel.id],
-            replayFromId: panel.id,
-          })
+          terminalRegistry.setPendingRestore(panel.id, payload.terminalCwds?.[panel.id])
         }
       }
       if (payload.canvasStates) {
@@ -124,7 +129,6 @@ export default function DockWindowShell({ workspaceId: initialWorkspaceId }: Doc
       // demand (dockStore.getPanelLocation), so there's nothing to rebuild.
       dockStore.getState().restoreSnapshot({
         zones: payload.dockState,
-        locations: {},
       })
       setReady(true)
     })
@@ -294,44 +298,10 @@ export default function DockWindowShell({ workspaceId: initialWorkspaceId }: Doc
     return cleanup
   }, [])
 
-  // Render panel content inside canvas nodes (used by CanvasPanel's renderPanelContent)
-  const renderPanelContent = useCallback(
-    (panelId: string, nodeId: string, zoom: number) => {
-      const panel = panels[panelId]
-      if (!panel) return null
-
-      const content = renderPanelComponent(panel, { workspaceId: wsId, nodeId, zoomLevel: zoom })
-      if (!content) return null
-
-      return <PanelSuspense>{content}</PanelSuspense>
-    },
-    [panels, wsId],
-  )
-
   // Render panel content for dock zones
   const renderPanel = useCallback(
-    (panelId: string) => {
-      const panel = panels[panelId]
-      if (!panel) return null
-
-      // Canvas panels get their own full canvas with renderPanelContent for nodes
-      if (panel.type === 'canvas') {
-        return (
-          <PanelSuspense>
-            <CanvasPanel
-              panelId={panelId}
-              workspaceId={wsId}
-              nodeId=""
-              renderPanelContent={renderPanelContent}
-            />
-          </PanelSuspense>
-        )
-      }
-
-      // All other panels render directly
-      return renderPanelContent(panelId, '', 1)
-    },
-    [panels, wsId, renderPanelContent],
+    (panelId: string) => <PanelHost panelId={panelId} panels={panels} workspaceId={wsId} />,
+    [panels, wsId],
   )
 
   const getPanelTitle = useCallback(
@@ -341,22 +311,13 @@ export default function DockWindowShell({ workspaceId: initialWorkspaceId }: Doc
 
   const handleClosePanel = useCallback(
     async (panelId: string) => {
-      if (!(await confirmCloseDirtyPanels([panels[panelId]]))) return
-      if (!(await confirmCloseRunningTerminals([panels[panelId]]))) return
-      // Undock from THIS shell's own dock store first (removePanelFromWindow
-      // never touches layout stores — the workspace dock registry would be the
-      // wrong tree for this shell), then tear down content + records with
-      // 'close' semantics: PTYs killed (including a canvas tab's children),
-      // xterms and pi sessions disposed, records dropped.
-      dockStore.getState().undockPanel(panelId)
-      const panel = panels[panelId]
-      if (panel) removePanelFromWindow(wsId, panelId, panel.type, 'close')
+      if (!(await closeDockWindowPanel(wsId, panelId, dockStore))) return
 
       if (isDockEmpty(dockStore.getState())) {
         window.close()
       }
     },
-    [dockStore, panels, wsId],
+    [dockStore, wsId],
   )
 
   const handlePanelRenamed = useCallback(
@@ -409,30 +370,35 @@ export default function DockWindowShell({ workspaceId: initialWorkspaceId }: Doc
   return (
     <DockStoreProvider store={dockStore}>
       <div className="dock-window-root relative h-screen w-screen flex flex-col bg-surface-4 overflow-hidden">
-        {/* Make the top tab bar the window drag region. On macOS reserve 78px on
-            the left for the traffic lights; on Windows/Linux reserve 132px on the
-            right for our custom WindowControls overlay (below). Override inside any
-            canvas-node ([data-node-id]) so nested mini-dock tab bars don't inherit
-            the indent or become drag handles. */}
+        {/* Integrate the window chrome INTO the top dock tab bar row — no separate
+            header bar — so a detached window reads like the main window (whose
+            traffic lights float over the top-left content, MacWindowChrome).
+            macOS: the tab bar reserves 78px on the left for the native traffic
+            lights. Windows/Linux: it reserves 132px on the right for the custom
+            WindowControls overlay. Either way the tab bar itself IS the drag
+            region, and its interactive bits opt back out: direct children (tabs,
+            split, trailing controls) AND every <button> — the latter is needed
+            because a button wrapped in a `display:contents` Tooltip span has no
+            direct-child box for `> *` to reach, so `no-drag` must land on the
+            button itself or it stays draggable and unclickable (e.g. the "+").
+            Dropped in fullscreen (no chrome to clear) and inside any canvas-node
+            ([data-node-id]) so nested mini-dock tab bars don't inherit the indent
+            or drag. */}
         <style>{`
+          ${isFullscreen ? '' : `
           .dock-window-root .dock-tab-bar {
-            ${IS_MAC ? 'padding-left: 78px;' : 'padding-right: 132px;'}
+            ${IS_MAC ? `padding-left: ${TRAFFIC_LIGHTS_WIDTH}px;` : 'padding-right: 132px;'}
             -webkit-app-region: drag;
           }
-          .dock-window-root .dock-tab-bar > * { -webkit-app-region: no-drag; }
+          .dock-window-root .dock-tab-bar > *,
+          .dock-window-root .dock-tab-bar button { -webkit-app-region: no-drag; }
+          `}
           .dock-window-root [data-node-id] .dock-tab-bar {
             padding-left: 0;
             padding-right: 0;
             -webkit-app-region: no-drag;
           }
         `}</style>
-        {/* Frameless Windows/Linux: custom window controls pinned to the top-right,
-            over the tab bar's reserved right padding. */}
-        {!IS_MAC && (
-          <div className="absolute top-0 right-0 z-30 h-9">
-            <WindowControls />
-          </div>
-        )}
         {/* Full content area — center zone only */}
         <div className="flex-1 min-h-0 min-w-0 relative overflow-hidden">
           <DockZone
@@ -446,9 +412,26 @@ export default function DockWindowShell({ workspaceId: initialWorkspaceId }: Doc
             onPanelRenamed={handlePanelRenamed}
           />
         </div>
+        {/* Frameless Windows/Linux: custom window controls pinned to the top-right,
+            over the tab bar's reserved right padding. Collapses in fullscreen.
+            MUST render AFTER the content (tab bar) above: Electron builds the drag
+            region by walking the DOM in order, union-ing `drag` rects and
+            subtracting `no-drag` ones. If these controls came first, the tab bar's
+            later full-width `drag` would re-union this corner and swallow the
+            clicks (dead hover/press). Rendered last, this `no-drag` overlay
+            subtracts the corner AFTER the tab bar's drag — so it wins. Kept on top
+            visually with z-30. */}
+        {!IS_MAC && !isFullscreen && (
+          <div
+            className="absolute top-0 right-0 z-30 h-9"
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            <WindowControls />
+          </div>
+        )}
         <WindowChrome />
+        <FileDropOverlay />
       </div>
     </DockStoreProvider>
   )
 }
-

@@ -4,16 +4,26 @@
 // Ported from BrowserPanel.swift
 // =============================================================================
 
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { Globe, ArrowLeft, ArrowRight, ArrowClockwise, Camera, MagnifyingGlass, ShieldCheck, ArrowUp, ArrowDown, X } from '@phosphor-icons/react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
+import { Globe, ArrowLeft, ArrowRight, ArrowClockwise, Camera, MagnifyingGlass, ShieldCheck, ArrowUp, ArrowDown, X, Star, DotsThreeVertical, SidebarSimple } from '@phosphor-icons/react'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useAppStore } from '../stores/appStore'
-import { useCanvasStoreContext } from '../stores/CanvasStoreContext'
-import { SEARCH_ENGINE_URLS } from '../../shared/types'
+import { useBrowserStore } from '../stores/browserStore'
+import { useOptionalCanvasStoreContext } from '../stores/CanvasStoreContext'
+import { focusedNodeId } from '../stores/canvas/selectionModel'
+import { SEARCH_ENGINE_URLS, BROWSER_NEW_TAB_URL, isStartPageUrl } from '../../shared/types'
+import { UrlSuggestions } from './UrlSuggestions'
+import { StartPage } from './StartPage'
+import { BrowserMenu } from './BrowserMenu'
+import { BrowserSettingsPopover } from './BrowserSettingsPopover'
+import { BrowserTabStrip } from './BrowserTabStrip'
+import { BrowserBookmarksSidebar } from './BrowserBookmarksSidebar'
+import type { BrowserTab } from '../../shared/types'
 import type { BrowserPanelProps } from './types'
 import type { BrowserShortcutAction } from '../../shared/types'
 import type { NativeContextMenuItem } from '../../shared/electron-api'
 import { portalRegistry } from '../lib/portalRegistry'
+import { writeCateFileDrag } from '../drag/fileDragPayload'
 import { isUrl, normalizeUrl } from './browserUrl'
 import { getBrowserPanelUrl, setBrowserPanelUrl, getBrowserPanelScroll, setBrowserPanelScroll } from './browserUrlCache'
 import { pageLoadErrorFrom } from './browserLoadError'
@@ -59,6 +69,11 @@ function partitionFor(proxyUrl?: string): string {
   return trimmed ? `persist:browser-proxy-${stableHash(trimmed)}` : BROWSER_PARTITION
 }
 
+/** Stable-enough unique id for a browser tab. */
+function makeTabId(): string {
+  return `tab-${crypto.randomUUID()}`
+}
+
 interface WebviewElement extends HTMLElement {
   loadURL(url: string): void
   goBack(): void
@@ -67,6 +82,7 @@ interface WebviewElement extends HTMLElement {
   reloadIgnoringCache(): void
   canGoBack(): boolean
   canGoForward(): boolean
+  isLoading(): boolean
   getURL(): string
   getTitle(): string
   getWebContentsId(): number
@@ -85,19 +101,53 @@ export default function BrowserPanel({
   panelId,
   workspaceId,
   nodeId,
-  url,
   proxyUrl,
+  tabs: tabsProp,
+  activeTabId: activeTabIdProp,
 }: BrowserPanelProps) {
   const browserHomepage = useSettingsStore((s) => s.browserHomepage)
   const browserSearchEngine = useSettingsStore((s) => s.browserSearchEngine)
+  const browserNewTabBehavior = useSettingsStore((s) => s.browserNewTabBehavior)
   const updatePanelTitle = useAppStore((s) => s.updatePanelTitle)
-  const updatePanelUrl = useAppStore((s) => s.updatePanelUrl)
+  const updateBrowserActiveTabUrl = useAppStore((s) => s.updateBrowserActiveTabUrl)
+  const updatePanelTabs = useAppStore((s) => s.updatePanelTabs)
   const updatePanelProxy = useAppStore((s) => s.updatePanelProxy)
 
-  const isFocused = useCanvasStoreContext((s) => s.focusedNodeId === nodeId)
+  // Global browser history + bookmarks (shared across all panels/windows).
+  const recordVisit = useBrowserStore((s) => s.recordVisit)
+  const bookmarks = useBrowserStore((s) => s.bookmarks)
+  const toggleBookmark = useBrowserStore((s) => s.toggleBookmark)
+  const querySuggestions = useBrowserStore((s) => s.querySuggestions)
 
-  const rawInitialUrl = url || browserHomepage || 'https://www.google.com'
-  const initialUrl = rawInitialUrl.startsWith('about:') ? rawInitialUrl : normalizeUrl(rawInitialUrl)
+  // Optional: a panel docked in a detached dock window has no CanvasStoreProvider
+  // (no canvas node to be focused), so treat that as not-canvas-focused.
+  const isFocused = useOptionalCanvasStoreContext((s) => focusedNodeId(s) === nodeId, false)
+
+  // --- Tabs (light model: one webview re-navigates on switch) --------------
+  // Seed once from the current persisted schema. There is deliberately no
+  // URL fallback: tabs + activeTabId are the only navigation authority.
+  const seedTabs = useRef<{ tabs: BrowserTab[]; activeId: string } | null>(null)
+  if (seedTabs.current === null) {
+    // A legacy panel persisted before the tabs schema (migrations were removed)
+    // arrives with tabs/activeTabId undefined. Treat that like any other invalid
+    // state so the PanelErrorBoundary renders a clean error tile instead of an
+    // unguarded `undefined.length` TypeError.
+    if (!tabsProp?.length || !tabsProp.some((tab) => tab.id === activeTabIdProp)) {
+      throw new Error(`Browser panel ${panelId} has invalid tab state`)
+    }
+    seedTabs.current = { tabs: tabsProp, activeId: activeTabIdProp }
+  }
+  const [tabs, setTabs] = useState<BrowserTab[]>(seedTabs.current.tabs)
+  const [activeTabId, setActiveTabId] = useState<string>(seedTabs.current.activeId)
+  const initialUrl = seedTabs.current.tabs.find((tab) => tab.id === seedTabs.current!.activeId)!.url
+  const activeTabIdRef = useRef(activeTabId)
+  useEffect(() => { activeTabIdRef.current = activeTabId }, [activeTabId])
+
+  // What a new tab opens, per setting.
+  const newTabUrl = useCallback((): string => {
+    if (browserNewTabBehavior === 'homepage') return browserHomepage || BROWSER_NEW_TAB_URL
+    return BROWSER_NEW_TAB_URL
+  }, [browserNewTabBehavior, browserHomepage])
 
   // Per-panel proxy (issue #241). Local state mirrors PanelState.proxyUrl; the
   // dialog updates both this (drives the session) and the store (persistence).
@@ -127,6 +177,9 @@ export default function BrowserPanel({
   // webview without making it a dependency (which would remount on every nav).
   const currentUrlRef = useRef(getBrowserPanelUrl(panelId) ?? initialUrl)
   const [inputUrl, setInputUrl] = useState(() => getBrowserPanelUrl(panelId) ?? initialUrl)
+  // URL-bar autocomplete from global history.
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const [activeSuggestion, setActiveSuggestion] = useState(-1)
   const [canGoBack, setCanGoBack] = useState(false)
   const [canGoForward, setCanGoForward] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -148,58 +201,97 @@ export default function BrowserPanel({
   const [screenshot, setScreenshot] = useState<{ dataUrl: string; filePath: string } | null>(null)
   const screenshotTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // A dock tab stack renders only its active tab and REUSES this component
-  // instance when the slot switches between two browser panels (same type, no
-  // React key, so A and B reconcile as one instance). Our webview src + nav
-  // state are seeded once at mount, so a reused slot would keep showing the
-  // PREVIOUS browser's page — the "press +/split, then open the new tab and it
-  // renders the first one" bug. Re-seed every per-panel field the moment the
-  // slot switches panels. Done during render (React's "reset state when a prop
-  // changes" pattern) so the panelId-keyed <webview> below mounts straight to
-  // the new URL with no intermediate load of the old page. Editor/terminal
-  // panels stay correct the same way, via their own identity props/effects.
-  const [seededPanelId, setSeededPanelId] = useState(panelId)
-  if (seededPanelId !== panelId) {
-    setSeededPanelId(panelId)
-    setActiveProxy(proxyUrl)
-    setWebviewSrc(initialUrl)
-    setCurrentUrl(initialUrl)
-    setInputUrl(initialUrl)
-    currentUrlRef.current = initialUrl
-    setCanGoBack(false)
-    setCanGoForward(false)
-    setIsLoading(false)
-    setLoadError(null)
-    setCrashed(false)
-    setScreenshot(null)
-  }
-
   // -------------------------------------------------------------------------
   // Navigation helpers
   // -------------------------------------------------------------------------
 
-  const navigateTo = useCallback((input: string) => {
-    const webview = webviewRef.current
-    if (!webview) return
+  // Patch the active tab's fields (url/title) in the tabs array.
+  const patchActiveTab = useCallback((patch: Partial<BrowserTab>) => {
+    setTabs((prev) => prev.map((t) => (t.id === activeTabIdRef.current ? { ...t, ...patch } : t)))
+  }, [])
 
+  // Load an exact URL into the single shared webview — or seed its src when the
+  // webview isn't mounted (e.g. leaving the start page), or do nothing when the
+  // target is itself a start-page URL (the StartPage renders instead).
+  const loadInView = useCallback((targetUrl: string) => {
+    setLoadError(null)
+    setCurrentUrl(targetUrl)
+    setInputUrl(targetUrl)
+    currentUrlRef.current = targetUrl
+    if (isStartPageUrl(targetUrl)) {
+      setIsLoading(false)
+      return
+    }
+    setIsLoading(true)
+    const webview = webviewRef.current
+    if (webview) webview.loadURL(targetUrl)
+    else setWebviewSrc(targetUrl)
+  }, [])
+
+  const navigateTo = useCallback((input: string) => {
     let targetUrl: string
-    if (isUrl(input)) {
+    if (isStartPageUrl(input)) {
+      targetUrl = input
+    } else if (isUrl(input)) {
       targetUrl = normalizeUrl(input)
     } else {
       // Use search engine
       const searchBase = SEARCH_ENGINE_URLS[browserSearchEngine] ?? SEARCH_ENGINE_URLS.google
       targetUrl = searchBase + encodeURIComponent(input)
     }
-
-    setLoadError(null)
-    setIsLoading(true)
-    setCurrentUrl(targetUrl)
-    setInputUrl(targetUrl)
+    patchActiveTab({ url: targetUrl })
     // Persist immediately so a quick app close / workspace switch before
     // did-navigate fires still restores to the URL the user typed.
-    updatePanelUrl(workspaceId, panelId, targetUrl)
-    webview.loadURL(targetUrl)
-  }, [browserSearchEngine, updatePanelUrl, workspaceId, panelId])
+    updateBrowserActiveTabUrl(workspaceId, panelId, targetUrl)
+    loadInView(targetUrl)
+  }, [browserSearchEngine, updateBrowserActiveTabUrl, workspaceId, panelId, patchActiveTab, loadInView])
+
+  // --- Tab operations -------------------------------------------------------
+  const selectTab = useCallback((id: string) => {
+    if (id === activeTabIdRef.current) return
+    const tab = tabs.find((t) => t.id === id)
+    if (!tab) return
+    setActiveTabId(id)
+    loadInView(tab.url)
+  }, [tabs, loadInView])
+
+  const addTab = useCallback(() => {
+    const id = makeTabId()
+    const u = newTabUrl()
+    setTabs((prev) => [...prev, { id, url: u, title: '' }])
+    setActiveTabId(id)
+    loadInView(u)
+  }, [newTabUrl, loadInView])
+
+  const closeTab = useCallback((id: string) => {
+    const idx = tabs.findIndex((t) => t.id === id)
+    if (idx === -1) return
+    if (tabs.length === 1) {
+      // Never leave a browser panel with zero tabs — reset the last one to a
+      // fresh start page instead of closing the panel.
+      const fresh: BrowserTab = { id: makeTabId(), url: BROWSER_NEW_TAB_URL, title: '' }
+      setTabs([fresh])
+      setActiveTabId(fresh.id)
+      loadInView(BROWSER_NEW_TAB_URL)
+      return
+    }
+    const next = tabs.filter((t) => t.id !== id)
+    setTabs(next)
+    if (id === activeTabIdRef.current) {
+      const neighbor = next[Math.min(idx, next.length - 1)]
+      setActiveTabId(neighbor.id)
+      loadInView(neighbor.url)
+    }
+  }, [tabs, loadInView])
+
+  const togglePin = useCallback((id: string) => {
+    setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, pinned: !t.pinned } : t)))
+  }, [])
+
+  // Persist the complete canonical navigation state.
+  useEffect(() => {
+    updatePanelTabs(workspaceId, panelId, tabs, activeTabId)
+  }, [tabs, activeTabId, updatePanelTabs, workspaceId, panelId])
 
   const handleGoBack = useCallback(() => {
     webviewRef.current?.goBack()
@@ -241,7 +333,7 @@ export default function BrowserPanel({
     // editable surfaces (URL bar, search boxes, external apps that accept text).
     try {
       e.dataTransfer.effectAllowed = 'copy'
-      e.dataTransfer.setData('application/cate-file', screenshot.filePath)
+      writeCateFileDrag(e.dataTransfer, [screenshot.filePath])
       e.dataTransfer.setData('text/uri-list', `file://${screenshot.filePath}`)
       e.dataTransfer.setData('text/plain', screenshot.filePath)
       // Use the screenshot itself as the drag image so the cursor shows the
@@ -261,12 +353,53 @@ export default function BrowserPanel({
     setScreenshot(null)
   }, [])
 
+  // Suggestions shown beneath the URL bar (history matches for the current input).
+  const suggestions = useMemo(
+    () => (showSuggestions ? querySuggestions(inputUrl, 8) : []),
+    [showSuggestions, inputUrl, querySuggestions],
+  )
+
+  // Bookmark state for the current page (the star toggle). Not bookmarkable on
+  // the start page or about: pages.
+  const isBookmarked = bookmarks.some((b) => b.url === currentUrl)
+  const canBookmark = !isStartPageUrl(currentUrl) && !currentUrl.startsWith('about:')
+
+  // Chrome-like chrome: bookmarks sidebar (setting-driven), overflow menu + settings.
+  const showTabSidebar = useSettingsStore((s) => s.browserShowTabSidebar)
+  const setSetting = useSettingsStore((s) => s.setSetting)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+
+  // "New tab" → a new browser panel on the canvas (opens the start page).
+  const handleNewTab = addTab
+
+  const handleClearData = useCallback(async () => {
+    await window.electronAPI.browserClearData()
+    setSettingsOpen(false)
+  }, [])
+
   const handleUrlBarKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setActiveSuggestion((i) => Math.min(i + 1, suggestions.length - 1))
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setActiveSuggestion((i) => Math.max(i - 1, -1))
+      return
+    }
+    if (e.key === 'Escape') {
+      setShowSuggestions(false)
+      return
+    }
     if (e.key === 'Enter') {
       e.preventDefault()
-      navigateTo(inputUrl)
+      const pick = activeSuggestion >= 0 ? suggestions[activeSuggestion]?.url : undefined
+      setShowSuggestions(false)
+      navigateTo(pick ?? inputUrl)
     }
-  }, [inputUrl, navigateTo])
+  }, [inputUrl, navigateTo, suggestions, activeSuggestion])
 
   // -------------------------------------------------------------------------
   // Per-panel proxy (issue #241)
@@ -486,7 +619,10 @@ export default function BrowserPanel({
       setCanGoForward(webview.canGoForward())
       setIsLoading(false)
       setLoadError(null)
-      updatePanelUrl(workspaceId, panelId, url)
+      currentUrlRef.current = url
+      updateBrowserActiveTabUrl(workspaceId, panelId, url)
+      patchActiveTab({ url, title: webview.getTitle() || '' })
+      recordVisit(url, webview.getTitle() || '')
     }
 
     const onDidNavigateInPage = (event: any) => {
@@ -496,13 +632,26 @@ export default function BrowserPanel({
       setInputUrl(url)
       setCanGoBack(webview.canGoBack())
       setCanGoForward(webview.canGoForward())
-      updatePanelUrl(workspaceId, panelId, url)
+      currentUrlRef.current = url
+      updateBrowserActiveTabUrl(workspaceId, panelId, url)
+      patchActiveTab({ url })
+    }
+
+    const onPageFaviconUpdated = (event: any) => {
+      // Electron fires an array of candidate favicon URLs; the first is the
+      // page's preferred icon. Store it on the active tab (persisted with tabs).
+      const favicon = Array.isArray(event.favicons) ? event.favicons[0] : undefined
+      if (favicon) patchActiveTab({ favicon })
     }
 
     const onPageTitleUpdated = (event: any) => {
       const title = event.title ?? webview.getTitle()
       if (title) {
         updatePanelTitle(workspaceId, panelId, title)
+        patchActiveTab({ title })
+        // Capture the real title once the page sets it (dedups by URL in main).
+        const navUrl = webview.getURL()
+        if (navUrl && navUrl !== 'about:blank') recordVisit(navUrl, title)
       }
     }
 
@@ -522,17 +671,11 @@ export default function BrowserPanel({
       setStartLoadingCount((c) => c + 1)
     }
 
-    // The guest renderer process died. Newer Electron fires `render-process-gone`
-    // (with a reason); older builds fire the deprecated `crashed`. Handle both.
+    // The guest renderer process died.
     const onRenderProcessGone = (event: any) => {
       const reason = event?.reason ?? 'crashed'
       if (reason === 'clean-exit') return // normal teardown, not a crash
       console.error('[BrowserPanel] webview renderer gone:', reason)
-      setCrashed(true)
-      setIsLoading(false)
-    }
-    const onCrashed = () => {
-      console.error('[BrowserPanel] webview crashed')
       setCrashed(true)
       setIsLoading(false)
     }
@@ -610,12 +753,12 @@ export default function BrowserPanel({
 
     webview.addEventListener('did-navigate', onDidNavigate)
     webview.addEventListener('did-navigate-in-page', onDidNavigateInPage)
+    webview.addEventListener('page-favicon-updated', onPageFaviconUpdated)
     webview.addEventListener('page-title-updated', onPageTitleUpdated)
     webview.addEventListener('did-fail-load', onDidFailLoad)
     webview.addEventListener('did-start-loading', onDidStartLoading)
     webview.addEventListener('did-stop-loading', onDidStopLoading)
     webview.addEventListener('render-process-gone', onRenderProcessGone)
-    webview.addEventListener('crashed', onCrashed)
     webview.addEventListener('found-in-page', onFoundInPage)
 
     return () => {
@@ -625,18 +768,30 @@ export default function BrowserPanel({
       webview.removeEventListener('did-finish-load', onDidFinishLoadRestore)
       webview.removeEventListener('did-navigate', onDidNavigate)
       webview.removeEventListener('did-navigate-in-page', onDidNavigateInPage)
+      webview.removeEventListener('page-favicon-updated', onPageFaviconUpdated)
       webview.removeEventListener('page-title-updated', onPageTitleUpdated)
       webview.removeEventListener('did-fail-load', onDidFailLoad)
       webview.removeEventListener('did-start-loading', onDidStartLoading)
       webview.removeEventListener('did-stop-loading', onDidStopLoading)
       webview.removeEventListener('render-process-gone', onRenderProcessGone)
-      webview.removeEventListener('crashed', onCrashed)
       webview.removeEventListener('found-in-page', onFoundInPage)
     }
     // `partition` + `proxyReady` are deps so the listeners re-bind to the fresh
     // <webview> element after a proxy change remounts it (key={partition} +
     // the proxyReady gate); without them the new element would have no handlers.
-  }, [panelId, workspaceId, updatePanelTitle, updatePanelUrl, partition, proxyReady])
+  }, [panelId, workspaceId, updatePanelTitle, updateBrowserActiveTabUrl, partition, proxyReady, recordVisit, patchActiveTab])
+
+  // Expose navigateTo to the reverse API for the panel's whole mounted lifetime
+  // (a webview only registers once a page is loaded, so a start-page panel is
+  // otherwise unreachable — `browser open` navigates it through this instead).
+  // Registered once per panelId via a ref so navigateTo's changing identity
+  // doesn't churn the registry.
+  const navigateToRef = useRef(navigateTo)
+  navigateToRef.current = navigateTo
+  useEffect(() => {
+    portalRegistry.registerNavigator(panelId, (url) => navigateToRef.current(url))
+    return () => portalRegistry.unregisterNavigator(panelId)
+  }, [panelId])
 
   // -------------------------------------------------------------------------
   // Render
@@ -644,58 +799,71 @@ export default function BrowserPanel({
 
   return (
     <div
-      className="flex flex-col w-full h-full relative"
+      className="flex w-full h-full relative"
       onKeyDown={handleChromeKeyDown}
       data-browser-panel-id={panelId}
       data-start-loading-count={startLoadingCount}
     >
-      {/* Loading progress bar — absolutely positioned at the very top of the panel */}
-      {(isLoading || loadingComplete) && (
-        <div className="absolute top-0 left-0 right-0 z-50 h-0.5 overflow-hidden">
-          <div
-            className="h-full bg-[var(--color-focus-blue)]"
-            style={{
-              animation: loadingComplete
-                ? 'browser-progress-complete 0.6s ease-out forwards'
-                : 'browser-progress-fill 8s ease-out forwards',
-            }}
-          />
-        </div>
-      )}
+      {/* Bookmarks sidebar (Safari-style) — the slot the vertical tab list vacated */}
+      {showTabSidebar && <BrowserBookmarksSidebar onNavigate={navigateTo} />}
+
+      {/* Main column: toolbar + bookmarks bar + content */}
+      <div className="flex flex-col flex-1 min-w-0 h-full relative">
+        {/* Loading progress bar — absolutely positioned at the very top of the content column */}
+        {(isLoading || loadingComplete) && (
+          <div className="absolute top-0 left-0 right-0 z-50 h-0.5 overflow-hidden">
+            <div
+              className="h-full bg-[var(--color-focus-blue)]"
+              style={{
+                animation: loadingComplete
+                  ? 'browser-progress-complete 0.6s ease-out forwards'
+                  : 'browser-progress-fill 8s ease-out forwards',
+              }}
+            />
+          </div>
+        )}
 
       {/* URL bar */}
       <div className="h-10 flex items-center gap-2 px-2 bg-surface-4 border-b border-subtle shrink-0">
-        {/* Navigation pill */}
-        <div className="flex items-center h-7 rounded-full border border-subtle bg-surface-5 overflow-hidden">
+        {/* Sidebar toggle — bookmarks sidebar */}
+        <Tooltip label={showTabSidebar ? 'Hide bookmarks' : 'Show bookmarks'}>
+          <button
+            onClick={() => setSetting('browserShowTabSidebar', !showTabSidebar)}
+            className="w-7 h-7 flex items-center justify-center rounded-[10px] hover:bg-hover text-secondary hover:text-primary transition-colors shrink-0"
+            aria-label={showTabSidebar ? 'Hide bookmarks' : 'Show bookmarks'}
+          >
+            <SidebarSimple size={14} weight={showTabSidebar ? 'fill' : 'regular'} />
+          </button>
+        </Tooltip>
+        {/* Navigation controls — flat ghost buttons */}
+        <div className="flex items-center gap-0.5 shrink-0">
           <Tooltip label="Back">
             <button
               onClick={handleGoBack}
               disabled={!canGoBack}
-              className="w-7 h-7 flex items-center justify-center hover:bg-hover disabled:opacity-30 disabled:hover:bg-transparent text-primary transition-colors"
+              className="w-7 h-7 flex items-center justify-center rounded-[10px] hover:bg-hover disabled:opacity-30 disabled:hover:bg-transparent text-secondary hover:text-primary transition-colors"
               aria-label="Back"
             >
-              <ArrowLeft size={13} />
+              <ArrowLeft size={14} />
             </button>
           </Tooltip>
-          <div className="w-px h-3.5 bg-subtle" />
           <Tooltip label="Forward">
             <button
               onClick={handleGoForward}
               disabled={!canGoForward}
-              className="w-7 h-7 flex items-center justify-center hover:bg-hover disabled:opacity-30 disabled:hover:bg-transparent text-primary transition-colors"
+              className="w-7 h-7 flex items-center justify-center rounded-[10px] hover:bg-hover disabled:opacity-30 disabled:hover:bg-transparent text-secondary hover:text-primary transition-colors"
               aria-label="Forward"
             >
-              <ArrowRight size={13} />
+              <ArrowRight size={14} />
             </button>
           </Tooltip>
-          <div className="w-px h-3.5 bg-subtle" />
           <Tooltip label="Reload">
             <button
               onClick={handleReload}
-              className="w-7 h-7 flex items-center justify-center hover:bg-hover text-primary transition-colors"
+              className="w-7 h-7 flex items-center justify-center rounded-[10px] hover:bg-hover text-secondary hover:text-primary transition-colors"
               aria-label="Reload"
             >
-              <ArrowClockwise size={13} className={isLoading ? 'animate-spin' : ''} />
+              <ArrowClockwise size={14} className={isLoading ? 'animate-spin' : ''} />
             </button>
           </Tooltip>
         </div>
@@ -715,29 +883,55 @@ export default function BrowserPanel({
           ))}
         </div>
 
-        {/* URL input */}
-        <div className="flex-1 flex items-center h-7 rounded-full border border-subtle bg-surface-5 px-3 gap-2 focus-within:border-strong transition-colors">
-          <MagnifyingGlass size={13} className="text-muted shrink-0" />
-          <input
-            ref={urlInputRef}
-            type="text"
-            value={inputUrl}
-            onChange={(e) => setInputUrl(e.target.value)}
-            onKeyDown={handleUrlBarKeyDown}
-            className="flex-1 h-full bg-transparent text-sm text-primary outline-none placeholder:text-muted"
-            placeholder="Enter URL or search..."
+        {/* URL input + autocomplete */}
+        <div className="flex-1 relative">
+          <div className="flex items-center h-7 rounded-full bg-transparent hover:bg-surface-3 px-3 gap-2 transition-colors">
+            <MagnifyingGlass size={13} className="text-muted shrink-0" />
+            <input
+              ref={urlInputRef}
+              type="text"
+              value={inputUrl}
+              onChange={(e) => { setInputUrl(e.target.value); setShowSuggestions(true); setActiveSuggestion(-1) }}
+              onFocus={() => setShowSuggestions(true)}
+              onBlur={() => setTimeout(() => setShowSuggestions(false), 120)}
+              onKeyDown={handleUrlBarKeyDown}
+              className="flex-1 h-full bg-transparent text-sm text-primary outline-none placeholder:text-muted"
+              placeholder="Enter URL or search..."
+            />
+          </div>
+          <UrlSuggestions
+            items={suggestions}
+            activeIndex={activeSuggestion}
+            onPick={(pickedUrl) => { setShowSuggestions(false); navigateTo(pickedUrl) }}
+            onHover={setActiveSuggestion}
           />
         </div>
+
+        {/* Bookmark / favorite toggle */}
+        <Tooltip label={isBookmarked ? 'Remove bookmark' : 'Bookmark this page'}>
+          <button
+            onClick={() => canBookmark && toggleBookmark(currentUrl, webviewRef.current?.getTitle() || currentUrl)}
+            disabled={!canBookmark}
+            className={`w-7 h-7 flex items-center justify-center rounded-[10px] transition-colors disabled:opacity-30 ${
+              isBookmarked
+                ? 'text-agent hover:bg-hover'
+                : 'text-secondary hover:text-primary hover:bg-hover'
+            }`}
+            aria-label={isBookmarked ? 'Remove bookmark' : 'Bookmark this page'}
+          >
+            <Star size={13} weight={isBookmarked ? 'fill' : 'regular'} />
+          </button>
+        </Tooltip>
 
         {/* Proxy tool — left-click configures, right-click offers clear. */}
         <Tooltip label={activeProxy ? `Proxy: ${activeProxy}` : 'Configure proxy'}>
           <button
             onClick={openProxyDialog}
             onContextMenu={handleProxyContextMenu}
-            className={`w-7 h-7 flex items-center justify-center rounded-full border transition-colors ${
+            className={`w-7 h-7 flex items-center justify-center rounded-[10px] transition-colors ${
               activeProxy
-                ? 'border-agent bg-agent/15 text-agent hover:bg-agent/25'
-                : 'border-subtle bg-surface-5 hover:bg-hover text-primary'
+                ? 'text-agent hover:bg-hover'
+                : 'text-secondary hover:text-primary hover:bg-hover'
             }`}
             aria-label={activeProxy ? `Proxy: ${activeProxy}` : 'Configure proxy'}
           >
@@ -749,13 +943,49 @@ export default function BrowserPanel({
         <Tooltip label="Screenshot">
           <button
             onClick={handleScreenshot}
-            className="w-7 h-7 flex items-center justify-center rounded-full border border-subtle bg-surface-5 hover:bg-hover text-primary transition-colors"
+            className="w-7 h-7 flex items-center justify-center rounded-[10px] hover:bg-hover text-secondary hover:text-primary transition-colors"
             aria-label="Screenshot"
           >
             <Camera size={13} />
           </button>
         </Tooltip>
+
+        {/* Overflow menu (new tab, bookmarks bar, settings) */}
+        <Tooltip label="Menu">
+          <button
+            onClick={() => { setMenuOpen((o) => !o); setSettingsOpen(false) }}
+            className="w-7 h-7 flex items-center justify-center rounded-[10px] hover:bg-hover text-secondary hover:text-primary transition-colors"
+            aria-label="Browser menu"
+          >
+            <DotsThreeVertical size={15} />
+          </button>
+        </Tooltip>
       </div>
+
+      {/* Horizontal tab strip (Safari-style) — pinned favicon chips + regular tabs */}
+      <BrowserTabStrip
+        tabs={tabs}
+        activeTabId={activeTabId}
+        onSelect={selectTab}
+        onClose={closeTab}
+        onNewTab={addTab}
+        onTogglePin={togglePin}
+      />
+
+      {/* Overflow menu + settings popover */}
+      {menuOpen && (
+        <BrowserMenu
+          onNewTab={handleNewTab}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
+      {settingsOpen && (
+        <BrowserSettingsPopover
+          onClose={() => setSettingsOpen(false)}
+          onClearData={handleClearData}
+        />
+      )}
 
       {/* Webview + overlays container */}
       <div className="flex-1 relative">
@@ -779,18 +1009,24 @@ export default function BrowserPanel({
           />
         )}
 
-        {/* Webview — keyed by panelId + partition so a proxy change OR this slot
-            being reused for a different browser panel cleanly remounts it with a
-            fresh webContents (no inherited page or history). Only rendered once
-            the proxy session is configured. */}
-        {proxyReady && (
-          <webview
-            key={`${panelId}:${partition}`}
-            ref={webviewRef as any}
-            src={webviewSrc}
-            className={`w-full h-full ${loadError || crashed ? 'hidden' : ''}`}
-            partition={partition}
-          />
+        {/* Start page (new tab): favorites + recent history, shown instead of a
+            webview when the panel is on the new-tab sentinel. */}
+        {isStartPageUrl(currentUrl) ? (
+          <StartPage onNavigate={navigateTo} />
+        ) : (
+          /* Webview — keyed by panelId + partition so a proxy change OR this slot
+             being reused for a different browser panel cleanly remounts it with a
+             fresh webContents (no inherited page or history). Only rendered once
+             the proxy session is configured. */
+          proxyReady && (
+            <webview
+              key={`${panelId}:${partition}`}
+              ref={webviewRef as any}
+              src={webviewSrc}
+              className={`w-full h-full ${loadError || crashed ? 'hidden' : ''}`}
+              partition={partition}
+            />
+          )
         )}
 
         {/* Screenshot thumbnail */}
@@ -872,6 +1108,7 @@ export default function BrowserPanel({
             </button>
           </div>
         )}
+      </div>
       </div>
     </div>
   )

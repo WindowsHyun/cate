@@ -31,9 +31,13 @@ export type { PanelPlacement, AppStore } from './types'
 // --- Public helper re-exports ---
 export {
   WORKSPACE_COLORS,
+  GROUP_COLORS,
+  GROUP_COLOR_MAP,
   awaitWorkspaceSync,
   getWorktreeColorPalette,
   pickWorktreeColor,
+  rememberWorkspaceGroup,
+  seedRememberedGroups,
 } from './helpers'
 
 export {
@@ -44,11 +48,7 @@ export {
   getWorkspaceCanvasStore,
   placementForActivePanel,
 } from '../../lib/workspace/canvasAccess'
-export {
-  registerCanvasOps,
-  getCanvasOpsById,
-  unregisterCanvasOps,
-} from '../../lib/workspace/canvasAccess'
+export { getCanvasOpsById } from '../../lib/workspace/canvasAccess'
 
 // -----------------------------------------------------------------------------
 // Store
@@ -61,6 +61,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   selectedWorkspaceId: '',
   localRuntimePhase: null,
   reloadEpochs: {},
+  workspaceGroups: [],
 
   // --- Slices ---
   ...createWorkspaceSlice(set, get),

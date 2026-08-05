@@ -76,6 +76,7 @@ vi.mock('../../shared/panels', () => ({
     agent: { label: 'Agent', defaultSize: { width: 600, height: 400 } },
     document: { label: 'Document', defaultSize: { width: 600, height: 400 } },
   },
+  keepsMountedWhenTabHidden: (type: string) => type === 'browser' || type === 'extension',
 }))
 
 // ---------------------------------------------------------------------------
@@ -172,9 +173,9 @@ describe('DockTabStack browser keep-alive', () => {
     const browserWrapper = host.querySelector('[data-panel="browser"]')?.parentElement
     expect(browserWrapper?.style.visibility).toBe('hidden')
 
-    // Terminal must be visible
+    // Terminal must be visible (active panels render with no visibility override)
     const terminalWrapper = host.querySelector('[data-panel="terminal"]')?.parentElement
-    expect(terminalWrapper?.style.visibility).toBe('visible')
+    expect(terminalWrapper?.style.visibility).not.toBe('hidden')
 
     // --- Step 3: switch back to browser ---
     act(() => {
@@ -191,9 +192,9 @@ describe('DockTabStack browser keep-alive', () => {
     // Still the same DOM element — no remount
     expect(domRefs.browser).toBe(browserDomAfterMount)
 
-    // Browser wrapper now visible again
+    // Browser wrapper now visible again (active panels render with no visibility override)
     const browserWrapperFinal = host.querySelector('[data-panel="browser"]')?.parentElement
-    expect(browserWrapperFinal?.style.visibility).toBe('visible')
+    expect(browserWrapperFinal?.style.visibility).not.toBe('hidden')
   })
 
   it('terminal panel is unmounted when switching away (normal behaviour for non-browser)', async () => {
