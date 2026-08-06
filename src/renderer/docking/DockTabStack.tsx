@@ -312,9 +312,14 @@ export default function DockTabStack({ stack, zone: zoneProp, renderPanel, getPa
           onTabBarMouseDown={onTabBarMouseDown}
         />
 
+        {/* Fixed divider + gap so a full tab bar's last tab can never butt up
+            against (or get clipped under) the "+"/Split cluster — DockTabBar
+            is the only side that shrinks (flex-1 min-w-0); this side holds. */}
+        <div className="shrink-0 w-px h-5 bg-surface-5 mx-1" />
+
         {/* "+"/Split cluster — its own hover scope, separate from the tab row,
             so reaching for a tab's X close button never also reveals these. */}
-        <div className={`flex items-center self-center transition-opacity ${splitMenuOpen ? 'opacity-100' : 'opacity-0 hover:opacity-100'}`}>
+        <div className={`shrink-0 flex items-center self-center transition-opacity ${splitMenuOpen ? 'opacity-100' : 'opacity-0 hover:opacity-100'}`}>
           {/* "+" tab — adds a new tab of the active panel's type into this stack. */}
           {activePanel && (
             <Tooltip label={`New ${PANEL_TYPE_LABELS[activePanel.type] ?? 'Tab'}`}>
@@ -357,12 +362,15 @@ export default function DockTabStack({ stack, zone: zoneProp, renderPanel, getPa
 
         {/* Host-injected trailing controls (e.g. canvas-node lock/maximize/close) */}
         {trailingControls && (
-          <div
-            className="flex items-center self-center pr-1 gap-0.5"
-            onMouseDown={(e) => e.stopPropagation()}
-          >
-            {trailingControls}
-          </div>
+          <>
+            <div className="shrink-0 w-px h-5 bg-surface-5 mx-1" />
+            <div
+              className="shrink-0 flex items-center self-center pr-1 gap-0.5"
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              {trailingControls}
+            </div>
+          </>
         )}
       </div>
 

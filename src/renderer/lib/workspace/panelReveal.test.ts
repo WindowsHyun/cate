@@ -178,6 +178,24 @@ describe('revealPanel', () => {
     expect(await revealPanel(WS, 'ghost')).toBe(false)
     expect(getActivePanelId()).toBeNull()
   })
+
+  // Regression check for the "clicking an already-open file doesn't switch to
+  // its tab" report — reproduce with several tabs in the SAME dock stack,
+  // not just one, since a single-tab stack has nothing to switch away from.
+  it('switches the active tab among several docked panels in the same stack', async () => {
+    const dock = getOrCreateWorkspaceDockStore(WS)
+    dock.getState().dockPanel('p-a', 'center')
+    dock.getState().dockPanel('p-b', 'center')
+    dock.getState().dockPanel('p-c', 'center')
+    const stack = () => dock.getState().zones.center.layout as any
+    expect(stack().panelIds).toEqual(['p-a', 'p-b', 'p-c'])
+    expect(stack().activeIndex).toBe(2) // p-c, most recently docked
+
+    const ok = await revealPanel(WS, 'p-a')
+    expect(ok).toBe(true)
+    expect(stack().panelIds[stack().activeIndex]).toBe('p-a')
+    expect(getActivePanelId()).toBe('p-a')
+  })
 })
 
 describe('resolvePanelById', () => {
