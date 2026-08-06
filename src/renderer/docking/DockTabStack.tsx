@@ -248,7 +248,7 @@ export default function DockTabStack({ stack, zone: zoneProp, renderPanel, getPa
       {/* Tab bar — VS Code style: dark strip with active tab merging into the
           content area below via a top accent border. */}
       <div
-        className={`dock-tab-bar flex items-center overflow-hidden ${
+        className={`dock-tab-bar group flex items-center overflow-hidden ${
           // The canvas header floats: it's positioned absolutely so the canvas
           // content fills the full height BEHIND it, and its background + divider
           // stay transparent until hovered (see .dock-tab-bar-floating in
@@ -316,7 +316,7 @@ export default function DockTabStack({ stack, zone: zoneProp, renderPanel, getPa
         {activePanel && (
           <Tooltip label={`New ${PANEL_TYPE_LABELS[activePanel.type] ?? 'Tab'}`}>
             <button
-              className={`flex items-center justify-center self-center rounded-[10px] text-muted hover:text-primary hover:bg-hover cursor-pointer ${compact ? 'mx-0.5 w-[22px] h-[22px]' : 'mx-1 w-6 h-6'}`}
+              className={`flex items-center justify-center self-center rounded-[10px] text-muted hover:text-primary hover:bg-hover cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity ${compact ? 'mx-0.5 w-[22px] h-[22px]' : 'mx-1 w-6 h-6'}`}
               aria-label={`New ${PANEL_TYPE_LABELS[activePanel.type] ?? 'Tab'}`}
               onClick={() => actions.addTabOfType(activePanel.type)}
             >
@@ -327,7 +327,7 @@ export default function DockTabStack({ stack, zone: zoneProp, renderPanel, getPa
 
         {/* Split button. Click splits; click-and-hold opens a type picker. */}
         {activePanelId && (
-          <div className={`relative flex items-center self-center ${compact ? 'px-0.5' : 'px-1'}`}>
+          <div className={`relative flex items-center self-center transition-opacity ${splitMenuOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} ${compact ? 'px-0.5' : 'px-1'}`}>
             <Tooltip label="Split (hold to choose type)">
               <button
                 ref={splitButtonRef}

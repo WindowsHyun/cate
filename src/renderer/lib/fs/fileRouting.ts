@@ -3,6 +3,7 @@ import type { PanelPlacement } from '../../stores/appStore'
 import { useAppStore } from '../../stores/appStore'
 import { getAllCanvasStoreEntries, getOrCreateCanvasStoreForPanel } from '../../stores/canvasStore'
 import { findNodeDockStore } from '../../panels/nodeDockRegistry'
+import { getNodeDockLayout } from '../workspace/canvasAccess'
 import { collectPanelIds } from '../../../shared/collectPanelIds'
 import { revealOnce } from '../workspace/panelReveal'
 import type { PanelType } from '../../../shared/types'
@@ -69,6 +70,32 @@ function revealExistingBrowserPanelForUrl(workspaceId: string, url: string): str
   const existing = findExistingBrowserPanelForUrl(workspaceId, url)
   if (existing && revealOnce(workspaceId, existing)) return existing
   return null
+}
+
+/** Add `panelId` as a new tab to a group node's mini-dock, whether or not the
+ *  node currently has a live per-node DockStore. A canvas node is viewport-
+ *  culled (unmounted) when off-screen, which tears down its DockStore
+ *  registration — without this fallback, grouping into an off-screen node
+ *  silently no-ops and the caller falls through to spawning a duplicate node.
+ *  Mutates the node's persisted `dockLayout` projection directly; the live
+ *  store picks that up as its initial layout whenever the node next mounts. */
+function addPanelToGroupNode(
+  target: { nodeId: string; canvasPanelId: string },
+  panelId: string,
+): boolean {
+  const nodeDock = findNodeDockStore(target.nodeId)
+  if (nodeDock) {
+    nodeDock.getState().dockPanel(panelId, 'center')
+    return true
+  }
+  const layout = getNodeDockLayout(target.canvasPanelId, target.nodeId)
+  if (!layout || layout.type !== 'tabs') return false
+  getOrCreateCanvasStoreForPanel(target.canvasPanelId).getState().setNodeDockLayout(target.nodeId, {
+    ...layout,
+    panelIds: [...layout.panelIds, panelId],
+    activeIndex: layout.panelIds.length,
+  })
+  return true
 }
 
 export function openFileAsText(
@@ -141,13 +168,12 @@ function findGroupNodeForExt(
   }
   if (matchingPanelIds.size === 0) return null
 
-  // Scan mounted canvas nodes (those with a live DockStore) for a match.
+  // Scan every canvas node for a match — live per-node DockStore when the node
+  // is mounted, falling back to its persisted dockLayout projection when it's
+  // off-screen (viewport-culled nodes have no live store, but still exist).
   for (const [canvasPanelId, store] of getAllCanvasStoreEntries()) {
-    for (const [nodeId, node] of Object.entries(store.getState().nodes)) {
-      const nodeDock = findNodeDockStore(nodeId)
-      if (!nodeDock) continue
-      // Check all tabs in the node's live center layout (which mirrors node.dockLayout).
-      for (const id of collectPanelIds(nodeDock.getState().zones.center.layout)) {
+    for (const nodeId of Object.keys(store.getState().nodes)) {
+      for (const id of collectPanelIds(getNodeDockLayout(canvasPanelId, nodeId))) {
         if (matchingPanelIds.has(id)) return { nodeId, canvasPanelId }
       }
     }
@@ -185,15 +211,17 @@ export function openFileGrouped(workspaceId: string, filePath: string, position?
   // ext === '' groups all extension-less files (Jenkinsfile, Makefile, etc.).
   const target = findGroupNodeForExt(workspaceId, ext)
   if (target) {
-    const nodeDock = findNodeDockStore(target.nodeId)
-    if (nodeDock) {
-      const opts = MARKDOWN_EXTENSIONS.has(ext) ? { markdownPreview: true } : undefined
-      const panelId = store.createEditor(workspaceId, filePath, position, { target: 'none' }, opts)
-      if (panelId) {
-        nodeDock.getState().dockPanel(panelId, 'center')
+    const opts = MARKDOWN_EXTENSIONS.has(ext) ? { markdownPreview: true } : undefined
+    const panelId = store.createEditor(workspaceId, filePath, position, { target: 'none' }, opts)
+    if (panelId) {
+      if (addPanelToGroupNode(target, panelId)) {
         getOrCreateCanvasStoreForPanel(target.canvasPanelId).getState().focusNode(target.nodeId)
         return panelId
       }
+      // Grouping failed (e.g. an unmounted node with a non-simple layout) —
+      // this panel record was never placed anywhere; discard it rather than
+      // leaving it orphaned, then fall through to the new-node path below.
+      store.removePanelRecord(workspaceId, panelId)
     }
   }
 
@@ -227,14 +255,13 @@ export function openFileAsTextGrouped(workspaceId: string, filePath: string, pos
 
   const target = findGroupNodeForExt(workspaceId, ext)
   if (target) {
-    const nodeDock = findNodeDockStore(target.nodeId)
-    if (nodeDock) {
-      const panelId = store.createEditor(workspaceId, filePath, position, { target: 'none' })
-      if (panelId) {
-        nodeDock.getState().dockPanel(panelId, 'center')
+    const panelId = store.createEditor(workspaceId, filePath, position, { target: 'none' })
+    if (panelId) {
+      if (addPanelToGroupNode(target, panelId)) {
         getOrCreateCanvasStoreForPanel(target.canvasPanelId).getState().focusNode(target.nodeId)
         return panelId
       }
+      store.removePanelRecord(workspaceId, panelId)
     }
   }
   return store.createEditor(workspaceId, filePath, position)
