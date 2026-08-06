@@ -248,7 +248,7 @@ export default function DockTabStack({ stack, zone: zoneProp, renderPanel, getPa
       {/* Tab bar — VS Code style: dark strip with active tab merging into the
           content area below via a top accent border. */}
       <div
-        className={`dock-tab-bar group flex items-center overflow-hidden ${
+        className={`dock-tab-bar flex items-center overflow-hidden ${
           // The canvas header floats: it's positioned absolutely so the canvas
           // content fills the full height BEHIND it, and its background + divider
           // stay transparent until hovered (see .dock-tab-bar-floating in
@@ -312,44 +312,48 @@ export default function DockTabStack({ stack, zone: zoneProp, renderPanel, getPa
           onTabBarMouseDown={onTabBarMouseDown}
         />
 
-        {/* "+" tab — adds a new tab of the active panel's type into this stack. */}
-        {activePanel && (
-          <Tooltip label={`New ${PANEL_TYPE_LABELS[activePanel.type] ?? 'Tab'}`}>
-            <button
-              className={`flex items-center justify-center self-center rounded-[10px] text-muted hover:text-primary hover:bg-hover cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity ${compact ? 'mx-0.5 w-[22px] h-[22px]' : 'mx-1 w-6 h-6'}`}
-              aria-label={`New ${PANEL_TYPE_LABELS[activePanel.type] ?? 'Tab'}`}
-              onClick={() => actions.addTabOfType(activePanel.type)}
-            >
-              <Plus size={compact ? 12 : 13} />
-            </button>
-          </Tooltip>
-        )}
-
-        {/* Split button. Click splits; click-and-hold opens a type picker. */}
-        {activePanelId && (
-          <div className={`relative flex items-center self-center transition-opacity ${splitMenuOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} ${compact ? 'px-0.5' : 'px-1'}`}>
-            <Tooltip label="Split (hold to choose type)">
+        {/* "+"/Split cluster — its own hover scope, separate from the tab row,
+            so reaching for a tab's X close button never also reveals these. */}
+        <div className={`flex items-center self-center transition-opacity ${splitMenuOpen ? 'opacity-100' : 'opacity-0 hover:opacity-100'}`}>
+          {/* "+" tab — adds a new tab of the active panel's type into this stack. */}
+          {activePanel && (
+            <Tooltip label={`New ${PANEL_TYPE_LABELS[activePanel.type] ?? 'Tab'}`}>
               <button
-                ref={splitButtonRef}
-                className={`flex items-center justify-center rounded-[10px] text-muted hover:text-primary hover:bg-hover cursor-pointer ${compact ? 'w-[22px] h-[22px]' : 'w-6 h-6'}`}
-                aria-label="Split (hold to choose type)"
-                onClick={handleSplitClick}
-                onMouseDown={handleSplitMouseDown}
-                onMouseUp={cancelLongPress}
-                onMouseLeave={cancelLongPress}
+                className={`flex items-center justify-center self-center rounded-[10px] text-muted hover:text-primary hover:bg-hover cursor-pointer ${compact ? 'mx-0.5 w-[22px] h-[22px]' : 'mx-1 w-6 h-6'}`}
+                aria-label={`New ${PANEL_TYPE_LABELS[activePanel.type] ?? 'Tab'}`}
+                onClick={() => actions.addTabOfType(activePanel.type)}
               >
-                <Columns size={compact ? 12 : 14} />
+                <Plus size={compact ? 12 : 13} />
               </button>
             </Tooltip>
-            <DockTabContextMenu
-              open={splitMenuOpen}
-              position={splitMenuPos}
-              items={visibleSplitItems}
-              onPick={actions.splitWithType}
-              onClose={() => setSplitMenuOpen(false)}
-            />
-          </div>
-        )}
+          )}
+
+          {/* Split button. Click splits; click-and-hold opens a type picker. */}
+          {activePanelId && (
+            <div className={`relative flex items-center self-center ${compact ? 'px-0.5' : 'px-1'}`}>
+              <Tooltip label="Split (hold to choose type)">
+                <button
+                  ref={splitButtonRef}
+                  className={`flex items-center justify-center rounded-[10px] text-muted hover:text-primary hover:bg-hover cursor-pointer ${compact ? 'w-[22px] h-[22px]' : 'w-6 h-6'}`}
+                  aria-label="Split (hold to choose type)"
+                  onClick={handleSplitClick}
+                  onMouseDown={handleSplitMouseDown}
+                  onMouseUp={cancelLongPress}
+                  onMouseLeave={cancelLongPress}
+                >
+                  <Columns size={compact ? 12 : 14} />
+                </button>
+              </Tooltip>
+              <DockTabContextMenu
+                open={splitMenuOpen}
+                position={splitMenuPos}
+                items={visibleSplitItems}
+                onPick={actions.splitWithType}
+                onClose={() => setSplitMenuOpen(false)}
+              />
+            </div>
+          )}
+        </div>
 
         {/* Host-injected trailing controls (e.g. canvas-node lock/maximize/close) */}
         {trailingControls && (

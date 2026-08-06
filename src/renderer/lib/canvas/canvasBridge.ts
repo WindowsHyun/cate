@@ -10,6 +10,7 @@ import type { PanelType, Point, Size, CanvasNodeId, CanvasNodeState } from '../.
 import { findNodeDockStore } from '../../panels/nodeDockRegistry'
 import { collectPanelIds } from '../../../shared/collectPanelIds'
 import { removePanelFromTree } from '../../stores/dockStore'
+import { findStackContainingPanel } from '../../stores/dockTreeUtils'
 
 // -----------------------------------------------------------------------------
 // Canvas operations callback — the contract createCanvasOps implements, letting
@@ -110,8 +111,27 @@ export function createCanvasOps(storeApi: StoreApi<CanvasStore>): CanvasOperatio
     focusPanelNode(panelId: string) {
       const state = storeApi.getState()
       const nodeId = state.nodeForPanel(panelId)
-      if (nodeId) {
-        state.focusAndCenter(nodeId)
+      if (!nodeId) return
+      state.focusAndCenter(nodeId)
+
+      // focusAndCenter only brings the NODE into view — when panelId is a
+      // background tab in that node's mini-dock (grouped by extension), the
+      // node's currently-active tab stays whatever it was, so the wrong file
+      // shows. Also switch the node's active tab to panelId.
+      const nodeDock = findNodeDockStore(nodeId)
+      if (nodeDock) {
+        const stack = findStackContainingPanel(nodeDock.getState().zones.center.layout, panelId)
+        if (stack) nodeDock.getState().setActiveTab(stack.id, stack.panelIds.indexOf(panelId))
+        return
+      }
+      // Off-screen node has no live store — write the active tab into its
+      // persisted dockLayout projection so the DockStore picks it up as its
+      // initial state whenever the node next mounts (same fallback
+      // addPanelToGroupNode uses in fileRouting.ts).
+      const layout = state.nodes[nodeId]?.dockLayout
+      if (layout?.type === 'tabs') {
+        const idx = layout.panelIds.indexOf(panelId)
+        if (idx >= 0) state.setNodeDockLayout(nodeId, { ...layout, activeIndex: idx })
       }
     },
   }
