@@ -78,6 +78,7 @@ import { registerDragHandlers } from './ipc/dragHandlers'
 import { setMainWindowReady, flushPendingOpenPaths, registerOpenFileHandler } from './lifecycle/openPath'
 import { fireStartupTelemetry, registerTelemetryNoticeHandler } from './lifecycle/telemetry'
 import { registerLifecycleHandlers } from './lifecycle/shutdown'
+import { markQuitCommitted } from './lifecycle/quitConfirm'
 
 // NOTE: runSmokeAssertions only ever runs when CATE_SMOKE_TEST=1. The 1200 ms
 // wait below is part of the smoke-only branch in mainWin.once('ready-to-show')
@@ -914,6 +915,7 @@ app.on('before-quit', (event) => {
   if (!mainWin) {
     // No renderer to save — proceed immediately
     sessionFlushed = true
+    markQuitCommitted()
     return
   }
 
@@ -922,6 +924,12 @@ app.on('before-quit', (event) => {
 
   const proceed = () => {
     sessionFlushed = true
+    // windowFactory's last-main-window 'close' gate checks isQuitCommitted()
+    // before letting Electron tear the window down for real — without this,
+    // that gate never passes and app.quit() bounces against the prevented
+    // close forever (the window closes, isQuitCommitted() is still false,
+    // so it's prevented again, ad infinitum) with no further dialog or log.
+    markQuitCommitted()
     app.quit()
   }
 
