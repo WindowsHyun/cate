@@ -79,11 +79,6 @@ export function createWorkspaceSlice(set: AppSet, get: AppGet): WorkspaceSliceAc
         const existing = get().workspaces.find((w) => w.id === id)
         if (existing) return existing.id
       }
-      const existingCount = get().workspaces.length
-      if (!id && existingCount >= 10) {
-        // Cap at 10 workspaces — no-op, return current selection
-        return get().selectedWorkspaceId || get().workspaces[0]?.id || ''
-      }
       const ws = createDefaultWorkspace(name, rootPath, id, connection)
 
       // Note: the new workspace starts with an empty panels map and its own (empty)
