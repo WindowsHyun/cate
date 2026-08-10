@@ -148,7 +148,7 @@ export function useWorkspacePanels(): Record<string, PanelState> | undefined {
   )
 }
 
-/** Returns workspaces array, re-rendering on add/remove/reorder and metadata changes (name, color, rootPath). */
+/** Returns workspaces array, re-rendering on add/remove/reorder and metadata changes (name, color, rootPath, group). */
 export function useWorkspaceList(): WorkspaceState[] {
   return useStoreWithEqualityFn(
     useAppStore,
@@ -160,6 +160,7 @@ export function useWorkspaceList(): WorkspaceState[] {
       x.rootPath === y.rootPath &&
       x.rootPathError === y.rootPathError &&
       x.isRootPathPending === y.isRootPathPending &&
+      x.groupId === y.groupId &&
       x.runtime?.phase === y.runtime?.phase &&
       x.runtime?.error === y.runtime?.error,
     ),
