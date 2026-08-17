@@ -1,7 +1,16 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+
+let mockCommand: string | null = null
+vi.mock('child_process', () => ({
+  execFileSync: vi.fn(() => {
+    if (mockCommand === null) throw new Error('no such process')
+    return mockCommand
+  }),
+}))
+
 import {
   acquireProjectLock,
   releaseProjectLock,
@@ -19,6 +28,7 @@ describe('projectLock', () => {
 
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'cate-lock-'))
+    mockCommand = null
   })
   afterEach(() => {
     releaseAllProjectLocks()
@@ -36,11 +46,29 @@ describe('projectLock', () => {
     expect(acquireProjectLock(root)).toBe(true)
   })
 
-  it('refuses a lock held by a live pid', () => {
+  it('refuses a lock held by a live pid whose process is Cate/Electron', () => {
     // The parent process is alive for the test and isn't our own pid.
+    mockCommand = '/Applications/Cate.app/Contents/MacOS/Cate'
     writeOwner(process.ppid)
     expect(acquireProjectLock(root)).toBe(false)
     expect(holdsProjectLock(root)).toBe(false)
+  })
+
+  // Regression: a stale lock's pid can be reassigned by the OS to an unrelated
+  // process (a system service, some other app) long after the Cate that wrote
+  // it quit. Treating ANY live pid as "still the owner" made the "another
+  // instance has this open" warning reappear forever, even with only one Cate
+  // running. The pid must actually BE a Cate/Electron process to count.
+  it('reclaims a lock whose live pid is not a Cate/Electron process (PID reuse)', () => {
+    mockCommand = '/System/Library/Frameworks/ExtensionFoundation.framework/.../extensionkitservice'
+    writeOwner(process.ppid)
+    expect(acquireProjectLock(root)).toBe(true)
+  })
+
+  it('reclaims a lock when the owning pid\'s identity cannot be verified (fails open)', () => {
+    mockCommand = null // ps/tasklist unavailable or errors
+    writeOwner(process.ppid)
+    expect(acquireProjectLock(root)).toBe(true)
   })
 
   it('release deletes our lock file', () => {
